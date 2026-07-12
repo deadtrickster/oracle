@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "codebase-memory": {
+      "command": "/home/dead/.local/bin/codebase-memory-mcp"
+    },
+    "source-grep": {
+      "type": "sse",
+      "url": "http://localhost:9751/sse"
+    },
+    "oracle-ask": {
+      "type": "sse",
+      "url": "http://localhost:9755/sse"
+    },
+    "oracle-lsp": {
+      "type": "sse",
+      "url": "http://localhost:9756/sse"
+    }
+  }
+}

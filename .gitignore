@@ -1,0 +1,16 @@
+# Materialized doc corpus (2.6 GB, rebuildable from fetch-corpus.sh) — never commit.
+corpus/
+
+# RAGFlow is an external clone pinned to v0.26.4 (see DESIGN.md); our patches to it are
+# bind-mounted, documented in OPERATIONS.md — the clone itself is not part of this repo.
+ragflow/
+
+# Python bytecode / caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Local venvs / tool state
+.venv/
+.mypy_cache/
+.ruff_cache/
