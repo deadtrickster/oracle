@@ -81,7 +81,12 @@ KBS = [
         "go/books-oss/learninggo/tab/*.md",
         "go/books-oss/Go-SCP/src/**/*.md",
         "go/books-oss/web-dev-golang-anti-textbook/manuscript/*.md",
+        "go/stdlib/*.txt",   # Go standard library API reference (go doc -all, 2026-07-12)
     ]),
+    ("cpp", "naive", ["cpp/md/**/*.md"]),              # cppreference C & C++ (sanitized HTML->md)
+    ("cpp-libs", "naive", ["cpp-libs/**/*.md", "cpp-libs/**/*.rst"]),  # serenedb deps: abseil/fmt/simdjson/faiss
+    ("duckdb", "naive", ["duckdb-web/docs/**/*.md"]),  # DuckDB docs (the serenedb engine)
+    ("kubernetes", "naive", ["kubernetes/**/*.md"]),   # k8s docs (kubernetes/website content/en/docs)
     ("emacs", "naive", ["emacs/*.txt"]),
     ("postgres", "naive", [
         "postgres/readmes/*.txt", "postgres/*.md", "postgres/README*",

@@ -136,5 +136,39 @@ echo "     (official PG17 manual · Rogov 'PG Internals' · Suzuki 'The Internal
 OB=$HOME/Projects/orioledb/orioledb
 [ -d "$OB" ] && { cp "$OB"/README* corpus/postgres/ 2>/dev/null; find "$OB/doc" -name '*.md' 2>/dev/null -exec cp {} corpus/postgres/ \; ; echo "  ✓ OrioleDB own README/docs (storage + undo design)"; }
 
+# ============ 2026-07-12 additions: C/C++, DuckDB, Go stdlib, Kubernetes ============
+echo "== C/C++ reference (cppreference offline archive → sanitized markdown) =="
+mkdir -p corpus/cpp
+curl -fsSL -o /tmp/cppref.tar.xz \
+  https://github.com/PeterFeicht/cppreference-doc/releases/download/v20250209/html-book-20250209.tar.xz \
+  && tar -xf /tmp/cppref.tar.xz -C corpus/cpp/ && echo "  ✓ cppreference HTML" || echo "  ! cppreference fetch failed"
+( cd "$ROOT" && uv run sanitize-cppref.py ) && echo "  ✓ sanitized → corpus/cpp/md" || echo "  ! run sanitize-cppref.py by hand"
+
+echo "== serenedb C++ deps — docs only =="
+cpplib(){ t=$(mktemp -d); git clone --depth 1 -q "$1" "$t" 2>/dev/null || { echo "  ! $2"; return; }
+  mkdir -p "corpus/cpp-libs/$2"; for d in doc docs documentation; do [ -d "$t/$d" ] && cp -r "$t/$d/." "corpus/cpp-libs/$2/" 2>/dev/null; done
+  find "$t" -maxdepth 1 -name '*.md' -exec cp {} "corpus/cpp-libs/$2/" \; 2>/dev/null; rm -rf "$t"; echo "  ✓ $2"; }
+cpplib https://github.com/simdjson/simdjson              simdjson
+cpplib https://github.com/fmtlib/fmt                     fmt
+cpplib https://github.com/google/re2                     re2
+cpplib https://github.com/facebookresearch/faiss.wiki.git faiss
+cpplib https://github.com/abseil/abseil.github.io        abseil
+
+echo "== DuckDB docs (the serenedb engine) =="
+clone https://github.com/duckdb/duckdb-web              corpus/duckdb-web
+
+echo "== Go standard library API (go doc -all) =="
+mkdir -p corpus/go/stdlib
+for pkg in $(go list std 2>/dev/null | grep -vE 'internal|vendor'); do
+  go doc -all "$pkg" > "corpus/go/stdlib/$(echo "$pkg" | tr '/' '.').txt" 2>/dev/null
+done
+echo "  ✓ $(find corpus/go/stdlib -name '*.txt' 2>/dev/null | wc -l) go stdlib packages"
+
+echo "== Kubernetes docs (kubernetes/website, English markdown) =="
+t=$(mktemp -d); git clone --depth 1 -q https://github.com/kubernetes/website "$t" 2>/dev/null \
+  && { mkdir -p corpus/kubernetes; cp -r "$t/content/en/docs/." corpus/kubernetes/ 2>/dev/null
+       find corpus/kubernetes -type f ! -name '*.md' -delete 2>/dev/null; find corpus/kubernetes -type d -empty -delete 2>/dev/null; }
+rm -rf "$t"; echo "  ✓ $(find corpus/kubernetes -name '*.md' 2>/dev/null | wc -l) k8s docs"
+
 echo; echo "DONE. Corpus sizes:"; du -sh corpus/* 2>/dev/null | sed 's/^/  /'
 echo "Next: point RAGFlow at corpus/ (Step 4). Personal files (bookmarks/papers/books): Step 3b."

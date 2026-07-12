@@ -11,10 +11,22 @@ Read-only. Tolerant of RAGFlow being slow under parse load (per-request retries)
 """
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+
+def expected_kbs():
+    """KB names declared in ingest-corpus.py, so KBs defined but not yet created in
+    RAGFlow (e.g. cpp/cpp-libs mid-ingest) still show up as pending instead of vanishing."""
+    try:
+        src = (Path(__file__).parent / "ingest-corpus.py").read_text()
+        return re.findall(r'^\s*\(\s*"([a-z0-9_-]+)"\s*,\s*"(?:naive|book|paper)"', src, re.M)
+    except Exception:
+        return []
 
 BASE = os.environ.get("ORACLE_RAGFLOW_URL", "http://localhost:9380")
 KEY = os.environ.get("ORACLE_RAGFLOW_KEY",
@@ -103,6 +115,15 @@ def main():
     frac = tot_done / tot_docs if tot_docs else 1
     print(f"{'TOTAL':16}{tot_done:>6}/{tot_docs:<5} {tot_chunks:>8}  {bar(frac)} {frac*100:3.0f}%")
     print(f"states: {grand}")
+    # surface KBs with no rows yet — the table above skips 0-doc datasets, so cpp/cpp-libs
+    # mid-ingest (created-but-empty) or still-uncreated would otherwise vanish.
+    present = {d["name"] for d, dd, e in results if e is None}
+    empty = sorted(d["name"] for d, dd, e in results if e is None and not dd)
+    pending = [k for k in expected_kbs() if k not in present]
+    if empty:
+        print(f"empty (created, no docs yet): {', '.join(empty)}")
+    if pending:
+        print(f"not created yet (defined in ingest-corpus.py): {', '.join(pending)}")
     if failed:
         print(f"\n⚠ {len(failed)} FAILED/CANCELLED:")
         for name, dn, msg in failed[:20]:
