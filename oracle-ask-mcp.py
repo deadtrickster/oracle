@@ -110,13 +110,27 @@ def ask_corpus(question: str) -> str:
 
 # --------------------------------------------------------------- ask_code
 
-def _qwen(system: str, user: str) -> str:
-    r = requests.post(f"{OLLAMA}/api/chat", timeout=300, json={
+def _qwen(system: str, user: str, timeout: int = 240) -> str:
+    r = requests.post(f"{OLLAMA}/api/chat", timeout=timeout, json={
         "model": SYNTH_MODEL, "stream": False,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "options": {"temperature": 0.1}})
     r.raise_for_status()
     return r.json()["message"]["content"].strip()
+
+
+_STOP = {"what", "does", "do", "the", "list", "each", "with", "its", "and", "for", "how",
+         "is", "are", "of", "define", "defines", "defined", "new", "type", "types", "record",
+         "records", "code", "codes", "numeric", "struct", "fields", "format", "have", "has",
+         "in", "a", "an", "on", "disk", "layout", "value", "values", "where", "which", "that"}
+
+
+def _heuristic_patterns(question: str) -> list[str]:
+    """Cheap pattern extraction when the LLM derivation times out — pull identifier-ish
+    tokens (snake_case / CamelCase / ALLCAPS) from the question."""
+    toks = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", question)
+    ident = [t for t in toks if ("_" in t or any(c.isupper() for c in t)) and t.lower() not in _STOP]
+    return (ident or [t for t in toks if t.lower() not in _STOP])[:4]
 
 
 _NOISE_GLOBS = ["*.svg", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.ico", "*.webp", "*.bmp",
@@ -170,36 +184,162 @@ def _resolve_project(project: str) -> Path | None:
     return _descend(PROJECTS, rem.split("-")) if rem else None
 
 
+GRAPH_URL = os.environ.get("ORACLE_GRAPH_URL", "http://localhost:9750/sse")
+_graph_projects_cache: list | None = None
+
+
+def _graph_call(tool: str, args: dict, timeout: int = 45) -> str:
+    """Call a codebase-memory graph tool over its SSE bridge; '' on any failure so the
+    caller degrades to grep. Runs its own event loop (ask_code runs in a worker thread)."""
+    import asyncio
+    from mcp import ClientSession
+    from mcp.client.sse import sse_client
+
+    async def _run():
+        async with sse_client(GRAPH_URL) as (r, w):
+            async with ClientSession(r, w) as s:
+                await s.initialize()
+                res = await asyncio.wait_for(s.call_tool(tool, args), timeout)
+                return res.content[0].text if res.content else ""
+    try:
+        return asyncio.run(_run())
+    except RuntimeError:  # unexpectedly inside a loop -> isolate in a fresh thread
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(1) as ex:
+            return ex.submit(lambda: asyncio.run(_run())).result(timeout + 10)
+    except Exception:
+        return ""
+
+
+def _graph_projects() -> list:
+    """Cached list of (slug, root_path) for indexed graph projects."""
+    global _graph_projects_cache
+    if _graph_projects_cache is None:
+        try:
+            data = json.loads(_graph_call("list_projects", {}, timeout=20) or "{}")
+            _graph_projects_cache = [(p.get("name"), p.get("root_path", "")) for p in data.get("projects", [])]
+        except Exception:
+            _graph_projects_cache = []
+    return _graph_projects_cache
+
+
+def _graph_has(slug: str) -> bool:
+    return any(n == slug for n, _ in _graph_projects())
+
+
+def _nested_slugs(root: Path, main_slug: str | None) -> list[str]:
+    """Indexed graph projects physically UNDER `root` (e.g. git submodules) — so a query
+    scoped to a parent repo also reaches an embedded engine indexed as its own project
+    (serenedb → its vendored duckdb)."""
+    rp = str(root).rstrip("/") + "/"
+    return [n for n, p in _graph_projects() if p and p.rstrip("/").startswith(rp) and n != main_slug]
+
+
+def _graph_tier(slug: str, question: str, patterns: list[str]) -> str:
+    """Semantic tier: search_graph (NL discovery) → get_code_snippet (the actual BODIES of
+    the top hits, so the model reads real logic not just signatures) + search_code (catches
+    macro/text the node index misses). Returns source-ish context."""
+    out, snippets, nodes, seen = [], [], [], set()
+
+    def _add(res):
+        for n in res or []:
+            qn = n.get("qualified_name")
+            if qn and qn not in seen:
+                seen.add(qn)
+                nodes.append(n)
+    try:
+        # (1) BM25 on the question + (2) semantic vector search (bridges vocabulary — needs a
+        # moderate/full index; empty on a fast index) + (3) name_pattern from the derived terms
+        # (catches e.g. *Shred* nodes the question doesn't name lexically).
+        sq = [w for w in re.findall(r"[a-zA-Z]{4,}", question.lower()) if w not in _STOP][:6]
+        g = json.loads(_graph_call("search_graph", {"project": slug, "query": question,
+                                                    "semantic_query": sq, "limit": 8}) or "{}")
+        _add(g.get("results"))
+        _add(g.get("semantic_results"))
+        if patterns:
+            npat = ".*(" + "|".join(p.strip("^$ ") for p in patterns[:4] if p.strip()) + ").*"
+            _add(json.loads(_graph_call("search_graph", {"project": slug, "name_pattern": npat,
+                                                        "limit": 8}) or "{}").get("results"))
+        nodes = nodes[:12]
+        for n in nodes:
+            sig = (n.get("signature") or "").replace("\n", " ")[:120]
+            doc = (n.get("docstring") or "").replace("\n", " ").strip()[:90]
+            out.append(f"{n.get('label','')} {n.get('name','')}{sig} -> {n.get('return_type','')}"
+                       f"  [{n.get('file_path','')}]" + (f"  // {doc}" if doc else ""))
+        for n in nodes[:3]:  # pull the real source of the top-ranked hits
+            qn = n.get("qualified_name")
+            if not qn:
+                continue
+            src = _graph_call("get_code_snippet", {"project": slug, "qualified_name": qn}, timeout=25)
+            if src and not src.strip().startswith("{"):
+                snippets.append(f"# source of {n.get('name','')} [{n.get('file_path','')}]:\n{src[:1500]}")
+    except Exception:
+        pass
+    if patterns:
+        sc = _graph_call("search_code", {"project": slug, "pattern": patterns[0],
+                                         "regex": True, "mode": "compact", "limit": 8})
+        if sc and not sc.strip().startswith("{"):
+            out.append("# search_code:\n" + sc[:2000])
+    body = "\n".join(x for x in out if x.strip())
+    if snippets:
+        body += "\n\n" + "\n\n".join(snippets)
+    return body
+
+
 @mcp.tool()
 def ask_code(question: str, project: str = "") -> str:
     """Answer a SOURCE-CODE question GROUNDED in the actual code under ~/Projects
     (e.g. "what WAL record types does orioledb have", "how is struct X laid out",
     "where is Y implemented"). Use this for questions about a codebase's OWN source —
     exact structs/enums/macros/functions — which the documentation corpus (ask_corpus)
-    does NOT contain. It derives search patterns, greps the source, reads the matches,
-    and synthesizes an answer with file:line citations, or says it's not in the source.
-    `project` optionally scopes to one repo under ~/Projects — either a relative path
-    ("orioledb/orioledb-postgres") OR a codebase-memory project id
-    ("home-dead-Projects-orioledb-orioledb-postgres"); empty = search all projects."""
+    does NOT contain. It runs a graceful-degradation search — the semantic code graph
+    (when the project is indexed) PLUS anchored grep — reads the matches, and synthesizes
+    with file:line citations + a RAW SOURCE block, or says it's not in the source.
+    ALWAYS pass `project` when you know which repo the question is about: it enables the
+    fast semantic tier and keeps grep scoped (an all-repo search is slow and may time out).
+    `project` is a relative path ("orioledb/orioledb-postgres") OR a codebase-memory id
+    ("home-dead-Projects-orioledb-orioledb-postgres"); empty = grep all repos (grep only)."""
     root = PROJECTS
+    slug = None
     if project:
         cand = _resolve_project(project)
         if cand is None:
             return f"error: project not found under ~/Projects (tried path + code-graph id): {project}"
         root = cand
+        slug = str(cand).lstrip("/").replace("/", "-")  # code-graph project id
     # 1. derive grep patterns from the natural-language question
     try:
         raw = _qwen(
-            "You turn a code question into ripgrep search patterns. Output ONLY 1-4 patterns, "
-            "one per line, no prose. Prefer exact identifiers/symbols/macros likely in the source "
-            "(e.g. WAL_REC, XLogInsert, struct FooBar). Patterns are case-insensitive regex.",
-            f"Question: {question}")
-        patterns = [p.strip() for p in raw.splitlines() if p.strip() and len(p.strip()) < 80][:4]
-    except Exception as e:
-        return f"error deriving search terms: {e}"
+            "Turn the user's code question into 2-5 case-insensitive ripgrep regex patterns that "
+            "locate the relevant DEFINITION(S) in source. Output ONLY the patterns, one per line, "
+            "no prose. CRITICAL: derive every pattern from THIS question's own terms — the specific "
+            "types, functions, macros, or concepts it names or implies. NEVER output a generic "
+            "placeholder ('Name', 'FooBar') or an example token from these instructions; always "
+            "substitute the real identifier from the question. Shape guidance: for a struct/enum/"
+            "typedef use 'struct <RealName>' / 'enum <RealName>'; if it asks to LIST entries likely "
+            "defined by an X-macro/table, include that table's invocation '<RealMacro>\\('; otherwise "
+            "use the distinctive identifier or its prefix. No line-start '^' anchor (defs are often "
+            "indented).",
+            f"Question: {question}", timeout=120)
+        bad = {"name", "foobar", "realname", "realmacro"}
+        patterns = [p.strip() for p in raw.splitlines()
+                    if p.strip() and len(p.strip()) < 80
+                    and not any(b in p.strip().lower() for b in bad)][:5]
+    except Exception:
+        patterns = []  # LLM slow/unavailable -> fall back to heuristics, never hard-fail
     if not patterns:
-        patterns = [re.sub(r"[^\w]+", ".*", question)[:60]]
-    # 2. grep the source
+        patterns = _heuristic_patterns(question) or [re.sub(r"[^\w]+", ".*", question)[:60]]
+    # 2. TIER 1 — code graph (semantic; works for C/C++ where LSP can't). Only when the scoped
+    #    project is actually indexed; graph search needs a project, so skip it for all-repo asks.
+    graph_ctx = ""
+    if slug and _graph_has(slug):
+        graph_ctx = _graph_tier(slug, question, patterns)
+    if slug:  # also consult indexed submodules under this repo (e.g. serenedb's duckdb)
+        for ns in _nested_slugs(root, slug):
+            extra = _graph_tier(ns, question, patterns)
+            if extra:
+                graph_ctx += f"\n# nested project {ns}:\n{extra}"
+    # 3. TIER 2 — anchored grep (the floor; catches X-macro tables and un-indexed repos)
     hits, seen = [], 0
     for p in patterns:
         h = _rg(p, root)
@@ -209,26 +349,61 @@ def ask_code(question: str, project: str = "") -> str:
         if seen > 700:
             break
     blob = "\n\n".join(hits)[:16000]
-    if not blob.strip():
-        return f"Not found in the source under {root.name} (patterns tried: {patterns})."
-    # 3. synthesize grounded answer
-    ans = _qwen(
-        "Answer the question using ONLY these source-code excerpts (file:line prefixed). Quote "
-        "exact identifiers/values/struct fields VERBATIM and cite file:line. CRITICAL: read every "
-        "numeric value LITERALLY from the source — in a table like X(NAME, 7, ...) or NAME = 7, the "
-        "code is exactly that number (the literal argument/RHS), NEVER a sequential position; do "
-        "not renumber, reorder, infer, or skip entries. If the question asks for an enumeration "
-        "(types, codes, fields, flags), find the DEFINITION (enum / #define / X-macro table / "
-        "struct) and reproduce EVERY entry exactly as written. If the excerpts don't answer it, say "
-        "'Not found in the source.' Never invent.",
-        f"Question: {question}\n\nSource excerpts:\n{blob}")
+    if not graph_ctx and not blob.strip():
+        base = f"Not found in the source under {root.name}" if project else "Not found in the source"
+        return f"{base} (patterns tried: {patterns})."
+    # 4. synthesize from whichever tier(s) produced signal
+    context = ""
+    if graph_ctx:
+        context += "# CODE GRAPH (semantic — functions/structs + their source, file:line):\n" + graph_ctx[:12000] + "\n\n"
+    if blob.strip():
+        context += "# GREP (raw source lines):\n" + blob
+    # Stage 1 — DISTILL: a focused reduce over the raw gathered context, keeping only evidence
+    # relevant to THIS question. Works around weak-model focus + context length: the retrieval
+    # drags in noise (unrelated std::variant/library hits), and a single-pass answer anchors on
+    # it. This pass throws the noise away and quotes the KEY code (a gate/flag, a sort/order, a
+    # size check) with file:line, so the answer pass reasons over signal only.
+    focused = context
+    try:
+        focused = _qwen(
+            "You are given raw code excerpts (a semantic graph view with function SOURCE bodies, "
+            "and grep hits). Extract ONLY what is directly relevant to answering the question. Quote "
+            "the exact relevant lines WITH their file:line. DISCARD unrelated matches — e.g. generic "
+            "std::variant/library usage that is not the feature asked about, unrelated files. When a "
+            "relevant function body reveals the KEY logic (a size/threshold check, an ordering or "
+            "sort, a gate/flag, an enum/table of values), quote that specific code verbatim. Output "
+            "only the extracted evidence (with file:line), no conclusion yet. If truly nothing is "
+            "relevant, output 'NONE'.",
+            f"Question: {question}\n\n{context}", timeout=150)
+        if len(focused.strip()) < 40 or focused.strip() == "NONE":
+            focused = context  # distilled to nothing -> fall back to raw context
+    except Exception:
+        focused = context
+    # Stage 2 — ANSWER from the distilled evidence only
+    try:
+        ans = _qwen(
+            "Answer the question using ONLY this evidence (file:line prefixed). Quote exact "
+            "identifiers/values/fields VERBATIM and cite file:line. CRITICAL: read every numeric "
+            "value LITERALLY — in a table like X(NAME, 7, ...) or NAME = 7 the code is exactly that "
+            "number (the literal argument/RHS), NEVER a sequential position; do not renumber, "
+            "reorder, infer, or skip entries. For an enumeration (types/codes/fields/flags) "
+            "reproduce EVERY entry exactly. If the evidence shows a nuance (e.g. order is NOT "
+            "preserved, a feature is size-gated, a decoder is missing), state it plainly and cite "
+            "the exact code. If the evidence doesn't answer it, say 'Not found in the source.' "
+            "Never invent.",
+            f"Question: {question}\n\nRelevant evidence:\n{focused}")
+    except Exception:
+        ans = ("(synthesis model timed out — grounded evidence below; read it literally)\n\n"
+               + focused[:6000])
     # Attach the raw definition-ish lines so the caller can verify qwen's synthesis (qwen can
     # misread value tables even when grounded). Prefer header lines with a literal number.
     raw_lines = [ln for ln in blob.splitlines()
                  if re.search(r"\.h[:-]\d+[:-].*(=\s*\d+|,\s*\d+\s*,|#define)", ln)][:40]
     verify = ("\n\nRAW SOURCE (verify against this — authoritative over the summary):\n"
               + "\n".join(raw_lines)) if raw_lines else ""
-    return (f"{ans}{verify}\n\n---\nGrounded in source under: "
+    tiers = ("code-graph+grep" if graph_ctx and blob.strip()
+             else "code-graph" if graph_ctx else "grep")
+    return (f"{ans}{verify}\n\n---\nGrounded [{tiers}] in source under: "
             f"{root.relative_to(PROJECTS.parent)} (patterns: {', '.join(patterns)})")
 
 

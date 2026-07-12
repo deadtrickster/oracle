@@ -132,9 +132,14 @@ intent-level review. The LLM chooses among *real* refactors, not imagined ones.
 - **`ingestor` agent**: point it at a folder/PDF/URL → it classifies, routes, and ingests
   autonomously (self-contained ingestion; the system feeds itself).
 - **Local Claude Code** (`claude-local.sh`): the *full Claude Code harness* driven by offline
-  qwen via Ollama's native Anthropic API. MCP-wired to codebase-memory + `oracle-ask`
-  (`ask_corpus`/`ask_code`) + `oracle-lsp`. An appended **discipline prompt** — precision over
-  speed, never answer from weights — is the "prompt loop" that makes a weak model behave: it
+  qwen, via a thin local **shim** (`oracle-claude-shim.py`, :11435) that speaks the Anthropic
+  Messages API to Claude Code and translates to Ollama's OpenAI endpoint — necessary because
+  Ollama's *Anthropic streaming* endpoint mangles ~33% of qwen's tool calls under load (§8). The
+  shim also **salvages** any tool call qwen leaks as text, taking the residual failure rate to ~0.
+  MCP-wired to codebase-memory + `oracle-ask` (`ask_corpus`/`ask_code`) + `oracle-lsp` (the
+  codebase-memory tool set is trimmed to the read/query tools to shrink a weak model's surface).
+  An appended **discipline prompt** — precision over speed, never answer from weights — is the
+  "prompt loop" that makes a weak model behave: it
   **routes by question type**: documentation/concept/library-API → `ask_corpus`; a repo's own
   source facts → `ask_code`/the code graph; an *exact* symbol type/value → `lsp_hover`; a
   refactor → `lsp_code_actions`/`suggest_refactor`. The same routing is saved as a memory so my
@@ -155,6 +160,7 @@ All read-only or query-only, bridged stdio→SSE via mcp-proxy, systemd user ser
 | oracle-ask | 9755 | `ask_corpus` (docs) + `ask_code` (source) grounded Q&A |
 | oracle-lsp | 9756 | rust-analyzer/clangd/gopls/pyright: hover/def/refs/symbols + code actions + `suggest_refactor` |
 | reranker | 9760 | GTE cross-encoder HTTP (Jina rerank API) |
+| claude-shim | 11435 | Anthropic↔OpenAI translation + tool-call salvage for local Claude Code (not MCP; an API shim) |
 
 ## 8. Key decisions & rationale (the non-obvious ones)
 
@@ -172,6 +178,31 @@ All read-only or query-only, bridged stdio→SSE via mcp-proxy, systemd user ser
   timeout → cap top_k to 64; `ask_corpus` falls back to embedding order if the reranker is busy.
 - **Local Claude Code patch:** MCP tools in the RAGFlow *chat* (not just agents) via a bind-mounted
   `mcp_chat_tools.py` + `dialog_service.py` hook.
+- **C/C++ LSP: drive clangd directly, not via multilspy.** multilspy (the Python LSP client)
+  only wraps a fixed allow-list — `rust, go, python, java, typescript, …` but **no C/C++** — so
+  the whole DB-internals corpus (all C/C++) had no LSP tier. But clangd is installed (it's what the
+  user's Emacs/eglot drives, via mise), so `oracle-lsp` ships a ~120-line raw stdio LSP client
+  (`ClangdClient`) for C/C++ and keeps multilspy for the languages it does support. hover/def/refs/
+  symbols/code-actions work immediately per-file; `workspace/symbol` serves once clangd's background
+  index warms. Caveat that still routes to grep: X-macro-generated members (`WAL_REC_*`, `PG_RMGR`)
+  aren't LSP symbols, and the PG fork lacks `compile_commands.json`.
+- **Embedding batch size is the throughput knob — 16 → 64 was ~8×.** Ingestion crawled; the
+  parse backlog wouldn't drain. Measured: bge-m3@Ollama is *overhead*-bound, not GPU-bound (the
+  card sits at ~0% during embed). At RAGFlow's default batch 16 it does ~12 chunks/s; at 64,
+  ~100 chunks/s (plateaus there — 256 is no better). Parallel requests are *slower* (Ollama
+  serializes GPU work: 52 chunks/s at ×4, 33 at ×8), so `OLLAMA_NUM_PARALLEL` is the wrong lever.
+  Fix: `EMBEDDING_BATCH_SIZE=64` (`.env`) **and** patch `OllamaEmbed.encode` to honor it instead
+  of re-splitting to 16 (both caps gated it). Per-batch embed time dropped from 300–550 s to ~2 s.
+- **A shim after all — Ollama's Anthropic *streaming* endpoint mangles tool calls.** The original
+  design ran Claude Code straight at Ollama's native Anthropic API, "no proxy." Measured under load
+  (14 tools + big prompt, 6+ runs per cell): Anthropic **streaming** leaks qwen's tool call as raw
+  `<function=...>` text **~33%** of the time; Anthropic non-streaming and OpenAI-streaming are both
+  ~0%. Claude Code only speaks streaming-Anthropic, so it hits the broken path. And 0.31.2 is the
+  latest Ollama — no upstream fix to wait for. Fix: a thin **shim** translating to Ollama's OpenAI
+  endpoint (the robust path) with real streaming. Even the OpenAI endpoint leaks ~5% under load, so
+  the shim adds a **salvage parser** that recovers qwen's leaked `<function=NAME><parameter=…>` XML
+  (or a `<tool_call>{json}`) into a proper `tool_use` — net ~0% failures. Lesson: "no proxy" was an
+  aesthetic, not a requirement; correctness beat it.
 
 ## 9. Lessons (transferable beyond this box)
 

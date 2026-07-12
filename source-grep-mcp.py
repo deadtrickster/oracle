@@ -121,7 +121,32 @@ def source_search(pattern: str, path: str = "", glob: str = "", max_count: int =
             counts.append((int(n), p.replace(str(PROJECTS_ROOT) + "/", "")))
     total = sum(n for n, _ in counts)
     if total == 0:
-        return "no matches"
+        # Zero here — if a path filter was set, the symbol may live in ANOTHER repo. Probe all
+        # projects and REDIRECT, instead of letting the caller narrow further into a dead end
+        # (the classic "searched the PG fork for an extension-only symbol" flail).
+        if path:
+            try:
+                wide = subprocess.run([RG, "-c", "--color", "never", *noise,
+                                       "--regexp", pattern, str(PROJECTS_ROOT)],
+                                      capture_output=True, text=True, timeout=30)
+                wc = []
+                for ln in wide.stdout.splitlines():
+                    p, _, n = ln.rpartition(":")
+                    if n.isdigit():
+                        wc.append((int(n), p.replace(str(PROJECTS_ROOT) + "/", "")))
+                if wc:
+                    wc.sort(reverse=True)
+                    tot = sum(n for n, _ in wc)
+                    top = "\n".join(f"  {n:>4}  {p}" for n, p in wc[:12])
+                    return (f"no matches under '{path}' — but /{pattern}/ matches {tot}x "
+                            f"elsewhere under ~/Projects. You're likely scoped to the WRONG repo; "
+                            f"drop or change `path` (e.g. an OrioleDB-specific symbol lives in the "
+                            f"extension `orioledb/orioledb`, not the PG fork). Where it occurs:\n{top}")
+            except Exception:
+                pass
+        return ("no matches" + (f" (searched all of ~/Projects; try a simpler/looser pattern — a "
+                                f"bare identifier or a substring, not an `enum X`/multi-term "
+                                f"alternation)" if not path else ""))
     if total > 150 or len(counts) > 30:
         counts.sort(reverse=True)
         top = "\n".join(f"  {n:>5}  {p}" for n, p in counts[:20])

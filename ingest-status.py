@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 BASE = os.environ.get("ORACLE_RAGFLOW_URL", "http://localhost:9380")
 KEY = os.environ.get("ORACLE_RAGFLOW_KEY",
@@ -63,11 +64,18 @@ def main():
     active, failed = [], []
     print(f"{'dataset':16}{'done/total':>12} {'chunks':>8}  progress")
     print("-" * 66)
-    for d in sorted(ds, key=lambda x: x["name"]):
+    # fetch every dataset's documents concurrently — RAGFlow is slow under parse load and
+    # serial pagination over thousands of docs is what makes this "hang" before printing.
+    def fetch(d):
         try:
-            docs = docs_of(d["id"])
+            return d, docs_of(d["id"]), None
         except Exception as e:  # noqa: BLE001
-            print(f"{d['name'][:16]:16}  (listing failed: {e})")
+            return d, None, e
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(fetch, sorted(ds, key=lambda x: x["name"])))
+    for d, docs, err in results:
+        if err is not None:
+            print(f"{d['name'][:16]:16}  (listing failed: {err})")
             continue
         states = {}
         for doc in docs:

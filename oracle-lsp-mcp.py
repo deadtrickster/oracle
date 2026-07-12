@@ -33,9 +33,12 @@ file paths are absolute or ~/Projects-relative; line/col are 1-indexed (LSP is 0
 internally). Language + project root are inferred from the path.
 """
 import asyncio
+import json
 import os
 import pathlib
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import requests
@@ -50,8 +53,136 @@ SYNTH_MODEL = os.environ.get("ORACLE_SYNTH_MODEL", "qwen3-coder:30b")
 EXT_LANG = {".rs": "rust", ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp",
             ".hpp": "cpp", ".go": "go", ".py": "python"}
 
+CLANGD = os.environ.get("ORACLE_CLANGD", "clangd")
 mcp = FastMCP("oracle-lsp")
-_servers: dict[str, SyncLanguageServer] = {}  # cache: repo_root -> started server
+_servers: dict = {}  # cache: (repo_root, lang) -> started server (multilspy or clangd client)
+
+
+class ClangdClient:
+    """Minimal raw LSP client over stdio for clangd — multilspy has no C/C++ server, but
+    clangd is exactly what the user's Emacs (eglot) drives. Synchronous request/response
+    via a background reader thread. Exposes the same request_* method names as multilspy's
+    SyncLanguageServer so the tool bodies don't care which backend answers."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        args = [CLANGD, "--background-index", "--log=error", "-j=4"]
+        if (root / "compile_commands.json").exists():
+            args.append(f"--compile-commands-dir={root}")
+        self.proc = subprocess.Popen(args, cwd=str(root), stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        self._id = 0
+        self._wlock = threading.Lock()
+        self._pending: dict = {}
+        self._opened: set = set()
+        threading.Thread(target=self._reader, daemon=True).start()
+        self._request("initialize", {
+            "processId": os.getpid(), "rootUri": root.as_uri(),
+            "capabilities": {"textDocument": {"hover": {"contentFormat": ["markdown", "plaintext"]},
+                                              "definition": {}, "references": {},
+                                              "documentSymbol": {"hierarchicalDocumentSymbolSupport": False}},
+                             "workspace": {"symbol": {}}}}, timeout=60)
+        self._notify("initialized", {})
+
+    def _frame(self, obj):
+        data = json.dumps(obj).encode()
+        with self._wlock:
+            self.proc.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
+            self.proc.stdin.flush()
+
+    def _reader(self):
+        f = self.proc.stdout
+        while True:
+            line = f.readline()
+            if not line:
+                return
+            n = 0
+            while line not in (b"\r\n", b"\n", b""):
+                if b":" in line:
+                    k, _, v = line.partition(b":")
+                    if k.strip().lower() == b"content-length":
+                        n = int(v.strip())
+                line = f.readline()
+            body = f.read(n) if n else b""
+            try:
+                msg = json.loads(body)
+            except Exception:
+                continue
+            mid = msg.get("id")
+            if mid is not None and mid in self._pending and "method" not in msg:
+                ev, box = self._pending[mid]
+                box.append(msg.get("result"))
+                ev.set()
+            elif mid is not None and "method" in msg:  # server->client request: reply null
+                self._frame({"jsonrpc": "2.0", "id": mid, "result": None})
+
+    def _request(self, method, params, timeout=30):
+        with self._wlock:
+            self._id += 1
+            mid = self._id
+        ev = threading.Event()
+        box: list = []
+        self._pending[mid] = (ev, box)
+        self._frame({"jsonrpc": "2.0", "id": mid, "method": method, "params": params})
+        ok = ev.wait(timeout)
+        self._pending.pop(mid, None)
+        return box[0] if (ok and box) else None
+
+    def _notify(self, method, params):
+        self._frame({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def _open(self, rel):
+        if rel in self._opened:
+            return
+        p = self.root / rel
+        lid = "cpp" if p.suffix.lower() in (".cpp", ".cc", ".cxx", ".hpp") else "c"
+        self._notify("textDocument/didOpen", {"textDocument": {
+            "uri": p.as_uri(), "languageId": lid, "version": 1,
+            "text": p.read_text(errors="replace")}})
+        self._opened.add(rel)
+
+    def _uri(self, rel):
+        return (self.root / rel).as_uri()
+
+    def request_hover(self, rel, line, col):
+        self._open(rel)
+        return self._request("textDocument/hover", {
+            "textDocument": {"uri": self._uri(rel)}, "position": {"line": line, "character": col}})
+
+    def request_definition(self, rel, line, col):
+        self._open(rel)
+        r = self._request("textDocument/definition", {
+            "textDocument": {"uri": self._uri(rel)}, "position": {"line": line, "character": col}})
+        return r if isinstance(r, list) else ([r] if r else [])
+
+    def request_references(self, rel, line, col):
+        self._open(rel)
+        r = self._request("textDocument/references", {
+            "textDocument": {"uri": self._uri(rel)}, "position": {"line": line, "character": col},
+            "context": {"includeDeclaration": True}})
+        return r or []
+
+    def request_document_symbols(self, rel):
+        self._open(rel)
+        return self._request("textDocument/documentSymbol", {"textDocument": {"uri": self._uri(rel)}}) or []
+
+    def request_workspace_symbol(self, query):
+        # clangd serves this from its background index, which may still be warming on a
+        # cold start — retry a couple times before giving up.
+        for _ in range(3):
+            r = self._request("workspace/symbol", {"query": query}, timeout=45)
+            if r:
+                return r
+            time.sleep(2)
+        return r or []
+
+    def code_action(self, rel, s_line, s_col, e_line, e_col):
+        self._open(rel)
+        return self._request("textDocument/codeAction", {
+            "textDocument": {"uri": self._uri(rel)},
+            "range": {"start": {"line": s_line, "character": s_col},
+                      "end": {"line": e_line, "character": e_col}},
+            "context": {"diagnostics": []}}) or []
 
 
 def _resolve(file: str) -> Path | None:
@@ -78,13 +209,16 @@ def _repo_root(f: Path, lang: str) -> Path:
     return f.parent
 
 
-def _server(root: Path, lang: str) -> SyncLanguageServer:
-    key = str(root)
+def _server(root: Path, lang: str):
+    key = (str(root), lang)
     if key not in _servers:
-        cfg = MultilspyConfig.from_dict({"code_language": lang})
-        lsp = SyncLanguageServer.create(cfg, MultilspyLogger(), str(root))
-        lsp.start_server().__enter__()  # keep alive for the process lifetime
-        _servers[key] = lsp
+        if lang in ("c", "cpp"):
+            _servers[key] = ClangdClient(root)  # multilspy has no C/C++; drive clangd directly
+        else:
+            cfg = MultilspyConfig.from_dict({"code_language": lang})
+            lsp = SyncLanguageServer.create(cfg, MultilspyLogger(), str(root))
+            lsp.start_server().__enter__()  # keep alive for the process lifetime
+            _servers[key] = lsp
     return _servers[key]
 
 
@@ -126,6 +260,8 @@ def _raw_code_actions(lsp: SyncLanguageServer, rel: str, f: Path,
     s0 = max(0, start_line - 1)
     e0 = min(len(src) - 1, end_line - 1) if src else 0
     e_col = len(src[e0]) if src and e0 < len(src) else 0
+    if isinstance(lsp, ClangdClient):  # clangd backend: raw client already speaks codeAction
+        return lsp.code_action(rel, s0, 0, e0, e_col)
     a = lsp.language_server
     uri = f.as_uri()
 
@@ -199,6 +335,74 @@ def lsp_references(file: str, line: int, col: int = 1) -> str:
     out = [f"{r.get('relativePath', r.get('uri',''))}:{r.get('range',{}).get('start',{}).get('line',0)+1}"
            for r in refs]
     return f"{len(out)} references:\n" + "\n".join(out[:80])
+
+
+def _detect_lang(root: Path) -> str | None:
+    if (root / "Cargo.toml").exists():
+        return "rust"
+    if (root / "go.mod").exists():
+        return "go"
+    if (root / "compile_commands.json").exists():
+        cpp = sum(1 for _ in root.rglob("*.cpp"))
+        return "cpp" if cpp > sum(1 for _ in root.rglob("*.c")) else "c"
+    counts = {}
+    for ext, lang in EXT_LANG.items():
+        counts[lang] = counts.get(lang, 0) + sum(1 for _ in root.glob(f"**/*{ext}"))
+    return max(counts, key=counts.get) if counts and max(counts.values()) else None
+
+
+def _resolve_proj(project: str) -> Path | None:
+    cand = (PROJECTS / project).resolve()
+    if str(cand).startswith(str(PROJECTS)) and cand.is_dir():
+        return cand
+    prefix = str(PROJECTS).lstrip("/").replace("/", "-") + "-"
+    rem = project[len(prefix):] if project.startswith(prefix) else project
+    parts = rem.split("-")
+    base = PROJECTS
+    while parts:
+        for k in range(len(parts), 0, -1):
+            child = base / "-".join(parts[:k])
+            if child.is_dir():
+                base, parts = child, parts[k:]
+                break
+        else:
+            return None
+    return base if base != PROJECTS else None
+
+
+@mcp.tool()
+def lsp_workspace_symbol(query: str, project: str) -> str:
+    """Find a symbol by NAME across a whole project, semantically (LSP
+    workspace/symbol) — the compiler's index, not grep. Use this FIRST when looking
+    for where a function/struct/type/enum is DEFINED: it returns real definitions
+    (file:line + kind), self-limiting (no usage firehose). `project` is a path under
+    ~/Projects (or a code-graph slug). NOTE: works only where the project is indexable
+    (Cargo.toml, go.mod, or compile_commands.json) and finds only REAL symbols — macro-
+    generated members (X-macro tables like WAL_REC_*/PG_RMGR) won't appear; fall back to
+    source_search/ask_code for those. Empty result => degrade to grep."""
+    root = _resolve_proj(project)
+    if root is None:
+        return f"error: project not found under ~/Projects: {project}"
+    lang = _detect_lang(root)
+    if not lang:
+        return f"error: could not detect a language for {project}"
+    if not any((root / m).exists() for m in ("Cargo.toml", "go.mod", "compile_commands.json")):
+        return (f"note: {project} has no Cargo.toml/go.mod/compile_commands.json — LSP index will "
+                f"be unreliable here; use source_search/ask_code (grep) instead. lang guess={lang}")
+    try:
+        lsp = _server(root, lang)
+        syms = lsp.request_workspace_symbol(query)
+    except Exception as e:
+        return f"lsp error (workspace/symbol {lang}): {e}"
+    if not syms:
+        return f"no workspace symbols for '{query}' (degrade to source_search/ask_code)"
+    out = []
+    for s in syms[:60]:
+        loc = s.get("location", {})
+        rng = loc.get("range", {}).get("start", {})
+        uri = loc.get("uri", "") or loc.get("relativePath", "")
+        out.append(f"{s.get('name','?')}\t{s.get('kind','')}\t{uri.replace('file://','')}:{rng.get('line',0)+1}")
+    return f"{len(out)} symbol(s) for '{query}':\n" + "\n".join(out)
 
 
 @mcp.tool()
