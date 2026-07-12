@@ -46,7 +46,27 @@ def _doc_kb_ids() -> list[str]:
     return [d["id"] for d in r.json()["data"] if d.get("chunk_count", 0) > 0]
 
 
-def _retrieve(question: str, kb_ids: list[str], top_n: int = 8):
+def _script(s: str) -> str:
+    """Rough script of a text: 'cyr' if it has a run of Cyrillic, else 'lat'."""
+    return "cyr" if re.search(r"[а-яА-ЯёЁ]{4,}", s or "") else "lat"
+
+
+def _diversify(question: str, chunks: list, main: int = 8, cross: int = 4) -> list:
+    """Keep the top `main` reranked chunks, then reserve up to `cross` slots for chunks in a
+    DIFFERENT script than the query. Same-language sources tend to win the top ranks, so a query
+    in one language can crowd out relevant content in another (an English PG question burying the
+    Russian PG books at ranks 9-20). This guarantees cross-language content a seat when it's in
+    the reranked pool — language-agnostic, no per-topic hardcoding."""
+    q = _script(question)
+    top = chunks[:main]
+    other = [c for c in chunks[main:]
+             if _script(c.get("content_with_weight") or c.get("content", "")) != q]
+    return top + other[:cross]
+
+
+def _retrieve(question: str, kb_ids: list[str], top_n: int = 20):
+    # retrieve a larger reranked POOL (cheap: rerank cost is set by top_k, not page_size) so
+    # _diversify can pull cross-language chunks that rank just below the top few.
     body = {"question": question, "dataset_ids": kb_ids, "page_size": top_n,
             "top_k": 64, "similarity_threshold": 0.15}
     # try with reranker; on any failure (e.g. CPU busy -> 30s timeout) fall back
@@ -102,6 +122,7 @@ def ask_corpus(question: str) -> str:
     chunks, reranked = _retrieve(question, kb_ids)
     if not chunks:
         return "The corpus doesn't cover this (no relevant chunks retrieved)."
+    chunks = _diversify(question, chunks)  # top few + reserved cross-language slots
     answer = _synthesize(question, chunks)
     sources = sorted({c.get("document_keyword", "?") for c in chunks})
     tag = "reranked" if reranked else "embedding-order (reranker busy)"
