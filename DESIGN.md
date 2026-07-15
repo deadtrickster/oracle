@@ -67,9 +67,131 @@ disposable* indexes rebuildable from it):
 - **Emacs**: manual, Elisp reference, 63 misc manuals.
 - **meta**: the system's own docs + scripts (so it can explain itself offline).
 
+- **C/C++**: cppreference (6,635 pages, sanitized HTML→md), serenedb's deps (abseil/fmt/simdjson/faiss).
+- **DuckDB / Kubernetes**: official docs (the serenedb engine; k8s ops).
+- **Biology**: 6 Russian books (`bio`, text) + 4 OpenStax textbooks (`bio-books`, PDF). See below —
+  the biology corpus is where every corpus-quality bug surfaced, because it is the only one written
+  in an inflected language, half of it OCR'd, and full of exercise questions.
+
 **API-doc sanitizer** (`sanitize-apidocs.py`): rustdoc/mdBook HTML → clean per-module markdown
 (extract `<main-content>`, merge item pages). 785 MB of HTML → 100 MB of ingestable markdown;
 raw HTML is never ingested.
+
+### 4.1 Corpus hygiene — what we deliberately do *not* ingest
+
+A textbook is not all answers. It is also exercise questions, answer keys, indexes, bibliographies
+and publisher front-matter. We were embedding all of it, and it actively hurt.
+
+**The exercise-question trap (measured 2026-07-13).** A user's query is a *question*. A chunk of
+"Вопросы для повторения" is also *questions*. So they embed close together, and **the textbook's own
+question lists out-compete the passages that answer the query**. In the `bio` KB, bogdanova was
+**13.6% question-list chunks**; 6 of the top 30 hits for *"что такое фотосинтез"* were exercise
+questions displacing real content. We were also retrieving the УДК/ББК/editorial-board page.
+
+`clean-corpus.py` runs **before** ingest and strips two things:
+1. **Question runs** — a run of ≥3 consecutive *standalone, short, interrogative* paragraphs is
+   exercise material. A *lone* rhetorical question inside prose survives. **OPT-IN per corpus**
+   (`books.toml`), default **off**.
+2. **Page ranges** (manual scalpel, `books.toml`): answer keys, indexes, front-matter — the things no
+   heuristic can see. Possible only because we now emit page markers (below).
+
+**Why opt-in, and why the obvious heuristic is wrong.** The first version also dropped any paragraph
+containing ≥3 question marks. On the biology textbooks it looked fine. On the Postgres Pro books it
+ate the **WAL chapter** of `pg_monitoring` (technical prose that poses questions and then answers
+them) and — the one that settles the argument — **a jsonb operator table**:
+
+```
+@>(jsonb,jsonb) | jsonb_contains | 7    ?(jsonb,text) | jsonb_exists | 9
+```
+
+**`?`, `?|` and `?&` are PostgreSQL operators.** A table of them is indistinguishable from a list of
+questions if you are counting question marks. Counting `?` is not a signal; **structure** is. So the
+inline rule was deleted, and stripping is now something a corpus opts into: right for an exam-prep
+textbook whose quizzes out-compete its own chapters, wrong for a reference manual. A destructive
+filter must prefer precision to recall — the cost of a false positive (silently deleting the WAL
+chapter) is far higher than the cost of a false negative (one quiz block survives).
+
+**Page markers.** RAGFlow's *naive* (text) parser records no positions — every chunk gets the stub
+`positions=[[2,1,1,1,1]]`. Only the DeepDoc PDF parsers (`book`/`paper`) store real page+bbox. So
+`pdf2txt.sh` and `ocr-pdf.sh` carry the page number **in the text itself** as `[[p.N]]`. That buys
+three things: page-range exclusion, citations that can say *"Chebyshev, p. 412"*, and a corpus
+browser that can deep-link into the original PDF.
+
+**PDF ingestion decision matrix** (learned the hard way):
+
+| | route | why |
+|---|---|---|
+| Cyrillic PDFs | `pdftotext` → `.txt`, naive | DeepDoc garbles Cyrillic CID fonts (Новиков → HOBMKOB) |
+| scanned PDFs | `ocr-pdf.sh` (tesseract) → `.txt` | no text layer at all |
+| Latin PDFs | **PDF → DeepDoc** (`book`) | keeps page+bbox positions **and extracts figures** — a biology textbook is half diagrams, which `pdftotext` silently discards |
+
+Two traps in that last row, both of which fail *silently*: RAGFlow's uploader accepts up to 1 GB but
+its **DeepDoc worker refuses files >128 MB** — and still reports `run=DONE, progress=1.0` with **zero
+chunks**. The OpenStax books ship at 178–455 MB, so they are downsampled with Ghostscript (`/ebook`,
+150 dpi) to 29–73 MB. Page counts are preserved 1:1 — splitting the PDFs instead would restart page
+numbering per part and destroy the mapping. Originals stay pristine in `~/Documents/Books/`; only
+`corpus/` (disposable) holds the compressed copies. `ingest-corpus.py` also caps upload batches by
+**bytes**, not just file count (batching 1.3 GB of PDF into one multipart request → HTTP 413).
+
+### 4.2 Curation is a JUDGMENT — filter chunks, and judge them with a model
+
+Two corrections to §4.1, both learned by getting it wrong.
+
+**Wrong layer.** `clean-corpus.py` filters `.txt` — so every PDF that goes to DeepDoc (all the English
+books) escaped filtering **entirely**. We had filtered the *format* instead of the *thing*.
+⇒ **`clean-chunks.py` filters CHUNKS**, which is where both parsers converge and what actually gets
+embedded and retrieved. Parser-agnostic by construction.
+
+**Wrong judge.** Every rule we wrote encoded the *surface form* rather than the thing:
+- `?` is **not** a question — `?`, `?|`, `?&` are **jsonb operators**, and the "count question marks"
+  rule deleted a PostgreSQL operator table and a chapter of WAL prose;
+- a question **need not contain** `?` — `A11. Корнеплод — это... 1) ... 2) ...` and OpenStax's
+  `3. The smallest unit ... is the ________.  a. organ  b. organelle` are both invisible to a
+  `?`-based rule. Our "cleaned" biology books were still full of quiz items;
+- (and, in §5.2, `мышей` is not `мышь` until a stemmer makes them one token).
+
+*Purpose cannot be compiled into a regex.* ⇒ **`chunk_judge.py`: qwen decides.** Prompt adapted from
+MT-Bench (via Lambert, *RLHF* §5.7 — in our own corpus): explicit criteria, a one-sentence explanation
+*before* a strictly-formatted verdict, an instruction not to be swayed by length, and — crucially —
+**our own scar tissue as counterexamples** (it is told that `?` is a PostgreSQL operator; a generic
+judge would repeat the rule's mistake).
+
+**It is a CASCADE, not a replacement** — the same shape SLP3 gives for retrieval (§5.2). Rules cannot
+score 283k chunks *well*; qwen cannot score them *fast*.
+
+```
+  every chunk → cheap recall-oriented rule (flag anything questionish; false positives are FINE)
+              → 1.7% survive as candidates
+              → qwen judges each one          → 26 minutes, not 26 hours
+```
+
+Safety properties, each one paid for by a bug elsewhere in this system:
+- **A judge error votes KEEP.** A failed judge must never become a silent deleter (cf. the reranker's
+  invisible timeout fallback, §8).
+- **"If unclear → CONTENT."** Deleting real knowledge is far worse than keeping a stray quiz item.
+- **Every verdict is written to a JSONL audit trail.** Swapping a rule we can inspect for a model we
+  cannot would be a bad trade.
+
+Measured (2026-07-14): **7/7** on the labelled fixtures (`tests/test-judge.py`). On the real corpus it
+cut **286 chunks** from the OpenStax books (the multiple-choice questions no rule of ours could see)
+and **zero** from the reference manuals (Rust Patterns 43 judged/43 kept, Database Internals 37/37) —
+it distinguishes a textbook from a manual without being told which is which. On `bio` it *rescued*
+25% of what the rule had flagged.
+
+**And it did not improve retrieval.** Deleting `bio`'s 221 exercise chunks moved the gold passage from
+rank 32 to **31**. The corpus-poisoning thesis failed its own test: the passage that beats the rodent
+list is not a quiz, it is **Рукокрылые** — *летучие мыши*, "flying mice". Corpus hygiene is defensible
+on its own terms (less noise in every context window — Axiom 1), but it is **not** a retrieval fix.
+The retrieval fix is the pool and the reranker (§5.2, and TODO §E Phase 2).
+
+**The honest limit.** None of this is a retrieval silver bullet. Cleaning removes material that was
+competing *unfairly*; it does not make a weakly-embedded passage win. Our worst case — *"какие виды
+мышей"* — stays broken after cleaning: the passage listing rodents (cos **0.471**) still loses to one
+about **Рукокрылые / летучие мыши** — literally *"flying mice"* (cos **0.762**). The bi-encoder is not
+being stupid; it is doing exactly its job, which is **topical proximity, not answerability**. Only a
+cross-encoder sees query and passage together and can judge whether a passage *answers*. That is why
+the reranker is not a nicety — and why its silent 30 s timeout fallback (§8) is a correctness bug,
+not a performance one.
 
 ## 5. The grounding pipeline (the heart)
 
@@ -93,6 +215,146 @@ Two failure modes, two fixes:
 Packaged as **`ask_corpus`** — one MCP tool that runs the whole pipeline internally and returns a
 grounded answer. Any caller (local Claude Code, gptel, RAGFlow agents) gets grounding for free;
 the anti-hallucination work happens *inside* the tool, so a weak caller can't skip it.
+
+### 5.1 Synthesis is for weak readers — a strong reader wants the raw chunks
+
+The synthesis step (stage 3) exists to protect a **56K-context weak model** from a firehose of
+passages. But it is *lossy compression performed by the weakest component in the pipeline*, and when
+the caller is a strong model, it is pure loss.
+
+Observed directly (2026-07-13): asked to explain corpus cleaning, `ask_corpus` returned a competent
+paragraph — and, as "evidence", a **hypothetical Python function it had invented**. Retrieving the
+same material as **raw chunks** and reading them unsynthesised instead yielded the two facts that
+actually mattered, verbatim from Jurafsky & Martin:
+
+> *"The bi-encoder … is less accurate, since its relevance decision can't take full advantage of all
+> the possible interactions"* — i.e. **topical proximity, not answerability**, stated as architecture.
+>
+> *"Use cheaper methods (like BM25) as the first pass … then use expensive methods … to rerank only
+> the top N"* — from which follows the thing we had missed entirely: **the first stage sets the
+> ceiling; rerank can only reorder what the first pass already found.**
+
+qwen's summary contained neither. It could not have: summarising *is* discarding, and it discards
+what it does not recognise as important.
+
+**Principle: never put a weak model between a strong model and the source.** It is the same defect as
+letting qwen summarise grep output (it miscopies value tables — hence the RAW SOURCE block in
+`ask_code`), and the same one as the Muridae fabrication (qwen writing prose on top of an honest
+abstention). The corpus is a **library**, and a strong reader should be allowed into the stacks.
+
+⇒ **`search_corpus` (planned)**: same retrieval + rerank, returns the top-k chunks **verbatim** with
+sources, no synthesis. `ask_corpus` stays for weak callers; strong callers read for themselves.
+
+### 5.1b Chunk size — the `book` parser silently ignored `chunk_token_num`
+
+A retrieval system's unit of truth is the **chunk**. Ours were 47 characters.
+
+`chunk_token_num = 512` is set on every KB, and the `naive` parser honours it (median chunk **1168
+chars**). The DeepDoc `book` parser does not — median **47 chars** in `books`, **67** in `bio-books`.
+A 20× disagreement between two parsers in the same system, on the same setting.
+
+Cause (`rag/app/book.py`): the parser takes `hierarchical_merge` whenever a bullet/heading pattern is
+detected — i.e. for **every real textbook** — and that function never reads `chunk_token_num`. It
+accumulates against a **hardcoded 218-token** limit, *and only merges singleton groups*: anything the
+bullet detector groups together is emitted as-is, however small. DeepDoc's layout analysis classifies
+TOC lines, running heads and page numbers as "sections", each matches a bullet pattern, and each
+becomes its own chunk. `naive_merge` — the one branch that honours the setting — was dead code for
+real books.
+
+Measured on SLP3 (500 chunks): **256 under 50 characters**, 399 under 150, **none over 1000**. A
+representative chunk, in its entirety:
+
+```
+133 The nature of preferences10 reward functions 138
+```
+
+That is a table-of-contents line, embedded and indexed as if it were a passage.
+
+**Why it matters more than it sounds.** ~126k of ~300k chunks in the corpus are layout debris — and
+they are concentrated in our *best* sources (SLP3, DDIA, Sutton & Barto, CLRS, Database Internals). A
+50-char chunk's embedding is close to noise, and noise is exactly what wins when everything scores
+~0.35 (§5.2). And a top-8 retrieval hands the model **~500 characters of rubble** — an **independent
+second cause** of recall@8 = 40%, on top of the pool being too small.
+
+**Fix — TWO bugs on the same branch** (which is *why* nobody noticed it was broken: it was already
+dead code). Both patched in `rag/app/book.py`, bind-mounted:
+
+1. **`chunk_token_num` is never consulted.** Take `naive_merge` when it is set.
+2. **The `naive_merge` branch destroys the page positions.** The DeepDoc position tag is
+   `@@page\tx0\tx1\ttop\tbottom##` — a **double** at-sign. Upstream splits on a **single** `@`:
+
+   ```python
+   "foo@@1\t2\t3\t4\t5##".split("@")   ->   ["foo", "", "1\t2\t3\t4\t5##"]     # THREE parts
+   ```
+
+   so `len(pr) == 2` is false, the else-branch fires, and **the position tag is discarded**. Split on
+   `"@@"` instead: `naive_merge`'s `add_chunk()` re-appends `pos` to the text
+   (`if t.find(pos) < 0: t += pos`), and `tokenize_chunks → pdf_parser.crop()` then recovers page+bbox.
+
+Measured on one book before re-parsing all 19 (`lbdl.pdf`):
+
+| | unpatched | patched |
+|---|---|---|
+| chunks | 637 | **66** |
+| median chars | 47 | **2302** |
+| chunks < 50 chars | 51% | **0%** |
+| chunks with page positions | 0/66 | **66/66** |
+
+So we keep DeepDoc's page mapping **and** get sane chunks — but only after fixing bug 2. The
+trade-off we thought we faced (good chunks *or* a corpus browser) did not exist; the code was simply
+wrong in two places. Requires re-parsing `books` and `bio-books`.
+
+**And the lesson, which is this system's recurring one:** the setting was accepted by the API, stored
+in the config, and displayed back to us — then silently ignored by the code path that actually ran.
+Nothing errored. Nothing warned. We only found it because the chunk *counts* looked odd (4 English
+books → 60k chunks; 6 Russian books → 6.6k), and someone asked why.
+
+### 5.2 The lexical channel — a 1972 solution we weren't using
+
+Retrieval is hybrid: RAGFlow blends a **token** score with a **vector** score, and the default weight
+is `vector_similarity_weight = 0.3` — i.e. **70% of the score is lexical**. That half was broken for
+half our corpus, and it took a measured retrieval eval to see it.
+
+RAGFlow's tokenizer stems **English** (Porter: `running`/`runs` → `run`) and leaves **Cyrillic**
+lowercased and otherwise untouched. In an inflected language that is fatal:
+
+```
+query   "какие виды мышей ты знаешь"   →  token "мышей"   (genitive plural)
+chunk   "Представители: мышь, полевка"  →  token "мышь"    (nominative)
+```
+
+Two unrelated tokens. They never match. So **the only informative, high-IDF term in the query matches
+nothing**, while `виды` ("species" — in a *biology* textbook) matches everywhere and steers the query
+into noise. IDF is not missing here; **IDF cannot rescue a term that never matches.** Spärck Jones
+solved term weighting in 1972 and it does not fire without the stemmer it depends on.
+
+Fix (`ragflow/rag/nlp/rag_tokenizer.py`, bind-mounted): run the Russian **Snowball** stemmer over
+Cyrillic tokens. It is applied on **both** sides by construction — the same `tokenize()` is the single
+entry point for the indexer (`rag/nlp/__init__.py:360`, `content_ltks`) and the query builder
+(`rag/nlp/query.py:61`) — which is the whole point: a stemmer is only useful as an **invariant**.
+
+```
+мышь / мыши / мышей / мышам / мышью   →  мыш       one invariant
+мышца / мышцы / мышц                  →  мышц    ┐ verified DISJOINT — the feared
+мышечный / мышечные                   →  мышечн  ┘ mouse↔muscle collision does not occur
+```
+
+Cost: every Cyrillic document indexed before the patch must be **re-parsed**, or its stored tokens
+will no longer match a stemmed query. (Done for `bio` and the 7 Postgres Pro books.)
+
+Measured effect on the gold passage's rank, before any of this (query-side experiments that led to
+the diagnosis):
+
+| query | gold rank |
+|---|---|
+| `какие виды мышей ты знаешь` *(as typed)* | 30 |
+| `виды мышей` *(filler stripped)* | 3 |
+| `виды мышей мышь` *(+ nominative — the morphology fix by hand)* | 2 → **1** after rerank |
+| `виды мышей семейство мышиные Muridae` *(qwen's own rewrite)* | 8 → **25** after rerank |
+
+Note the last row: the model's "helpful" query reformulation made retrieval **strictly worse**, and it
+then fabricated a taxonomy to justify the result it got. Query rewriting by the weak model is not a
+neutral act.
 
 **Docs are not the whole truth — route by what the question is about.** The corpus holds
 *documentation*; it does **not** contain a repo's own source facts. "What WAL record types does
@@ -205,6 +467,44 @@ All read-only or query-only, bridged stdio→SSE via mcp-proxy, systemd user ser
   aesthetic, not a requirement; correctness beat it.
 
 ## 9. Lessons (transferable beyond this box)
+
+### 9.0 The two axioms
+
+Everything else in this section is a corollary of these. They are stated first because they are the
+only parts that generalise past this machine.
+
+**Axiom 1 — context occupation DEFOCUSES, and it is SHARED.**
+Filling a context window with material degrades reasoning: the model attends through noise, anchors
+on irrelevant hits, loses the thread. This applies to the 480B model and the local 30B one alike —
+it is the *same* axiom, differing only by a **scale factor**. A large window means a higher
+tolerance, not immunity.
+
+*Corollaries:* a "wasteful" tool call is not merely slow — its output is pumped into the context and
+competes for attention with what matters, so **minimising context occupation is a QUALITY measure,
+not a speed one**. And bulk work (digesting many files, triage) should be *offloaded* to the local
+model, not to save tokens — tokens are cheap — but to avoid the **compaction** that degrades the
+strong model's reasoning for the rest of the session.
+
+*Confirmed the hard way (2026-07-13):* context doesn't just distract, it **contaminates**. After
+hours reading qwen's Russian-Chinese hybrid output, Claude code-switched into Russian
+("литерально") in an English document — the identical failure it had spent the evening
+documenting in qwen. Same law, different constant.
+
+**Axiom 2 — the HARNESS must do its job (closed-loop); do not paper over it with prompt.**
+The model's job is the *thinking* decision — "move the right hand." The harness's job is to
+**actually move the right hand, reliably** — like a closed-circuit stepper that verifies its
+position instead of silently losing steps. When the tooling misbehaves, **fix the tool**, do not add
+another paragraph of prompt telling the model to compensate. *Piling up prompt workarounds for the
+harness's own failures is the anti-pattern.*
+
+*In practice:* the shim **salvages** qwen's leaked `<function=…>` calls instead of begging it to
+format correctly (33% → 0%); `source_search` **redirects** ("no matches under X, but it occurs in
+<other repo>") instead of a prompt rule "don't search the wrong repo"; `ask_code` returns a **RAW
+SOURCE** block instead of "please read the numbers carefully". And note the routing defect we found
+was *caused by prompt*: two hardcoded project names in the system prompt dragged every search toward
+them. **Removing prompt bias beats adding prompt rules.**
+
+### 9.1 Corollaries
 
 1. **The model is the weak link; scaffold around it.** Deterministic control, scoped sub-tasks,
    tool schemas that validate — not open-ended trust. (C3L's thesis; our agents embody it.)
