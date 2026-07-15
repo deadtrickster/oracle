@@ -242,8 +242,23 @@ letting qwen summarise grep output (it miscopies value tables — hence the RAW 
 `ask_code`), and the same one as the Muridae fabrication (qwen writing prose on top of an honest
 abstention). The corpus is a **library**, and a strong reader should be allowed into the stacks.
 
-⇒ **`search_corpus` (planned)**: same retrieval + rerank, returns the top-k chunks **verbatim** with
-sources, no synthesis. `ask_corpus` stays for weak callers; strong callers read for themselves.
+⇒ **`search_corpus` (shipped 2026-07-15)**: same retrieval + rerank, returns the top-k chunks
+**verbatim** with source + page marker, no synthesis. `ask_corpus` stays for weak callers; strong
+callers (including *me*, on the plane) read for themselves.
+
+### 5.3 Retrieval config, as shipped
+
+- **Pool = 64, synthesis slice = 18** (`_retrieve`/`_diversify`). recall@64 measured at 100%, but
+  the gold often ranks 15–18, so a narrow slice retrieved the answer and then dropped it before
+  synthesis. 64 stays inside the reranker's 30 s timeout (~10 s); 256 would need the reranker
+  parallelised first, so it is deferred.
+- **Query normalization** (`_normalize_query`, retrieval only): strip conversational framing
+  ("какие виды X ты знаешь" → "виды X"; "tell me about Y" → "Y"). Filler drags the dense vector
+  toward other *questions* and dilutes the lexical match; synthesis still sees the original.
+- **Output language pinned** to the question's language in the synthesis prompt — qwen is
+  Chinese-trained and otherwise code-switches into Chinese on Russian input (half the corpus).
+- **Reranker fallback is visible**: every answer is tagged `[reranked]` or `[embedding-order
+  (reranker busy)]`, so a silent-timeout degradation is observable, not invisible.
 
 ### 5.1b Chunk size — the `book` parser silently ignored `chunk_token_num`
 
@@ -503,6 +518,16 @@ format correctly (33% → 0%); `source_search` **redirects** ("no matches under 
 SOURCE** block instead of "please read the numbers carefully". And note the routing defect we found
 was *caused by prompt*: two hardcoded project names in the system prompt dragged every search toward
 them. **Removing prompt bias beats adding prompt rules.**
+
+*Shipped 2026-07-15 — the full closed-loop set, each a harness fix where the tool previously returned
+an error it had the information to avoid:* `source_search`/`ask_code` now **accept the graph slug they
+print themselves**; **auto-relax** a too-strict anchor to the bare identifier and report where it
+occurs (our own "anchor the definition" advice missed `class _LIBCPP_TEMPLATE_VIS auto_ptr`);
+`ask_code` **redirects** on a scoped miss instead of dead-ending; `source_search` emits **absolute
+paths** so a `file:line` feeds straight to `Read`. And the two *prompt-debias* fixes: the hardcoded
+project names are gone (call `list_projects`), and the DISCIPLINE no longer frames qwen as
+coding-only (it refused biology as "out of scope" — the prompt over-narrowed the domain, same bug
+class as the hardcoded names).
 
 ### 9.1 Corollaries
 

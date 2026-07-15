@@ -672,6 +672,30 @@ The honest ending isn't "solved." It's "the failures finally moved to where they
     emit the verdict as data, and let code do the deleting. The model decides which hand to move; the
     harness moves the hand.
 
+## Act 13 — Finishing the punch list
+
+After the dramatic bugs come the boring fixes, and they matter too. Once I understood that the wall
+was the model and not the pipeline, I went back and did the whole tool-layer punch list — the stuff
+that had been quietly costing calls and context the entire time.
+
+The common shape, again: **every one was the harness returning an error it had the information to
+avoid.** `list_projects` printed a project id in one format and then rejected it when you pasted it
+back. The grep tool told you to "anchor the definition," and then returned nothing for `class
+auto_ptr` because the real declaration is `class _LIBCPP_TEMPLATE_VIS auto_ptr` — our own advice,
+walking us into a wall. `source_search` emitted repo-relative paths that the file reader couldn't
+open. `ask_code` dead-ended on a wrong-repo guess instead of pointing at the right repo it had already
+found. None of these were the *model's* fault. The model asked for the right thing; the harness lost
+the step and blamed the model.
+
+So: the tools now accept the ids they emit, auto-relax an over-strict anchor and tell you where the
+symbol actually lives, hand back absolute paths, and redirect instead of dead-ending. And two
+*prompt* fixes — because the routing bug was *caused* by the prompt (two hardcoded project names that
+dragged every search toward them), and the "I'm only a coding assistant, I can't answer about mice"
+refusal was the prompt over-narrowing the domain. Both fixed by *removing* prompt, not adding it.
+
+None of it is exciting. All of it is the difference between a tool you fight and a tool that gets out
+of the way. On a plane, with no second chances, that difference is the whole game.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
