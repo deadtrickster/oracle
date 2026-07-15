@@ -32,6 +32,29 @@ KEY = os.environ.get("ORACLE_RAGFLOW_KEY", "ragflow-smywlJs3drgGxfKztifTmD3iNJ2l
 OLLAMA = os.environ.get("ORACLE_OLLAMA_URL", "http://localhost:11434")
 SYNTH_MODEL = os.environ.get("ORACLE_SYNTH_MODEL", "qwen3-coder:30b")
 RERANK_ID = "gte-multilingual-reranker-base@local-gte-rerank@Jina"
+RERANK_URL = os.environ.get("ORACLE_RERANK_URL", "http://localhost:9760/rerank")
+
+
+def _rerank_blocks(query: str, blocks: list[str], top_n: int) -> list[str]:
+    """Item 3: rank grep match-blocks by RELEVANCE to the question, keep the top-n VERBATIM.
+
+    Grep returns matches in --sort=path (alphabetical) order and we then truncate — so the block
+    that answers the question loses to whatever sorts first (the auto_ptr definition lost to a
+    kiwisolver comment). The idle CPU reranker (:9760) reorders by relevance; we keep the winning
+    blocks EXACTLY (never summarised — qwen miscopies value tables). Graceful fallback to the
+    original order if the reranker is unavailable."""
+    blocks = [b for b in blocks if b.strip()]
+    if len(blocks) <= top_n:
+        return blocks
+    try:
+        r = requests.post(RERANK_URL, timeout=30,
+                          json={"query": query, "documents": [b[:2000] for b in blocks], "top_n": top_n})
+        order = [x["index"] for x in r.json().get("results", [])]
+        if order:
+            return [blocks[i] for i in order if i < len(blocks)]
+    except Exception:
+        pass
+    return blocks[:top_n]
 HDR = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
 RG = "/usr/bin/rg"
 PROJECTS = Path(os.environ.get("ORACLE_PROJECTS_ROOT", str(Path.home() / "Projects"))).resolve()
@@ -420,10 +443,16 @@ def ask_code(question: str, project: str = "") -> str:
     for p in patterns:
         h = _rg(p, root)
         if h:
-            hits.append(f"# matches for /{p}/:\n{h}")
+            # split rg's -C output into per-match blocks (rg separates groups with a "--" line)
+            for block in re.split(r"\n--\n", h.strip()):
+                if block.strip():
+                    hits.append(block)
             seen += h.count("\n")
         if seen > 700:
             break
+    # Item 3: keep the blocks most RELEVANT to the question (reranked), verbatim — not the ones that
+    # happen to sort first alphabetically before a length cap.
+    hits = _rerank_blocks(question, hits, top_n=18)
     blob = "\n\n".join(hits)[:16000]
     if not graph_ctx and not blob.strip():
         # Item 2: don't dead-end on a scoped miss — REDIRECT. A wrong `project` guess is common;
