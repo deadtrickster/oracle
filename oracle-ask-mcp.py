@@ -51,7 +51,7 @@ def _script(s: str) -> str:
     return "cyr" if re.search(r"[а-яА-ЯёЁ]{4,}", s or "") else "lat"
 
 
-def _diversify(question: str, chunks: list, main: int = 8, cross: int = 4) -> list:
+def _diversify(question: str, chunks: list, main: int = 18, cross: int = 4) -> list:
     """Keep the top `main` reranked chunks, then reserve up to `cross` slots for chunks in a
     DIFFERENT script than the query. Same-language sources tend to win the top ranks, so a query
     in one language can crowd out relevant content in another (an English PG question burying the
@@ -64,9 +64,12 @@ def _diversify(question: str, chunks: list, main: int = 8, cross: int = 4) -> li
     return top + other[:cross]
 
 
-def _retrieve(question: str, kb_ids: list[str], top_n: int = 20):
-    # retrieve a larger reranked POOL (cheap: rerank cost is set by top_k, not page_size) so
-    # _diversify can pull cross-language chunks that rank just below the top few.
+def _retrieve(question: str, kb_ids: list[str], top_n: int = 64):
+    # Return the full reranked pool of 64. Measured 2026-07-15: recall@64 = 100% (every gold
+    # passage is within the top 64), but the gold often ranks 15-18 — past the old top_n=20/main=8
+    # slice — so the answer was retrieved and then dropped before synthesis. Returning 64 is cheap
+    # (rerank cost is set by top_k, not page_size, and top_k is already 64) and stays within the
+    # reranker's 30 s timeout (~10 s at 64). Going to 256 would need the reranker parallelised first.
     body = {"question": question, "dataset_ids": kb_ids, "page_size": top_n,
             "top_k": 64, "similarity_threshold": 0.15}
     # try with reranker; on any failure (e.g. CPU busy -> 30s timeout) fall back

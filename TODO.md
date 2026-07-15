@@ -600,3 +600,37 @@ Written down so they cost nothing to leave alone. **Do not start these.**
   executor at 1298%, i.e. 13 of 24 cores), **GPU at 0%**. The 10× chunk reduction cut a stage that was
   already free. If ingest speed ever matters, the lever is DeepDoc's per-page layout pass — a lighter
   layout recognizer, or more executor parallelism — NOT chunk count.
+
+### 2026-07-15 — CLEAN BASE re-measure (single code version, all PDFs re-parsed) ✅
+First unconfounded recall@k since the 40% baseline. Corpus: books/bio-books re-parsed with the
+book.py + space fixes (median chunk 47→~2400, positions 0→100%, figures 100%); Russian KBs stemmed
++ page-marked.
+
+| metric | 2026-07-13 | now |
+|---|---|---|
+| recall@8  | 40% (2/5) | **60% (3/5)** |
+| recall@64 | 80% (4/5) | **100% (5/5)** |
+| recall@256| 100%      | 100% |
+
+- **recall@64 = 100% is the win**: every gold passage is now within the reranker's reach. The first
+  stage no longer sets a losing ceiling — Phase 2 (parallelise reranker → 256 pool → wider slice) can
+  now surface all of them.
+- photosynthesis rank 16→1 (chunking+stemmer); lsn-general climbed into the pool (Postgres re-parse).
+- mice still miss@8 (rank 30/31): bio Russian KB unaffected by these fixes, AND it's the
+  topical-similarity/bats problem, not a pool problem. Confirmed not retrieval-fixable.
+- NOTE the dataset-level chunk_count in RAGFlow is STALE after delete+re-ingest (showed 74k/60k;
+  real per-doc sums 5,886 / 3,808). Sanity-check the summary counter against per-doc totals.
+
+### 2026-07-15 — BUMPED retrieval to 64 (G1.3-lite, the safe half) ✅
+`oracle-ask-mcp.py`: `_retrieve` page_size 20→64 (return the full reranked pool); `_diversify`
+main 8→18 (feed the top ~22 chunks to synthesis). recall@64 is 100% and the gold ranked 15-18 —
+retrieved then dropped before synthesis by the old narrow slice. Rerank at 64 is ~10s, inside the
+30s timeout, so this needs NO reranker parallelisation (that's only for the 256 bump).
+- **Verified:** `какие виды грызунов` now answers with the full, correct rodent list (rodent-list
+  chunk reaches slice position 10). The old main=8 slice dropped it (rank 15).
+- **BUT the model still miscategorises:** it appended "летучие мыши относятся к отряду Грызуны" —
+  bats are Chiroptera, not rodents. Retrieval is now correct; the residual error is the synthesis
+  reasoning ceiling (see the 2026-07-15 reflection entry). Widening the slice cannot fix a category
+  error the model makes over correct evidence.
+- Context cost: ~22 chunks (~50KB) to qwen — a real Axiom-1 load, accepted for the recall. The 256
+  bump (item 10) still waits on the reranker fix (items 12 + G1.2).
