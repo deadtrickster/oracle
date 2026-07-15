@@ -1,0 +1,13 @@
+- Have a good monitoring
+  system ([my PGCon slide deck on monitoring](https://twitter.com/samokhvalov/status/1664686535562625034))
+- Set up advanced query analysis:
+  `pg_stat_statements`, `pg_stat_kcache`, `pg_wait_sampling` / `pgsentinel`, `auto_explain`
+- Build scalable "lab" environments and process for experimentation – DBA should not be a bottleneck for engineers to
+  check ideas (spoiler: [@Database_Lab](https://twitter.com/Database_Lab) solves it).
+- Implement capacity planning, make sure you have room for growth, perform proactive benchmarks.
+- Architecture: microservices and sharding are all great and worth definitely considering, but the main question is:
+  When? From the very beginning of the startup, or later? The answer is "it depends". Remember, with current Postgres
+  performance and hardware any cloud offers, you can be fine and grow to dozens and hundreds of TiBs and hundreds of
+  thousands of TPS. Choose your priorities – there are many successful stories with any approach.
+- Don't hesitate to ask for help – community or paid consulting. Huge projects are running on Postgres, and there is a
+  lot of experience accumulated.

@@ -1,0 +1,57 @@
+# qrels — relevance judgments for the RETRIEVAL stage, judged independently of the answer.
+#
+# WHY THIS EXISTS: EVAL.md grades the FINAL ANSWER. So when an answer is wrong we cannot tell
+# whether SEARCH missed the passage or QWEN fumbled it. That ambiguity cost an entire evening
+# (2026-07-13) and three wrong diagnoses. This file separates the two.
+#
+# Gold passages are identified by a CONTENT PREDICATE (regexes that must all appear in the chunk),
+# never by chunk id — chunk ids are regenerated on every re-ingest and a qrels pinned to them would
+# rot on the first re-parse.
+#
+# `gold = []` means the corpus genuinely CANNOT answer this — abstention is the correct behaviour
+# and any answer is a fabrication. These are as important as the positives: they catch the failure
+# where the model invents a premise, retrieves something adjacent, and cites it (see FINDINGS.md).
+
+[[q]]
+id = "mice-species"
+question = "какие виды мышей ты знаешь"
+kbs = ["bio"]
+# the ONLY passage in the corpus enumerating rodents: "Отряд Грызуны ... Представители: мышь,
+# полевка, крыса, хомяк, сурок, суслик, белка, летяга, бобр, ондатра, дикобраз, тушканчик"
+gold = ["Грызуны", "полевка"]
+note = "The killer. Loses to a passage about Рукокрылые (bats = 'летучие мыши', literally FLYING MICE), which scores 0.762 vs this chunk's 0.471. Bi-encoders score resemblance, not answerability."
+
+[[q]]
+id = "photosynthesis"
+question = "что такое фотосинтез"
+kbs = ["bio"]
+gold = ["Фотосинтез", "процесс"]
+note = "Control: retrieval already handles this well (0.887). If this ever regresses, the change is bad."
+
+[[q]]
+id = "monkey-tails"
+question = "зачем обезьянам хвосты"
+kbs = ["bio"]
+gold = []          # TRUE NEGATIVE — verified by grep: no passage anywhere covers the FUNCTION of tails
+note = "The corpus discusses tails' absence in apes, never their purpose. Correct behaviour is abstention. In the recorded session qwen answered anyway, from parametric memory."
+
+[[q]]
+id = "lsn-general"
+question = "tell me about LSN in Postgres"
+kbs = ["postgres"]
+gold = ["Log Sequence Number"]
+note = "Suite A, Q1."
+
+[[q]]
+id = "lsn-replay-fn"
+question = "can I get lsn with SELECT pg_last_wal_replay_lsn();"
+kbs = ["postgres"]
+gold = ["pg_last_wal_replay_lsn"]
+note = "Suite A, Q2 — the 'yes, but that's for followers' one. Gold lives in ru-books/pg_monitoring.txt (RUSSIAN source, ENGLISH question — this also tests cross-lingual retrieval)."
+
+[[q]]
+id = "auto-ptr"
+question = "tell me what auto_ptr does"
+kbs = ["cpp"]
+gold = ["auto_ptr"]
+note = "Suite C, C1."

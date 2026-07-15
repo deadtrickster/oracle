@@ -1,0 +1,9 @@
+amopopr       |        oprcode        | amopstrategy
+−−−−−−−−−−−−−−−−−−−−+−−−−−−−−−−−−−−−−−−−−−−−+−−−−−−−−−−−−−−
+ @>(jsonb,jsonb)    | jsonb_contains        |            7
+ ?(jsonb,text)      | jsonb_exists          |            9
+ ?|(jsonb,text[])   | jsonb_exists_any      |           10
+ ?&(jsonb,text[])   | jsonb_exists_all      |           11
+ @?(jsonb,jsonpath) | jsonb_path_exists_opr |           15
+ @@(jsonb,jsonpath) | jsonb_path_match_opr |            16
+(6 rows)
