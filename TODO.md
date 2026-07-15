@@ -544,7 +544,7 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
 - [ ] **G2.2** = items **1, 2, 6, 7, 8** — the closed-loop fixes. All one bug: *the harness knows the
       right answer and returns an error instead of saying it.*
 - [ ] **G2.3** = items **3, 4** — rerank grep hits; compact the code-graph blobs. Context hygiene.
-- [ ] **G2.4** = item **5** — de-scope the DISCIPLINE (it refuses non-coding questions).
+- [x] **G2.4** = item **5** — de-scope the DISCIPLINE (it refuses non-coding questions).
 - [ ] **G2.5** — re-run the four suites. Compare transcripts, **counting tool calls per turn**.
 
 ### G3 — Can I CHECK it, and will it be there?

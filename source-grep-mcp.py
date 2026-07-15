@@ -13,6 +13,7 @@ Run via mcp-proxy (stdio -> SSE) so RAGFlow can reach it. Reads are confined to
 PROJECTS_ROOT; every path is realpath-resolved and rejected if it escapes.
 """
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -44,6 +45,37 @@ def _safe(p: Path) -> Path | None:
         return rp
     except ValueError:
         return None
+
+
+def _resolve_path(path: str) -> Path | None:
+    """Accept EITHER a ~/Projects-relative path OR a code-graph slug.
+
+    Item 6: list_projects prints both forms — `algo/go (graph project: home-dead-Projects-algo-go)` —
+    and callers reasonably paste the slug back into `path`. The old code only accepted the relative
+    form, so the slug 404'd. The slug is the absolute path with the leading '/' dropped and '/'->'-'
+    (see list_projects), so reverse it; fall back to an exact-slug scan when a directory name itself
+    contains a dash (ambiguous reversal, e.g. orioledb-orioledb)."""
+    # normal: relative to ~/Projects
+    t = _safe(PROJECTS_ROOT / path)
+    if t and t.exists():
+        return t
+    root_slug = str(PROJECTS_ROOT).lstrip("/").replace("/", "-")
+    if path.startswith(root_slug):
+        # naive reversal (correct unless a dir name contains '-')
+        t = _safe(Path("/" + path.replace("-", "/")))
+        if t and t.exists():
+            return t
+        # reliable fallback: match the slug against real repos
+        try:
+            out = subprocess.run(["find", str(PROJECTS_ROOT), "-maxdepth", "4", "-name", ".git",
+                                  "-type", "d"], capture_output=True, text=True, timeout=20)
+            for line in out.stdout.splitlines():
+                d = Path(line).parent
+                if str(d).lstrip("/").replace("/", "-") == path:
+                    return d
+        except Exception:
+            pass
+    return None
 
 
 @mcp.tool()
@@ -94,9 +126,10 @@ def source_search(pattern: str, path: str = "", glob: str = "", max_count: int =
     """
     target = PROJECTS_ROOT
     if path:
-        t = _safe(PROJECTS_ROOT / path)
+        t = _resolve_path(path)
         if t is None or not t.exists():
-            return f"error: path not under ~/Projects or missing: {path}"
+            return (f"error: path not under ~/Projects or missing: {path} "
+                    f"(pass a path relative to ~/Projects, or a graph slug from list_projects)")
         target = t
     noise = []
     for g in _NOISE_GLOBS:
@@ -144,6 +177,34 @@ def source_search(pattern: str, path: str = "", glob: str = "", max_count: int =
                             f"extension `orioledb/orioledb`, not the PG fork). Where it occurs:\n{top}")
             except Exception:
                 pass
+        # Item 7: before giving up on a whole-tree miss, AUTO-RELAX. Our own broadness guard tells
+        # callers to anchor a definition (e.g. "class auto_ptr"), but real declarations carry
+        # attribute macros between the keyword and the name (`class _LIBCPP_TEMPLATE_VIS auto_ptr`),
+        # so the anchored pattern returns nothing. Drop leading keywords/anchors, keep the trailing
+        # identifier, retry, and report what the relaxed search found instead of a dead end.
+        if not path:
+            m = re.search(r"([A-Za-z_]\w{2,})\W*$", pattern)
+            ident = m.group(1) if m else ""
+            if ident and ident != pattern:
+                try:
+                    rel = subprocess.run([RG, "-c", "--color", "never", *noise,
+                                          "--regexp", ident, str(PROJECTS_ROOT)],
+                                         capture_output=True, text=True, timeout=30)
+                    rc = []
+                    for ln in rel.stdout.splitlines():
+                        p2, _, n2 = ln.rpartition(":")
+                        if n2.isdigit():
+                            rc.append((int(n2), p2.replace(str(PROJECTS_ROOT) + "/", "")))
+                    if rc:
+                        rc.sort(reverse=True)
+                        tot = sum(n for n, _ in rc)
+                        top = "\n".join(f"  {n:>4}  {p2}" for n, p2 in rc[:12])
+                        return (f"no matches for /{pattern}/ (the anchor may be too strict — real "
+                                f"declarations often carry attribute macros between the keyword and "
+                                f"the name). Relaxed to the bare identifier /{ident}/: {tot} matches. "
+                                f"Anchor the DEFINITION against these files:\n{top}")
+                except Exception:
+                    pass
         return ("no matches" + (f" (searched all of ~/Projects; try a simpler/looser pattern — a "
                                 f"bare identifier or a substring, not an `enum X`/multi-term "
                                 f"alternation)" if not path else ""))
@@ -171,7 +232,9 @@ def source_search(pattern: str, path: str = "", glob: str = "", max_count: int =
     text = out.stdout.strip()
     if not text:
         return "no matches"
-    text = text.replace(str(PROJECTS_ROOT) + "/", "")
+    # Item 8: keep ABSOLUTE paths so the caller can feed a `file:line` straight to Read (Read needs
+    # absolute; stripping the ~/Projects prefix made every hit "File does not exist"). read_lines
+    # still accepts either form.
     return text[:12000]
 
 
