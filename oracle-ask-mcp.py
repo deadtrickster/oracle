@@ -64,13 +64,31 @@ def _diversify(question: str, chunks: list, main: int = 18, cross: int = 4) -> l
     return top + other[:cross]
 
 
+# G1.5 — normalise the RETRIEVAL query (not the synthesis one). Conversational framing carries no
+# information but drags the dense vector toward other *questions* and dilutes the lexical match, so
+# the one informative word gets outvoted. Measured: stripping "какие … ты знаешь" moved a gold
+# passage from rank 30 to 3. Applied only to retrieval; synthesis still sees the real question.
+_FILLER = re.compile(
+    r"^\s*(?:пожалуйста[,\s]+)?(?:расскажи(?:те)?(?:\s+мне)?|что\s+так(?:ое|ие)|какие|какой|какая|"
+    r"перечисли(?:те)?|назови(?:те)?|tell\s+me\s+about|what\s+(?:is|are)|please\s+explain|explain|"
+    r"how\s+does|do\s+you\s+know)\b[\s,:-]*", re.IGNORECASE)
+_FILLER_TAIL = re.compile(
+    r"[\s,]*(?:ты\s+знаешь|вы\s+знаете|do\s+you\s+know|are\s+there|exist.*?)\s*[?.]*\s*$", re.IGNORECASE)
+
+
+def _normalize_query(q: str) -> str:
+    n = _FILLER_TAIL.sub("", _FILLER.sub("", q or "")).strip(" ?.,:-\n")
+    # never strip down to nothing — fall back to the original
+    return n if len(n) >= 3 else (q or "").strip()
+
+
 def _retrieve(question: str, kb_ids: list[str], top_n: int = 64):
     # Return the full reranked pool of 64. Measured 2026-07-15: recall@64 = 100% (every gold
     # passage is within the top 64), but the gold often ranks 15-18 — past the old top_n=20/main=8
     # slice — so the answer was retrieved and then dropped before synthesis. Returning 64 is cheap
     # (rerank cost is set by top_k, not page_size, and top_k is already 64) and stays within the
     # reranker's 30 s timeout (~10 s at 64). Going to 256 would need the reranker parallelised first.
-    body = {"question": question, "dataset_ids": kb_ids, "page_size": top_n,
+    body = {"question": _normalize_query(question), "dataset_ids": kb_ids, "page_size": top_n,
             "top_k": 64, "similarity_threshold": 0.15}
     # try with reranker; on any failure (e.g. CPU busy -> 30s timeout) fall back
     for use_rerank in (True, False):
@@ -97,7 +115,12 @@ def _synthesize(question: str, chunks: list) -> str:
         "specific claim (names, flags, byte sizes, semantics, versions) must come from an excerpt, "
         "never from your own knowledge; (3) cite the excerpt number/source for key claims; (4) if "
         "the excerpts do not contain the answer, reply exactly: 'The corpus doesn't cover this.' "
-        "Be concise. Tag code fences by language.")
+        "Be concise. Tag code fences by language. "
+        # G3.2 — pin the output language. qwen (Chinese-trained) otherwise code-switches into Chinese
+        # mid-sentence on Russian input (half the corpus is Russian). Answer in the question's language.
+        "IMPORTANT: write your entire answer in the SAME language as the question — if the question is "
+        "in Russian, answer in Russian; if English, English. Never switch to Chinese or any other "
+        "language mid-answer.")
     user = f"Question: {question}\n\nExcerpts:\n{context}"
     r = requests.post(f"{OLLAMA}/api/chat", timeout=300, json={
         "model": SYNTH_MODEL, "stream": False,
@@ -130,6 +153,35 @@ def ask_corpus(question: str) -> str:
     sources = sorted({c.get("document_keyword", "?") for c in chunks})
     tag = "reranked" if reranked else "embedding-order (reranker busy)"
     return f"{answer}\n\n---\nGrounded in [{tag}]: {', '.join(sources)}"
+
+
+@mcp.tool()
+def search_corpus(question: str, k: int = 8) -> str:
+    """Return the top-k corpus passages VERBATIM (retrieved + reranked), with NO synthesis.
+
+    Use this instead of ask_corpus when YOU are the reader and want the raw source, not a summary —
+    e.g. to read exact wording, numbers, tables, or code, or to judge the evidence yourself. ask_corpus
+    routes the passages through a weak local model that summarises (and can miss or distort details);
+    search_corpus does not. Returns each passage with its source and page marker if present."""
+    try:
+        kb_ids = _doc_kb_ids()
+    except Exception as e:
+        return f"error reaching corpus: {e}"
+    if not kb_ids:
+        return "The corpus has no parsed content yet."
+    chunks, reranked = _retrieve(question, kb_ids)
+    if not chunks:
+        return "No passages retrieved for this query."
+    k = max(1, min(k, 20))
+    out = []
+    for i, c in enumerate(chunks[:k], 1):
+        src = c.get("document_keyword", "?")
+        pos = c.get("positions") or []
+        page = f" p.{pos[0][0]}" if pos and pos[0] and pos[0][0] > 1 else ""
+        body = (c.get("content_with_weight") or c.get("content", "")).strip()
+        out.append(f"[{i}] ({src}{page}, score {c.get('similarity', 0):.2f})\n{body}")
+    tag = "reranked" if reranked else "embedding-order (reranker busy)"
+    return f"top {len(out)} passages [{tag}] — VERBATIM, unsummarised:\n\n" + "\n\n---\n\n".join(out)
 
 
 # --------------------------------------------------------------- ask_code

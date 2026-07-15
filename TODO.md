@@ -513,7 +513,7 @@ it, and will it be there* (G3).
 time**. With no network to fall back on, that is fatal — and worse, it is *invisible*: it reads as
 "the model hallucinated", so you blame the model and never look upstream. We did, for weeks.
 
-- [ ] **G1.0** — **THE `book` PARSER IGNORES `chunk_token_num`. Median chunk = 47 chars.** (Found
+- [x] **G1.0**  ✅ book.py fixed + re-parsed (median 47→~2400, positions 100%) — **THE `book` PARSER IGNORES `chunk_token_num`. Median chunk = 47 chars.** (Found
       2026-07-14.) Upstream takes `hierarchical_merge` for any document with headings — every textbook
       — and that path never reads `chunk_token_num`: it accumulates against a **hardcoded 218-token**
       limit and only merges *singleton* groups. DeepDoc calls TOC lines and running heads "sections",
@@ -527,13 +527,13 @@ time**. With no network to fall back on, that is fatal — and worse, it is *inv
       we keep DeepDoc's figures and page mapping AND get sane chunks. **Requires re-parsing `books`
       and `bio-books`.** Verify on one book before re-parsing all 19.
 
-- [ ] **G1.1** = item **12** — make the reranker's silent timeout fallback **visible**. Prerequisite:
+- [x] **G1.1**  ✅ already visible — [reranked] vs [embedding-order (reranker busy)] tag = item **12** — make the reranker's silent timeout fallback **visible**. Prerequisite:
       without it, G1.3 degrades quality invisibly under load.
 - [ ] **G1.2** — parallelise the reranker across the 24 idle cores. Unblocks G1.3.
 - [ ] **G1.3** = item **10** — pool 64 → 256. **recall@64 = 80% → recall@256 = 100%.**
-- [ ] **G1.4** = item **11** — widen the final slice past 8.
-- [ ] **G1.5** = item **13** — query normalization. Cheapest win on the board (gold rank 30 → 3).
-- [ ] **G1.6** — re-measure. **Target: recall@8 ≥ 80%.**
+- [x] **G1.4**  ✅ slice widened main 8→18 (the recall-64 bump) = item **11** — widen the final slice past 8.
+- [x] **G1.5**  ✅ query normalization shipped (strips filler; 'какие…ты знаешь'→'виды грызунов') = item **13** — query normalization. Cheapest win on the board (gold rank 30 → 3).
+- [x] **G1.6**  ✅ re-measured: recall@8 40→60%, recall@64 80→100% — re-measure. **Target: recall@8 ≥ 80%.**
 
 ### G2 — Can it USE its tools?
 Every wasted tool call costs four more calls and a defocused context (Axiom 1) — and once, a
@@ -550,7 +550,7 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
 ### G3 — Can I CHECK it, and will it be there?
 - [ ] **G3.1** — finish the corpus-wide judge run (in flight; postgres was skipped by the pagination
       bug).
-- [ ] **G3.2** = item **14** — pin the output language (half the corpus is Russian; qwen leaks Chinese).
+- [x] **G3.2**  ✅ output language pinned in synthesis prompt (stops Chinese leak) = item **14** — pin the output language (half the corpus is Russian; qwen leaks Chinese).
 - [ ] **G3.3** = item **15** — `search_corpus` (raw chunks). *I* need this on the plane: never put the
       weak model between me and the source.
 - [ ] **G3.4** — **`./oracle-ctl.sh resume` must work from cold.** Verify once, end to end. If the
@@ -634,3 +634,23 @@ retrieved then dropped before synthesis by the old narrow slice. Rerank at 64 is
   error the model makes over correct evidence.
 - Context cost: ~22 chunks (~50KB) to qwen — a real Axiom-1 load, accepted for the recall. The 256
   bump (item 10) still waits on the reranker fix (items 12 + G1.2).
+
+- **H11 — OFFLINE FACT SOURCE (Wikipedia), the answer to "the books can't do factoids".** School
+  biology textbooks are CONCEPT sources, not almanacs — they discuss the giraffe's neck as an
+  evolution example and its 7 cervical vertebrae, but never its length; no mouse-species list. No
+  retrieval fix helps: the fact isn't in the text. ⇒ Add a **separate** offline fact layer.
+  - **Shape: a `wiki_search` MCP tool over a Kiwix ZIM** — NOT a vector KB. The ZIM ships its own
+    Xapian full-text index (no embedding/chunking), and full-text is BETTER for factoids ("giraffe"
+    → the article → the fact is right there). ~50-line MCP wrapper (kiwix-serve HTTP or libzim).
+    Parallel to ask_corpus/ask_code — retrieval method matched to source: vector=concepts,
+    fulltext=factoids, grep=code.
+  - **DO NOT** ingest Wikipedia into a RAGFlow vector KB — millions of articles swamp/dilute the
+    technical corpus and blow up the reranker (same lesson as the bio-books diluting PG).
+  - **Bias filter (his ask): keep only science trees.** Query-time category filter over the full ZIM
+    (reversible): allowlist Biology/Chemistry/Physics/Math/Astronomy/Earth-sci/Tech/Animals/Plants/
+    Anatomy trees; drop Politics/Government/Wars/Elections/Countries/Living-people. Fuzzy (multi-cat
+    articles, cyclic graph → ~95%, pick a depth); natural+formal sciences core is the clean part.
+    Alternative for pure organism facts: Wikispecies / EOL (politics-free by construction).
+  - **Ladder:** wiki_search → else qwen parametric with a "(general knowledge, not corpus)" tag →
+    else abstain. Ties to item 5 (de-scope DISCIPLINE): the model KNOWS giraffe≈2m; grounding forbids
+    it. Route by question type — technical=strict grounding, world-knowledge=wiki/parametric.
