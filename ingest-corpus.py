@@ -87,6 +87,17 @@ KBS = [
     ("cpp-libs", "naive", ["cpp-libs/**/*.md", "cpp-libs/**/*.rst"]),  # serenedb deps: abseil/fmt/simdjson/faiss
     ("duckdb", "naive", ["duckdb-web/docs/**/*.md"]),  # DuckDB docs (the serenedb engine)
     ("kubernetes", "naive", ["kubernetes/**/*.md"]),   # k8s docs (kubernetes/website content/en/docs)
+    # Biology books. PDFs are pre-converted with pdftotext -layout -> .txt and chunked "naive"
+    # rather than fed to the book/paper parser (DeepDoc garbles Cyrillic CID fonts,
+    # Новиков -> HOBMKOB; pdftotext handles Latin text equally well, so it's the safe default
+    # for any language). Scanned/image-only PDFs have no text layer and need OCR first.
+    ("bio", "naive", ["bio/*.txt"]),
+    # English biology PDFs (OpenStax, CC BY) go through the DeepDoc "book" parser instead:
+    # DeepDoc only garbles CYRILLIC CID fonts, and in exchange it records real page+bbox
+    # positions (the naive parser stores the stub [[2,1,1,1,1]]) and extracts FIGURES —
+    # which matter for a textbook that is half diagrams. Originals live in
+    # ~/Documents/Books/bio/ and are symlinked into corpus/bio_raw/ (corpus/ is disposable).
+    ("bio-books", "book", ["bio_raw/*.pdf"]),
     ("emacs", "naive", ["emacs/*.txt"]),
     ("postgres", "naive", [
         "postgres/readmes/*.txt", "postgres/*.md", "postgres/README*",
@@ -108,6 +119,25 @@ KBS = [
     ("links", "naive", ["links/*.md", "tooling/**/*.md"]),   # articles + C3L local-LLM watchdog
 ]
 BATCH = 16
+# nginx caps a request at 1024M (docker/nginx/nginx.conf) and MAX_CONTENT_LENGTH defaults to 1 GiB.
+# Batching by COUNT alone is fine for markdown but sends 1.3 GB in one multipart for 400 MB textbook
+# PDFs -> HTTP 413. Cap each request by total BYTES as well; a single file larger than the cap still
+# goes out alone (nothing we can do about that here, and it is under the limit in practice).
+BATCH_BYTES = 256 * 1024 * 1024
+
+
+def batches(files):
+    """Group files into upload batches bounded by BOTH file count and total bytes."""
+    cur, size = [], 0
+    for f in files:
+        n = f.stat().st_size
+        if cur and (len(cur) >= BATCH or size + n > BATCH_BYTES):
+            yield cur
+            cur, size = [], 0
+        cur.append(f)
+        size += n
+    if cur:
+        yield cur
 
 
 def api(sess, base, method, path, **kw):
@@ -160,7 +190,9 @@ def main():
                 (api(s, args.base, "GET", "/datasets?page_size=100") or [])}
 
     for name, chunk_method, globs in KBS:
-        files = sorted({f for g in globs for f in C.glob(g) if f.is_file()})
+        # convention: a leading "!" on a filename excludes it from ingestion (anywhere)
+        files = sorted({f for g in globs for f in C.glob(g)
+                        if f.is_file() and not f.name.startswith("!")})
         if not files:
             print(f"-- {name}: no files yet, skipped")
             continue
@@ -188,8 +220,8 @@ def main():
         print(f"== {name}: {len(files)} files ({len(todo)} new, {len(have)} already up,"
               f" {len(new_ids)} unparsed to re-queue)")
 
-        for i in range(0, len(todo), BATCH):
-            chunk = todo[i:i + BATCH]
+        done = 0
+        for chunk in batches(todo):
             multipart = [("file", (safe_name(f, chunk_method), f.open("rb"))) for f in chunk]
             try:
                 data = api(s, args.base, "POST",
@@ -198,7 +230,8 @@ def main():
             finally:
                 for _, (_, fh) in multipart:
                     fh.close()
-            print(f"   uploaded {min(i + BATCH, len(todo))}/{len(todo)}")
+            done += len(chunk)
+            print(f"   uploaded {done}/{len(todo)}")
         if new_ids:
             api(s, args.base, "POST", f"/datasets/{dsid}/chunks",
                 json={"document_ids": new_ids})

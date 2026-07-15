@@ -43,6 +43,23 @@ start_all() {
   echo "  done. Models load on first request; warm qwen with: ollama run qwen3-coder:30b hi"
 }
 
+resume_all() {
+  # Everything you need after a REBOOT. systemd user units + docker come back on their own,
+  # but two things do NOT: models aren't resident (lazy-loaded -> slow first query), and any
+  # doc that was mid-parse is stuck marked RUNNING with a dead worker — RAGFlow never retries
+  # those, so they sit forever until re-queued.
+  echo "→ resuming the Oracle stack after a restart…"
+  start_all
+  echo "→ warming models (so the first query isn't a 21 GB load)…"
+  ollama run qwen3-coder:30b "hi" >/dev/null 2>&1 || true
+  curl -sf http://localhost:11434/api/embed -d '{"model":"bge-m3","input":"warm"}' >/dev/null 2>&1 || true
+  echo "  ✓ qwen + bge-m3 resident"
+  echo "→ re-queuing parse tasks orphaned by the restart…"
+  ( cd "$(dirname "$0")" && ./requeue-orphans.py )
+  echo
+  status
+}
+
 status() {
   echo "=== Ollama (VRAM):"; ollama ps 2>/dev/null | sed 's/^/  /'
   echo "  $(nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader)"
@@ -54,10 +71,13 @@ case "${1:-}" in
   game|free-vram|vram) free_vram ;;
   stop|perf|down)      stop_all ;;
   start|up)            start_all ;;
+  resume|reboot)       resume_all ;;
   status|st)           status ;;
-  *) echo "usage: $0 {game|stop|start|status}"
+  *) echo "usage: $0 {game|stop|start|resume|status}"
      echo "  game   - unload LLM models -> free VRAM (stack stays up idle). For gaming."
      echo "  stop   - stop EVERYTHING (RAGFlow + services + models). For perf testing."
      echo "  start  - bring the stack back up"
+     echo "  resume - AFTER A REBOOT: start + warm models + re-queue parse tasks the restart"
+     echo "           orphaned (RAGFlow never retries those on its own)"
      echo "  status - what's running + VRAM" ;;
 esac

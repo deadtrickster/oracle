@@ -30,12 +30,21 @@ export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-qwen3-coder:30b
 # qwen context is 56K (server OLLAMA_CONTEXT_LENGTH=57344); output cap:
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-8192}"
 
+# SEPARATE session/config storage. Claude Code keeps its config, settings, memory and
+# session transcripts (projects/<encoded-cwd>/<uuid>.jsonl) under one config dir. Point the
+# LOCAL (qwen) Claude at its own, so its history/memory never mixes with the real Claude
+# Code's ~/.claude — `claude -c`/`-r` in here resumes only local sessions.
+# Share them again by exporting CLAUDE_CONFIG_DIR=$HOME/.claude before running this.
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-local}"
+mkdir -p "$CLAUDE_CONFIG_DIR"
+
 # Oracle MCP servers for the local agent: code graph (codebase-memory) + grounded
 # doc Q&A (oracle-ask -> ask_corpus, cited answers). Deliberately MINIMAL — Claude
 # Code already has Read/Grep/Bash/git natively, and extra tools raise qwen's
 # malformed-call rate. --strict-mcp-config = use ONLY these (self-contained; your
 # real Claude Code config is untouched).
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# readlink -f so this still finds oracle-mcp.json when invoked through a symlink (~/bin/qwen)
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 MCP_CFG="$HERE/oracle-mcp.json"
 
 # Tool-call discipline for a weak local model. Keep ALL tools enabled (nothing is
