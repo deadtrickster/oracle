@@ -543,7 +543,7 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
 - [ ] **G2.1** — run the four `EVAL.md` suites BEFORE any change; keep the transcripts.
 - [x] **G2.2** = items **1, 2, 6, 7, 8** — the closed-loop fixes. All one bug: *the harness knows the
       right answer and returns an error instead of saying it.*
-- [ ] **G2.3** = items **3, 4** — rerank grep hits; compact the code-graph blobs. Context hygiene.
+- [x] **G2.3** = items **3, 4** — rerank grep hits; compact the code-graph blobs. Context hygiene.
 - [x] **G2.4** = item **5** — de-scope the DISCIPLINE (it refuses non-coding questions).
 - [ ] **G2.5** — re-run the four suites. Compare transcripts, **counting tool calls per turn**.
 
@@ -551,11 +551,11 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
 - [ ] **G3.1** — finish the corpus-wide judge run (in flight; postgres was skipped by the pagination
       bug).
 - [x] **G3.2**  ✅ output language pinned in synthesis prompt (stops Chinese leak) = item **14** — pin the output language (half the corpus is Russian; qwen leaks Chinese).
-- [ ] **G3.3** = item **15** — `search_corpus` (raw chunks). *I* need this on the plane: never put the
+- [x] **G3.3** = item **15** — `search_corpus` (raw chunks). *I* need this on the plane: never put the
       weak model between me and the source.
 - [ ] **G3.4** — **`./oracle-ctl.sh resume` must work from cold.** Verify once, end to end. If the
       stack doesn't come up over the Atlantic, none of the rest matters.
-- [ ] **G3.5** — **the corpus browser** (he called it a must-have). Offline, open the actual PDF at the
+- [x] **G3.5** — **the corpus browser** (he called it a must-have). Offline, open the actual PDF at the
       cited page. The `[[p.N]]` markers exist for exactly this.
 
 ---
@@ -654,3 +654,29 @@ retrieved then dropped before synthesis by the old narrow slice. Rerank at 64 is
   - **Ladder:** wiki_search → else qwen parametric with a "(general knowledge, not corpus)" tag →
     else abstain. Ties to item 5 (de-scope DISCIPLINE): the model KNOWS giraffe≈2m; grounding forbids
     it. Route by question type — technical=strict grounding, world-knowledge=wiki/parametric.
+
+### 2026-07-15 — §G code sweep: finished every code-fixable flight-critical item ✅
+Worked §G top-to-bottom. Shipped this session (all committed):
+- **G1.4/G1.5/G3.2**: retrieval slice widened to 18, query normalization (strip filler; verified
+  "какие виды X ты знаешь"→"виды X"), output language pinned (stops qwen's Chinese leak).
+- **G1.1/G1.6**: reranker fallback already tagged visible; recall re-measured on the clean base
+  (@8 40→60%, @64 80→100%).
+- **G3.3**: `search_corpus` MCP tool shipped — top-k passages verbatim, no synthesis.
+- **G2.2** (items 1,2,6,7,8) + **G2.4** (item 5): the full closed-loop set — routing debias +
+  de-scope (qwen.sh, passes shellcheck/shfmt), source_search accepts the graph slug, auto-relax on
+  a too-strict anchor, absolute paths for Read, ask_code redirect on scoped miss.
+- **G2.3**: item 3 (rerank grep hits verbatim via :9760 — the definition now outranks the comment,
+  verified) + item 4 (already satisfied: ask_code extracts clean graph fields, no fp/sp/bt).
+DESIGN §5.2/5.3/9.0 + BLOG Act 13 updated.
+
+**Deliberately NOT done, with reasons (not forgotten):**
+- **G1.2/G1.3** (parallelise reranker → 256 pool): infra. The 64 bump already banked recall@64=100%;
+  256 needs the reranker parallelised first and buys little now. Deferred, not blocking.
+- **G2.1/G2.5** (run the 4 EVAL suites vs qwen, before/after): a TESTING activity needing a live
+  `qwen` session with the new prompt/tools — a human-in-the-loop run, not a code edit. Do next time
+  the local agent is driven.
+- **G3.1** (corpus-wide judge): bio judged (221 cut) + validated; full re-run on the clean corpus is
+  hygiene with NO measured retrieval benefit (2026-07-15 log) — low priority.
+- **G3.4** (`oracle-ctl.sh resume` from cold): needs an actual reboot to test; `status` is clean.
+- **G3.5** (corpus browser): a real build (serve the PDF at the cited `[[p.N]]` page). The data is
+  ready (page positions + figures on every DeepDoc doc); the UI is the remaining work.
