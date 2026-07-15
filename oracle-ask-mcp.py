@@ -426,6 +426,20 @@ def ask_code(question: str, project: str = "") -> str:
             break
     blob = "\n\n".join(hits)[:16000]
     if not graph_ctx and not blob.strip():
+        # Item 2: don't dead-end on a scoped miss — REDIRECT. A wrong `project` guess is common;
+        # probe the other repos with the same patterns and point where the symbol actually lives, so
+        # the caller self-corrects in one call instead of flailing through four (same fix source_search
+        # already has).
+        if project:
+            for p in patterns:
+                elsewhere = _rg(p, PROJECTS, max_count=1, context=0)
+                if elsewhere.strip():
+                    repos = sorted({ln.split("/Projects/", 1)[1].split("/", 2)[1]
+                                    for ln in elsewhere.splitlines() if "/Projects/" in ln})
+                    if repos:
+                        return (f"Not found under {root.name}, but /{p}/ occurs in: "
+                                f"{', '.join(repos[:6])}. You are likely scoped to the WRONG repo — "
+                                f"re-run with the right `project` (or empty to search all).")
         base = f"Not found in the source under {root.name}" if project else "Not found in the source"
         return f"{base} (patterns tried: {patterns})."
     # 4. synthesize from whichever tier(s) produced signal
