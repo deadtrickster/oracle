@@ -174,7 +174,7 @@ def main() -> int:
                                 "why": why, "text": " ".join(c["content"].split())[:400],
                             }, ensure_ascii=False) + "\n")
                             audit.flush()
-                        if verdict == "EXERCISE":
+                        if verdict == "DROP":
                             to_delete.append(c["id"])
                             continue
                         kept_by_judge += 1
