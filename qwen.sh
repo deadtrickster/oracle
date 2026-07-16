@@ -24,7 +24,7 @@ export ANTHROPIC_BASE_URL="${ORACLE_SHIM_URL:-http://localhost:11435}"
 # UNSET or Claude Code warns about conflicting auth (and may use the wrong one).
 unset ANTHROPIC_API_KEY
 export ANTHROPIC_AUTH_TOKEN="ollama"
-export ANTHROPIC_MODEL="qwen3-coder:30b"
+export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-qwen3-coder:30b}"
 # fast/background slot — reuse qwen, or pull a tiny model (e.g. qwen2.5-coder:3b) offline first:
 export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-qwen3-coder:30b}"
 # qwen context is 56K (server OLLAMA_CONTEXT_LENGTH=57344); output cap:
