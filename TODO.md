@@ -548,8 +548,8 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
 - [ ] **G2.5** — re-run the four suites. Compare transcripts, **counting tool calls per turn**.
 
 ### G3 — Can I CHECK it, and will it be there?
-- [ ] **G3.1** — finish the corpus-wide judge run (in flight; postgres was skipped by the pagination
-      bug).
+- [x] **G3.1**  ✅ corpus-wide judge run finished (2026-07-16) — ~1,687 apparatus/exercise chunks
+      dropped across 17 KBs, book KBs came back **0** (already clean = no false positives).
 - [x] **G3.2**  ✅ output language pinned in synthesis prompt (stops Chinese leak) = item **14** — pin the output language (half the corpus is Russian; qwen leaks Chinese).
 - [x] **G3.3** = item **15** — `search_corpus` (raw chunks). *I* need this on the plane: never put the
       weak model between me and the source.
@@ -697,6 +697,23 @@ The must-have. A grounded answer is only trustworthy if you can VERIFY it agains
   deterministic drop, no judge call), and gave `ingest-corpus.py` a `--curate` flag that runs the
   `clean-chunks.py --judge` sweep on every KB after parsing — curation is no longer a step to
   remember.
+
+### 2026-07-16 — G3.1: corpus-wide judge run, finished and audited ✅
+Swept all 17 KBs through `clean-chunks.py --judge` (apparatus-heavy books first). **~1,687 chunks
+deleted, ~26k boilerplate lines stripped**, every DROP audit-logged.
+- **The book KBs — `books`/`bio-books`/`bio`/`postgres` — deleted 0.** They were swept during the
+  browser work; the judge re-ran and cut nothing. That's the load-bearing result: **no false
+  positives**, no real knowledge lost on a re-run.
+- **Biggest yield `emacs` (1142):** GNU Info-manual **indexes** (`* calc-date: Date Conversions.
+  (line 12463)` — name→node→line pointers) and the Emacs FAQ's bare question-headers. Textbook
+  apparatus — an index that points elsewhere and answers nothing.
+- **`cpp` (269):** cppreference `### References` blocks (standard-document page pointers) + redlink
+  stubs. **`linux` (95):** course syllabi, key-value dumps, Bash-variable indexes. `go`/`rust`
+  (15/27): link-farms, RFC TODO templates.
+- **Audit:** sampled the content-shaped DROP reasons by hand — all correct (cross-reference/index
+  sections, not prose). The judge's *"if unclear, KEEP"* bias plus the recall-oriented pre-filter
+  held; a couple of borderline narrative/exercise calls, no systematic loss.
+- This also exercised the new deterministic `is_obvious_toc` path and the spaced-dot TOC fix.
 
 **Deliberately NOT done, with reasons (not forgotten):**
 - **G1.2/G1.3** (parallelise reranker → 256 pool): infra. The 64 bump already banked recall@64=100%;
