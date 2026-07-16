@@ -15,6 +15,7 @@ Run:  uv run ingest-corpus.py --api-key <KEY> [--wait]
 Re-runnable: existing datasets are reused, already-uploaded filenames skipped.
 """
 import argparse
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -181,7 +182,15 @@ def main():
     ap.add_argument("--base", default="http://localhost:9380")
     ap.add_argument("--wait", action="store_true",
                     help="poll until parsing finishes (do this before flying!)")
+    ap.add_argument("--curate", action="store_true",
+                    help="after parsing, run the chunk-level curation sweep (clean-chunks.py --judge) "
+                         "on every KB. Curation is a POST-parse step — RAGFlow's parser is a black box "
+                         "we can't filter mid-parse — so without this, exercises and apparatus "
+                         "(index/TOC/bibliography) come back on every re-ingest. Implies --wait. "
+                         "Needs the judge model (qwen) up.")
     args = ap.parse_args()
+    if args.curate:
+        args.wait = True
 
     s = requests.Session()
     s.headers["Authorization"] = f"Bearer {args.api_key}"
@@ -260,6 +269,20 @@ def main():
                 break
             time.sleep(30)
         print("DONE — spot-check parsed chunks in the UI, then run the offline drill.")
+
+    if args.curate:
+        # Close the loop: parsing produces chunks; curation removes the ones that poison retrieval
+        # (exercises, index/TOC/bibliography). This is the SAME sweep as running clean-chunks.py by
+        # hand — wired here so it isn't a step to remember after every re-ingest.
+        print("\nCurating — dropping exercise/apparatus chunks per KB (clean-chunks.py --judge):")
+        for name, _, _ in KBS:
+            print(f"== curate {name}")
+            r = subprocess.run([sys.executable, str(ROOT / "clean-chunks.py"), name, "--judge"],
+                               cwd=ROOT)
+            if r.returncode != 0:
+                print(f"   !! curation failed for {name} (rc={r.returncode}) — sweep it by hand",
+                      file=sys.stderr)
+        print("CURATION DONE.")
 
 
 if __name__ == "__main__":

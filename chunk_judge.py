@@ -56,6 +56,13 @@ def _numeric_ratio(text: str) -> float:
     return nums / len(toks)
 
 
+def is_obvious_toc(text: str) -> bool:
+    """A chunk with several dotted-leader lines is a TABLE OF CONTENTS beyond doubt — no prose has
+    them. Drop it deterministically, WITHOUT spending a judge call (and without the judge's small
+    error rate). This folds in the one-off TOC sweep so a re-ingest can't quietly resurrect them."""
+    return len(_TOC_LEADER.findall(text)) >= 4
+
+
 def is_candidate(text: str) -> bool:
     """Cheap, recall-oriented pre-filter: might this be droppable apparatus? Err towards YES."""
     if text.count("?") >= 2:

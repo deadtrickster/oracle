@@ -162,6 +162,17 @@ def main() -> int:
         for c in chunks:
             if not args.no_strip_questions:
                 if args.judge:
+                    # A pure table of contents is unambiguous — drop it without a judge call.
+                    if _judge.is_obvious_toc(c["content"]):
+                        if audit:
+                            audit.write(json.dumps({
+                                "doc": d["name"], "chunk_id": c["id"], "verdict": "DROP",
+                                "why": "obvious TOC (>=4 dotted-leader lines) — no judge call",
+                                "text": " ".join(c["content"].split())[:400],
+                            }, ensure_ascii=False) + "\n")
+                            audit.flush()
+                        to_delete.append(c["id"])
+                        continue
                     if _judge.is_candidate(c["content"]):
                         judged += 1
                         verdict, why = _judge.judge(c["content"])

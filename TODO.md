@@ -691,6 +691,12 @@ The must-have. A grounded answer is only trustworthy if you can VERIFY it agains
   queries because it is the densest possible keyword match. Extended the judge to DROP apparatus and
   swept it — plus 108 unambiguous TOC chunks (≥4 dotted-leader lines) deleted directly. `raft` no
   longer returns a table of contents.
+- **Closed the ingestion loop for it.** The manual deletions were post-hoc against the live index; on
+  re-ingest, apparatus comes back (RAGFlow's parser is a black box — curation is necessarily
+  post-parse). So: folded the ≥4-dotted-leader TOC rule into `chunk_judge.is_obvious_toc` (a
+  deterministic drop, no judge call), and gave `ingest-corpus.py` a `--curate` flag that runs the
+  `clean-chunks.py --judge` sweep on every KB after parsing — curation is no longer a step to
+  remember.
 
 **Deliberately NOT done, with reasons (not forgotten):**
 - **G1.2/G1.3** (parallelise reranker → 256 pool): infra. The 64 bump already banked recall@64=100%;
