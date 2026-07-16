@@ -86,27 +86,35 @@ def _page_of(chunk: dict, docname: str) -> int | None:
         page, x0, x1, top, bot = pos[0][:5]
         if x1 > x0 and bot > top and page >= 1:
             return int(page)
-    # Text doc: locate this chunk in the source .txt and take the [[p.N]] marker before it.
+    content = (chunk.get("content_with_weight") or chunk.get("content", "")).strip()
+    # Text doc: locate this chunk in the source .txt by a DISTINCTIVE multi-word phrase (first word
+    # alone matched the ToC entry — "Raft" appears there and links landed on p.9 instead of p.321),
+    # then count [[p.N]] markers before that offset. Whitespace-tolerant, since the indexed chunk is
+    # re-wrapped differently from the raw .txt.
     body, marks = _txt_pagemap(docname)
     if body and marks:
-        content = (chunk.get("content_with_weight") or chunk.get("content", "")).strip()
-        snippet = re.sub(r"\s+", " ", content)[:40].strip()
+        words = [w for w in re.findall(r"\w{2,}", content) if not w.isdigit()][:6]
         idx = -1
-        if snippet:
-            # the chunk text is whitespace-normalised in the index; scan the raw body loosely
-            probe = snippet.split(" ")[0] if " " in snippet else snippet
-            if len(probe) >= 4:
-                idx = body.find(probe)
-        page = None
-        for off, pg in marks:
-            if idx < 0 or off <= idx:
-                page = pg
-            else:
-                break
-        return page
-    # last resort: a marker literally inside the chunk
-    m = re.search(r"\[\[p\.(\d+)\]\]", chunk.get("content_with_weight") or chunk.get("content", ""))
-    return int(m.group(1)) if m else None
+        if len(words) >= 3:
+            probe = re.compile(r"\W+".join(re.escape(w) for w in words))
+            m = probe.search(body)
+            idx = m.start() if m else -1
+        if idx >= 0:
+            page = None
+            for off, pg in marks:
+                if off <= idx:
+                    page = pg
+                else:
+                    break
+            if page:
+                return page
+    # marker literally inside the chunk: the chunk starts on the page BEFORE its first marker
+    # (there is content preceding it), which is a good approximation when the phrase probe misses.
+    m = re.search(r"\[\[p\.(\d+)\]\]", content)
+    if m:
+        n = int(m.group(1))
+        return max(1, n - 1) if content.find(m.group(0)) > 40 else n
+    return None
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>Oracle corpus</title>
