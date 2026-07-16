@@ -14,7 +14,8 @@ I/O, reading OrioleDB's on-disk WAL/undo format).
 
 **Hard constraints:**
 - **Offline.** Once you unplug, it only knows what's on disk. All fetching/pulling happens online, up front.
-- **24 GB VRAM is the scarce resource.** It holds the LLM (+ query embeddings) and nothing else.
+- **24 GB VRAM is the scarce resource.** It holds the LLM (+ query embeddings) and nothing else —
+  *for a dense model*. A sparse MoE with few active params can bend this rule (see §2, MoE-offload).
 - **125 GB RAM + 24 cores are abundant** and cheap — push everything non-LLM there.
 - **Version-exact.** io_uring/kernel pinned to the *target* kernel (7.0), PG to the fork's 17.9, etc.
 - **Weak local model.** qwen3-coder:30b is the brain — capable but far below frontier; the whole
@@ -37,6 +38,36 @@ workload: unified memory forces the LLM weights and RAG data to fight over one p
 gives each what it wants in separate pools. The whole system is organized around keeping the GPU
 for the model and pushing everything else to the abundant side.
 
+**When the split bends: sparse-MoE offload.** "The GPU holds the *whole* model" is a rule for a
+**dense** model, where every weight is on the bandwidth-bound hot path of every token, so any weight
+in slow RAM stalls generation. It is **not** a law of the hardware — it is a consequence of dense
+architecture. A **sparse Mixture-of-Experts** model breaks the assumption: only a few experts fire per
+token (e.g. `qwen3-coder-next` is ~50 GB of weights but only **~3 B active** per token). So the
+right split is by *what's hot*: keep attention, the router, and the dense/shared layers on the GPU;
+put the ~50 GB of rarely-touched experts in the 125 GB of system RAM, paged in on demand. The hot
+path stays GPU-resident and small; the cold experts ride the abundant side — the same
+"split-by-appetite" principle, now applied *inside* one model instead of between the model and RAG.
+This is exactly the appetite split we already make for RAG, so it is consistent, not an exception —
+**provided the architecture earns it** (few active params, MoE routing). It would be wrong for a dense
+30 B, which is why `qwen3-coder:30b` stays GPU-only and `qwen-next` (the 49.6 GB MoE) is the one model
+allowed to use GPU **+** ~50 GB RAM. Loading it unloads the 30 B — they don't co-reside. (See
+`CODER-NEXT-HANDOFF.md`.)
+
+*Two things are doing the work here, and it's worth not conflating them:*
+- **The offload itself is a runtime feature, not a build one.** `llama.cpp`/Ollama place the expert
+  tensors on CPU (`--n-cpu-moe N`, or `-ot ".ffn_.*_exps.=CPU"`) — keep attention on the GPU, page
+  experts from RAM. This works on *any* MoE GGUF; it is not specific to a vendor's weights.
+- **Unsloth's edge is quality-per-gigabyte, which is exactly what a memory-constrained hybrid run
+  needs.** An 80 B model compressed to ~50 GB to fit the box *will* lose something to quantization;
+  the question is how much. Unsloth's **Dynamic** quants (`UD-*`) allocate bits *per-tensor by
+  importance* — sensitive layers (attention, router) keep precision, the bulky experts are squeezed —
+  so accuracy-per-byte is high (their Aider-Polyglot "score vs VRAM" curve shows even 3-bit `UD-IQ3`
+  holding up). That is why reaching for the Unsloth build is the right call for offload: not because it
+  "does" the hybrid placement (it doesn't — the runtime does), but because when you're *forced* to keep
+  half the model in slower RAM at a low bit-width, you want the compression that costs the least
+  quality. And the two compose neatly — the tensors Dynamic squeezes hardest (experts) are the ones
+  offload puts in RAM anyway.
+
 ## 3. Components
 
 | Layer | Choice | Why |
@@ -47,7 +78,7 @@ for the model and pushing everything else to the abundant side.
 | Embeddings | **bge-m3** via Ollama | multilingual (Russian PG books!), 0.66 GB, coexists with qwen |
 | Reranker | **gte-multilingual-reranker-base** (CPU service) | 2-stage retrieval; multilingual; ~2.7 s/30 chunks; the highest-ROI retrieval upgrade |
 | Code structure | **codebase-memory** graph | call graphs / struct lookups that RAG-chunking C can't do |
-| Reading UI | **miniserve** :9800 | browse the raw corpus (rendered docs, diagrams) |
+| Reading UI | **oracle-browser** :9765 | search → the rendered source page w/ query highlighted; `/browse` corpus tree (subsumed the old miniserve :9800) |
 | Editor | **Emacs gptel** → Ollama | quick ask-in-editor |
 
 ## 4. The corpus
