@@ -696,6 +696,49 @@ refusal was the prompt over-narrowing the domain. Both fixed by *removing* promp
 None of it is exciting. All of it is the difference between a tool you fight and a tool that gets out
 of the way. On a plane, with no second chances, that difference is the whole game.
 
+## Act 14 — I built the thing that lets me not trust the model
+
+Every prior act was about making the model's answer better. This one admits it never gets to *perfect*
+and builds the escape hatch: **a way to check.** A grounded answer is a claim with a footnote; the
+browser is what turns the footnote back into the source, offline, in one click.
+
+The first version served the retrieved *chunk* as text and I hated it on sight. A chunk is what the
+embedder sees, not what a human should — re-wrapped `pdftotext`, page markers mid-sentence, the caption
+of a diagram fused to the paragraph after it. So I threw the text away and rendered **the actual page**:
+`pdftoppm`, 200 dpi, the typeset book exactly as printed. Reading the reconstruction was archaeology;
+reading the page is just reading.
+
+Then the small, telling fights, each one a "why is *this* wrong":
+
+- **"Why P9?"** A chunk about Raft linked to page 9 — the table of contents. My page-finder had probed
+  the source text with the chunk's first word, *"Raft,"* and `.find()` returned the first hit: the ToC
+  entry. Fixed to probe a distinctive *phrase*. Then a Russian chunk still fell through to ugly text
+  because the phrase *"кластера. 4. Перед…"* has a number wedged in it and my word-separator didn't
+  span digits. The page viewer is a pile of these — every one a place where "close enough" wasn't.
+- **"Highlight the terms."** On a rendered page your eye needs somewhere to land. I pull word bounding
+  boxes from `pdftotext -bbox` and paint gold boxes over the matches — but matched by *stem*, not
+  string, so *"какие виды мышей ты знаешь"* lights up `вид` and `мыш` across all their inflections and
+  ignores the "do you know" scaffolding. The same anchor-noun idea as the query normaliser, now made
+  visible on the page.
+- **"This name sucks."** The doc was called `kubernetes__setup__production-environment___index.md`.
+  That's an ingest artifact, not a name. Markdown docs now show their front-matter title
+  (*"Production environment"*), PDFs their real filename.
+- **"Let me see the tree, so I can keep reading."** The markdown came from a docs *repo* — so opening a
+  doc now gives you a left nav tree of its neighbours, and a `/browse` folder view of the whole corpus.
+  Which quietly deleted a whole component: I'd been running a second static server (miniserve) just to
+  browse files. "These two can fold now," he said. They folded.
+- **"The whole screen flashes."** ←/→ did a full page navigation. Now the viewer swaps only the page
+  image, decodes it *before* the swap so there's no blank frame, and precaches the pages around you. It
+  went from a web page you reload to a reader you flip through.
+
+And the browser paid for itself immediately by exposing a corpus bug I'd have never found in a metrics
+table: search `raft`, and the top hit was the book's **index**. Of course it was — an index is the
+single densest keyword match in the entire book, and the single most useless thing to read. *Garbage
+doesn't have to be wrong to poison you; it only has to be shaped like the query.* The fix wasn't in the
+browser at all; it was teaching the curation judge that a table of term→page-number is apparatus, not
+content, and sweeping it out. The tool that verifies the answers turned out to be the best instrument I
+had for finding what was wrong with the data underneath them.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*

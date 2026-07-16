@@ -1,6 +1,6 @@
 # Oracle — TODO
 
-Last updated **2026-07-14**.
+Last updated **2026-07-16**.
 
 This file is the **durable state of the work**. **§G is the only checklist** — the work that is
 actually happening. §A–D describe what each item *is* (reference, cited by number from §G). §F logs
@@ -669,6 +669,29 @@ Worked §G top-to-bottom. Shipped this session (all committed):
   verified) + item 4 (already satisfied: ask_code extracts clean graph fields, no fp/sp/bt).
 DESIGN §5.2/5.3/9.0 + BLOG Act 13 updated.
 
+### 2026-07-16 — the corpus browser, built for real (G3.5) ✅
+The must-have. A grounded answer is only trustworthy if you can VERIFY it against the original, offline
+— so the browser closes that loop. Shipped (commits `e66e6c8`, `791ed55`):
+- **Search → the rendered page, not the chunk.** Results embed the actual PDF page image (`pdftoppm`,
+  200 dpi), because reading reconstructed `pdftotext` (re-wrapped, page-marker noise, diagram shards)
+  "sucks." Page comes from DeepDoc bbox or the `[[p.N]]` markers.
+- **Highlight the query on the page.** Anchor nouns are boxed on the page image (word bboxes via
+  `pdftotext -bbox`, positioned as page-fraction %) and `<mark>`ed in markdown/text. Cyrillic-stemmed
+  (`мышей→мыш`, `виды→вид`) with a conversational stoplist, so *"какие виды мышей ты знаешь"* lights up
+  `вид`/`мыш` and nothing else.
+- **Markdown reads like a page too.** GitHub-flavoured render (front-matter stripped), framed in serif
+  so it sits beside the PDF renders without clashing; `/md/{doc}` opens the full doc centred, scrolled
+  to the passage (`#hit`), with a **left nav tree** of its directory so you can keep reading.
+- **Folded in miniserve.** `/browse` + `/raw` are the corpus folder tree, opening each file in the
+  right viewer; the old miniserve on `:9800` (`oracle-docs.service`) is stopped and disabled.
+- **Real names, native paging.** Headers show the source PDF filename / md front-matter title (not the
+  `<subdir>__<file>.txt` slug); the viewer flips pages **in place** with ←/→ (decode-before-swap, no
+  flash) and precaches ±3 neighbours.
+- **A bug the browser exposed:** apparatus (index/TOC/bibliography) out-ranks real content on keyword
+  queries because it is the densest possible keyword match. Extended the judge to DROP apparatus and
+  swept it — plus 108 unambiguous TOC chunks (≥4 dotted-leader lines) deleted directly. `raft` no
+  longer returns a table of contents.
+
 **Deliberately NOT done, with reasons (not forgotten):**
 - **G1.2/G1.3** (parallelise reranker → 256 pool): infra. The 64 bump already banked recall@64=100%;
   256 needs the reranker parallelised first and buys little now. Deferred, not blocking.
@@ -678,5 +701,5 @@ DESIGN §5.2/5.3/9.0 + BLOG Act 13 updated.
 - **G3.1** (corpus-wide judge): bio judged (221 cut) + validated; full re-run on the clean corpus is
   hygiene with NO measured retrieval benefit (2026-07-15 log) — low priority.
 - **G3.4** (`oracle-ctl.sh resume` from cold): needs an actual reboot to test; `status` is clean.
-- **G3.5** (corpus browser): a real build (serve the PDF at the cited `[[p.N]]` page). The data is
-  ready (page positions + figures on every DeepDoc doc); the UI is the remaining work.
+- **G3.5** (corpus browser): ✅ **built** (2026-07-16 log). Search → the rendered source page with the
+  query highlighted; folds in the old miniserve folder view.

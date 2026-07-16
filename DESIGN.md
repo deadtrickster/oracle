@@ -324,6 +324,41 @@ in the config, and displayed back to us — then silently ignored by the code pa
 Nothing errored. Nothing warned. We only found it because the chunk *counts* looked odd (4 English
 books → 60k chunks; 6 Russian books → 6.6k), and someone asked why.
 
+### The corpus browser — the verification surface
+
+The promise the page markers were *for*: **a grounded answer you can check against the original,
+offline.** `ask_corpus`/`search_corpus` give the passage; the browser (`oracle-browser.py`, `:9765`)
+gives the passage **and** the source page it came from, one click away. The design principles that
+emerged, each from a concrete failure:
+
+- **Show the page, not the chunk.** A retrieved chunk is reconstructed `pdftotext` — re-wrapped, salted
+  with `[[p.N]]` markers, fragmented by diagrams. Unreadable. So a result renders the *actual PDF page*
+  (`pdftoppm`, 200 dpi) via DeepDoc bbox or the `[[p.N]]` marker map. You read the typeset page, not our
+  reconstruction of it.
+- **The page lookup is a two-source trust rule.** DeepDoc PDFs carry a real `[page,x0,x1,top,bot]` bbox
+  — trusted *only* when non-degenerate, because naive/text docs store a bogus counter there
+  (`[[619,618,…]]`) that once put the viewer past the end of the book. Text docs are located instead by
+  probing the source `.txt` for a **distinctive multi-word phrase** (the first word alone matched a ToC
+  entry and sent every link to p.9) with a separator class that spans **digits** (a `"кластера. 4.
+  Перед…"` chunk otherwise failed to match and fell back to ugly text).
+- **Highlight the intent, not the string.** Query *anchor nouns* are boxed on the page image (word
+  bboxes from `pdftotext -bbox`, expressed as page-fraction % so they track the responsive image) and
+  `<mark>`ed in text/markdown. Matching is by Cyrillic/Latin **stem** with a conversational stoplist, so
+  *"какие виды мышей ты знаешь"* highlights `вид`/`мыш` and drops the scaffolding.
+- **One browser, three source shapes.** PDFs → rendered page; markdown → GitHub-flavoured render
+  (front-matter stripped), framed in serif to sit beside the page images, with a left **nav tree** of
+  the doc's directory for continuous reading; everything else → raw. `/browse` is the corpus folder
+  tree — which retired the separate static-file server (miniserve) that used to do that job.
+- **Native-feeling mechanics.** ←/→ flip pages *in place* (next image decoded before the swap → no
+  flash) with ±3 precached; headers show the real source filename / front-matter title, never the
+  `<subdir>__<file>.txt` ingest slug.
+
+**What the browser exposed:** apparatus — a book's index, table of contents, bibliography — is the
+*densest possible keyword match* and the *least useful answer*. It out-ranked real chapters on keyword
+queries (`raft` → the index). The fix was not a browser feature but a corpus one: the curation judge
+(above) was widened to DROP apparatus, and unambiguous ToC chunks (≥4 dotted-leader lines) were deleted
+outright. *Garbage doesn't have to be wrong to poison you; it only has to be shaped like the query.*
+
 ### 5.2 The lexical channel — a 1972 solution we weren't using
 
 Retrieval is hybrid: RAGFlow blends a **token** score with a **vector** score, and the default weight
