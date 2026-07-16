@@ -9,6 +9,7 @@ jump into the real PDF at the exact page, offline. The page comes from DeepDoc's
     uv run --with fastapi --with uvicorn --with requests python oracle-browser.py   # -> http://localhost:9765
 """
 import html
+import json
 import os
 import re
 import subprocess
@@ -506,29 +507,50 @@ def _pdf_pages(pdf: Path) -> int:
         return 0
 
 
-VIEW = """<!doctype html><meta charset=utf-8><title>{name} p.{p}</title>
-<style>body{{font:14px system-ui;margin:0;background:#333;color:#eee;text-align:center}}
-.bar{{position:sticky;top:0;background:#222;padding:.5rem;display:flex;gap:1rem;justify-content:center;align-items:center}}
-.bar a{{color:#8cf;text-decoration:none;padding:.2rem .6rem;border:1px solid #555;border-radius:4px}}
-.bar a.off{{opacity:.3;pointer-events:none}}
-.pgwrap{{position:relative;display:inline-block;margin:1rem auto}}
-.pgwrap img{{max-width:100%;display:block;background:#fff;box-shadow:0 2px 12px #0008}}
-.hl{{position:absolute;background:rgba(255,214,0,.42);mix-blend-mode:multiply;border-radius:2px;pointer-events:none}}
-.dl{{color:#9c9}}</style>
+# The viewer is a small client app: arrow keys / buttons swap the page IMAGE in place (no full
+# reload → no flash), and neighbouring pages are PRECACHED so the swap is instant. Highlight boxes
+# come from /pagemeta as JSON and are redrawn per page. `/*CFG*/` is filled with the page's config
+# (kept out of the JS braces so we don't have to escape the whole script for str.format).
+VIEW = """<!doctype html><meta charset=utf-8><title>corpus viewer</title>
+<style>body{font:14px system-ui;margin:0;background:#333;color:#eee;text-align:center}
+.bar{position:sticky;top:0;z-index:5;background:#222;padding:.5rem;display:flex;gap:1rem;justify-content:center;align-items:center}
+.bar a,.bar button{color:#8cf;background:none;font:inherit;cursor:pointer;text-decoration:none;padding:.2rem .6rem;border:1px solid #555;border-radius:4px}
+.bar button.off{opacity:.3;pointer-events:none}.bar a{color:#9c9}
+.pgwrap{position:relative;display:inline-block;margin:1rem auto;min-height:60vh}
+.pgwrap img{max-width:100%;display:block;background:#fff;box-shadow:0 2px 12px #0008}
+.hl{position:absolute;background:rgba(255,214,0,.42);mix-blend-mode:multiply;border-radius:2px;pointer-events:none}</style>
 <div class=bar>
-<a class="{prevoff}" href="{prevurl}">← p.{prev}</a>
-<b>{name} — page {p} / {total}</b>
-<a class="{nextoff}" href="{nexturl}">p.{next} →</a>
-<a class=dl href="/pdf/{doc}" target=_blank>full PDF ↧</a>
+<button id=prev>← prev</button><b id=lbl></b><button id=next>next →</button>
+<a id=dl target=_blank>full PDF ↧</a>
 </div>
-<div class=pgwrap><img src="/pageimg/{doc}?p={p}" alt="page {p}">{overlays}</div>
+<div class=pgwrap id=wrap><img id=pg alt=page></div>
 <script>
-// Flip pages with the ← / → arrow keys, like a real page viewer.
-const P="{prevurl}",N="{nexturl}";
-addEventListener('keydown',e=>{{
-  if(e.key==='ArrowLeft'&&P){{e.preventDefault();location.href=P;}}
-  else if(e.key==='ArrowRight'&&N){{e.preventDefault();location.href=N;}}
-}});
+const C=/*CFG*/;
+const img=document.getElementById('pg'),wrap=document.getElementById('wrap'),lbl=document.getElementById('lbl'),
+      prev=document.getElementById('prev'),next=document.getElementById('next');
+document.getElementById('dl').href='/pdf/'+C.doc;
+const imgUrl=p=>`/pageimg/${C.doc}?p=${p}`, metaUrl=p=>`/pagemeta/${C.doc}?p=${p}&q=${C.q}`;
+const metaCache={};
+const getMeta=async p=>metaCache[p]??(metaCache[p]=fetch(metaUrl(p)).then(r=>r.json()).catch(()=>({boxes:[]})));
+function draw(boxes){wrap.querySelectorAll('.hl').forEach(e=>e.remove());
+  for(const b of boxes||[]){const s=document.createElement('span');s.className='hl';
+    s.style.cssText=`left:${b[0]}%;top:${b[1]}%;width:${b[2]}%;height:${b[3]}%`;wrap.appendChild(s);}}
+function preload(p){if(p>=1&&p<=C.total){const i=new Image();i.src=imgUrl(p);getMeta(p);}}
+let cur=0;
+async function show(p){
+  p=Math.max(1,Math.min(C.total,p));cur=p;
+  const pre=new Image();pre.src=imgUrl(p);try{await pre.decode()}catch(e){}   // decode before swap → no flash
+  if(cur!==p)return;                                                          // a newer nav superseded us
+  img.src=imgUrl(p);draw((await getMeta(p)).boxes);
+  lbl.textContent=`${C.name} — page ${p} / ${C.total}`;document.title=`${C.name} p.${p}`;
+  prev.classList.toggle('off',p<=1);next.classList.toggle('off',p>=C.total);
+  history.replaceState(null,'',`/view/${C.doc}?p=${p}&q=${C.q}`);
+  [1,-1,2,-2,3].forEach(d=>preload(p+d));
+}
+prev.onclick=()=>show(cur-1);next.onclick=()=>show(cur+1);
+addEventListener('keydown',e=>{if(e.key==='ArrowLeft'){e.preventDefault();show(cur-1)}
+  else if(e.key==='ArrowRight'){e.preventDefault();show(cur+1)}});
+show(C.start);
 </script>"""
 
 
@@ -538,16 +560,23 @@ def view(docname: str, p: int = 1, q: str = ""):
     if not pdf:
         return HTMLResponse(f"no source PDF for {html.escape(docname)}", status_code=404)
     total = _pdf_pages(pdf) or p
-    p = max(1, min(p, total))
-    dq = urllib.parse.quote(docname)
-    qq = urllib.parse.quote(q)
-    prevurl = "" if p <= 1 else f"/view/{dq}?p={p - 1}&q={qq}"
-    nexturl = "" if p >= total else f"/view/{dq}?p={p + 1}&q={qq}"
-    return VIEW.format(doc=dq, name=html.escape(pdf.name), q=qq,
-                       p=p, total=total, prev=max(1, p - 1), next=min(total, p + 1),
-                       prevurl=prevurl, nexturl=nexturl,
-                       prevoff="off" if p <= 1 else "", nextoff="off" if p >= total else "",
-                       overlays=_overlays(pdf, p, q))
+    cfg = json.dumps({"doc": urllib.parse.quote(docname), "name": pdf.name, "total": total,
+                      "start": max(1, min(p, total)), "q": urllib.parse.quote(q)})
+    return HTMLResponse(VIEW.replace("/*CFG*/", cfg))
+
+
+@app.get("/pagemeta/{docname}")
+def pagemeta(docname: str, p: int = 1, q: str = ""):
+    """Highlight boxes for one page as JSON, so the client can redraw overlays on an in-place page
+    swap without a round-trip to re-render HTML."""
+    pdf = _resolve_pdf(docname)
+    if not pdf:
+        return Response(json.dumps({"boxes": []}), media_type="application/json")
+    total = _pdf_pages(pdf) or p
+    boxes = [[round(l, 2), round(t, 2), round(w, 2), round(h, 2)]
+             for l, t, w, h in _hl_boxes(pdf, max(1, min(p, total)), _anchor_terms(q))]
+    return Response(json.dumps({"p": p, "total": total, "boxes": boxes}),
+                    media_type="application/json")
 
 
 MDPAGE = """<!doctype html><meta charset=utf-8><title>{name}</title>
