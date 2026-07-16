@@ -43,7 +43,7 @@ _MC_STEM = re.compile(r"_{3,}")
 _NUMBERED_Q = re.compile(r"(?m)^\s*\d+[.)]\s+\S")
 
 
-_TOC_LEADER = re.compile(r"\.{4,}\s*\d+")                    # "Chapter 5 ........ 123"
+_TOC_LEADER = re.compile(r"(?:\.\s?){4,}\d")                 # "Chapter 5 ........ 123" or ". . . . 3"
 _CITEKEY = re.compile(r"\[[A-Z][A-Za-z]+\d{2,4}\]")          # "[RYSTSOV16]" bibliography key
 
 

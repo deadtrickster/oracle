@@ -118,11 +118,12 @@ def _page_of(chunk: dict, docname: str) -> int | None:
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>Oracle corpus</title>
-<style>body{{font:15px/1.5 system-ui;max-width:900px;margin:2rem auto;padding:0 1rem;background:#faf9f7}}
+<style>body{{font:15px/1.5 system-ui;max-width:760px;margin:2rem auto;padding:0 1rem;background:#faf9f7}}
 form{{display:flex;gap:.5rem}}input[name=q]{{flex:1;padding:.5rem}}button{{padding:.5rem 1rem}}
 .hit{{border:1px solid #ddd;border-radius:6px;padding:.7rem 1rem;margin:.8rem 0;background:#fff}}
-.src{{color:#666;font-size:.85em}}.src a{{color:#06c;text-decoration:none}}.src a:hover{{text-decoration:underline}}
-.body{{white-space:pre-wrap;margin-top:.4rem}}mark{{background:#fe9}}.tag{{color:#999;font-size:.8em}}</style>
+.src{{color:#666;font-size:.85em;margin-bottom:.5rem}}.src a{{color:#06c;text-decoration:none}}.src a:hover{{text-decoration:underline}}
+.body{{white-space:pre-wrap;margin-top:.4rem}}img.pg{{width:100%;border:1px solid #eee;box-shadow:0 1px 6px #0002;display:block}}
+mark{{background:#fe9}}.tag{{color:#999;font-size:.8em}}</style>
 <h2>🔮 Oracle corpus browser</h2>
 <form action=/search><input name=q value="{q}" placeholder="search the corpus…" autofocus>
 <button>search</button></form>{body}"""
@@ -151,16 +152,21 @@ def search(q: str = "", k: int = 12):
     for c in chunks:
         doc = c.get("document_keyword", "?")
         page = _page_of(c, doc)
-        text = html.escape((c.get("content_with_weight") or c.get("content", "")).strip()[:1200])
-        link = ""
+        d = html.escape(doc)
+        # Prefer the RENDERED PDF PAGE over the reconstructed chunk text (pdftotext output is ugly:
+        # re-wrapped, page markers, diagram fragments). Fall back to text only when there's no PDF.
         if _resolve_pdf(doc) and page:
-            link = (f' — <a href="/view/{html.escape(doc)}?p={page}" target=_blank>'
-                    f'open p.{page} ↗</a>')
-        elif _resolve_pdf(doc):
-            link = f' — <a href="/pdf/{html.escape(doc)}" target=_blank>open PDF ↗</a>'
-        out.append(f'<div class=hit><div class=src>{html.escape(doc)}'
-                   f'{f" · p.{page}" if page else ""} · score {c.get("similarity",0):.2f}{link}</div>'
-                   f'<div class=body>{text}</div></div>')
+            head = (f'<div class=src>{d} · p.{page} · score {c.get("similarity",0):.2f} — '
+                    f'<a href="/view/{d}?p={page}" target=_blank>open ↗</a></div>')
+            media = (f'<a href="/view/{d}?p={page}" target=_blank>'
+                     f'<img class=pg src="/pageimg/{d}?p={page}" loading=lazy alt="p.{page}"></a>')
+            out.append(f'<div class=hit>{head}{media}</div>')
+        else:
+            text = html.escape((c.get("content_with_weight") or c.get("content", "")).strip()[:1200])
+            link = f' — <a href="/pdf/{d}" target=_blank>open PDF ↗</a>' if _resolve_pdf(doc) else ""
+            out.append(f'<div class=hit><div class=src>{d}'
+                       f'{f" · p.{page}" if page else ""} · score {c.get("similarity",0):.2f}{link}</div>'
+                       f'<div class=body>{text}</div></div>')
     return PAGE.format(q=html.escape(q), body="".join(out))
 
 
