@@ -17,3 +17,4 @@ __pycache__/
 
 # generated eval artifacts
 eval-reports/
+.eval-hidden/

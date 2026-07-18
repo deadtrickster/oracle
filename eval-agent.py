@@ -18,9 +18,12 @@ bare `claude`, so the PRODUCTION config is injected — DISCIPLINE prompt, --mcp
 underneath. Injection is verified per turn from qwen.sh's banner.
 """
 import argparse
+import contextlib
+import glob
 import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 import time
@@ -35,6 +38,40 @@ DISCIPLINE_DIR = CWD / "discipline"
 INJECTION_BANNER = "schema-discipline prompt appended"
 REPOS = {"orioledb": Path.home() / "Projects" / "orioledb",
          "serenedb": Path.home() / "Projects" / "serenedb"}
+
+# FIX 1 (de-contamination): qwen's source_search reaches ~/Projects, where these live — EVAL.md IS the
+# answer key, and TODO/FINDINGS analyse the model's own failures. A model that greps them is reading the
+# test. During an eval run we move them into .eval-hidden/ (a dotdir ripgrep skips) and restore after.
+ANSWER_KEY = ["EVAL.md", "TODO.md", "FINDINGS.md"]
+HIDDEN = CWD / ".eval-hidden"
+MODEL_OVERRIDE = None  # --model sets this; passed to qwen.sh via ANTHROPIC_MODEL (which is overridable)
+
+
+def restore_answer_key():
+    """Restore any files left in .eval-hidden by a crashed run. Call at startup, before anything."""
+    if HIDDEN.is_dir():
+        for f in HIDDEN.iterdir():
+            dst = CWD / f.name
+            if not dst.exists():
+                f.rename(dst)
+
+
+@contextlib.contextmanager
+def hidden_answer_key():
+    HIDDEN.mkdir(exist_ok=True)
+    moved = []
+    for name in ANSWER_KEY:
+        src = CWD / name
+        if src.exists():
+            src.rename(HIDDEN / name)
+            moved.append(name)
+    print(f"[eval] hid answer key from qwen's search path: {moved}", flush=True)
+    try:
+        yield
+    finally:
+        for name in moved:
+            (HIDDEN / name).rename(CWD / name)
+        print("[eval] restored answer key", flush=True)
 
 # Questions verbatim from EVAL.md, asked IN ORDER in one session (the interconnection is the test).
 SUITES = {
@@ -94,8 +131,13 @@ RUBRICS = {
     "C4": {"must": [r"weak_ptr"],
            "trap": [r"shared_ptr[^.]{0,70}(❌|\bno\b|cannot|can't)[^.]{0,30}(container|vector)"],
            "grounded": True},
-    "C5": {"must": [r"C\+\+17"],
-           "trap": [r"c\+\+17[^.]{0,40}(nothing|no new|added nothing|has nothing|doesn)"],
+    # FIX 2 (2026-07-18): the old trap false-failed "no new *classes*, but shared_ptr<T[]> was added"
+    # (a correct answer). Now: PASS requires naming a REAL C++17 addition; only a bald "added nothing"
+    # trips the trap. NOTE: this rubric change resets the C5 baseline vs the 2026-07-18 07:15 run.
+    "C5": {"must": [r"C\+\+17", r"shared_ptr<T\[\]>|array (support|specialization)|weak_from_this|"
+                    r"enable_shared_from_this"],
+           "trap": [r"c\+\+17[^.]{0,60}(added nothing|has nothing|nothing (new )?was added|"
+                    r"introduced nothing|no changes)"],
            "grounded": True},
     "D1": {"must": [r"баланс|равновес|хват|prehensile|balance|grasp|сигнал|climb|лаз"],
            "trap": [r"не связан с программирован|coding assistant|programming (model|assistant)|"
@@ -107,12 +149,30 @@ RUBRICS = {
 }
 
 
+# The exact tools the eval agent is allowed to use without a permission prompt — scoped pre-approval,
+# NOT a blanket bypass. Headless runs otherwise fail on ungranted MCP tools (qwen-next's B run hit
+# "haven't granted search_graph yet" and fell back to Bash). These are the oracle MCP servers the
+# DISCIPLINE routes to, plus the read-only shell/file tools. Nothing destructive is on the list.
+ALLOWED_TOOLS = [
+    "mcp__source-grep", "mcp__codebase-memory", "mcp__oracle-ask", "mcp__oracle-lsp",
+    "Read", "Glob", "Grep",              # scoped read-only native tools
+    # read-only git + gh (branch-issue mandate); gh read set + full list also live in the global
+    # ~/.claude*/settings.json (additive). No general Bash, no `gh api` (dual-use), no writes.
+    "Bash(git log *)", "Bash(git show *)", "Bash(git diff *)", "Bash(git blame *)",
+    "Bash(gh pr view *)", "Bash(gh pr list *)", "Bash(gh pr diff *)", "Bash(gh pr checks *)",
+    "Bash(gh issue view *)", "Bash(gh issue list *)", "Bash(gh run view *)",
+]
+
+
 def run_turn(qtext, sid, first, extra=None, timeout=1200):
-    args = [str(QWEN), "-p", qtext, "--output-format", "json"]
+    args = [str(QWEN), "-p", qtext, "--output-format", "json",
+            "--allowedTools", *ALLOWED_TOOLS]
     args += ["--session-id", sid] if first else ["--resume", sid]
     env = dict(os.environ)
     if extra:
         env["ORACLE_DISCIPLINE_EXTRA"] = str(extra)
+    if MODEL_OVERRIDE:
+        env["ANTHROPIC_MODEL"] = MODEL_OVERRIDE
     t0 = time.time()
     try:
         r = subprocess.run(args, cwd=str(CWD), capture_output=True, text=True, timeout=timeout, env=env)
@@ -235,11 +295,19 @@ def report(label, suite, sid, injected, turns):
     return "\n".join(lines), passes, decay
 
 
-def run_suite(suite, label, extra=None):
+def _answer_key_leak(sid):
+    """Did this session read any answer-key file? Should be [] after de-contamination — a guard."""
+    f = TRANSCRIPTS / f"{sid}.jsonl"
+    if not f.exists():
+        return []
+    txt = f.read_text(encoding="utf-8", errors="replace")
+    return sorted({name for name in ANSWER_KEY if name in txt})
+
+
+def run_suite(suite, label, extra=None, rep=0):
     REPORTS.mkdir(exist_ok=True)
     sid = str(uuid.uuid4())
-    tag = f"{label}/{suite}"
-    print(f"== {tag}  session={sid}  extra={extra}", flush=True)
+    print(f"== {label}/{suite} rep{rep}  session={sid}  extra={extra}", flush=True)
     inj = []
     for i, (t, q) in enumerate(SUITES[suite]):
         print(f"   -> {t} ...", flush=True)
@@ -252,82 +320,123 @@ def run_suite(suite, label, extra=None):
             break
     turns = analyze(sid)
     injected = bool(inj) and all(inj) and len(inj) == len(SUITES[suite])
-    rep, passes, decay = report(label, suite, sid, injected, turns)
-    print("\n" + rep, flush=True)
-    base = REPORTS / f"{label}-{suite}-{sid[:8]}"
-    base.with_suffix(".md").write_text(rep)
+    leak = _answer_key_leak(sid)
+    if leak:
+        print(f"   ⚠️  ANSWER-KEY LEAK: session read {leak} — de-contamination FAILED", flush=True)
+    rep_md, passes, decay = report(label, suite, sid, injected, turns)
+    if leak:
+        rep_md += f"\n\n> ⚠️ CONTAMINATED — read answer-key files {leak}"
+    print("\n" + rep_md, flush=True)
+    base = REPORTS / f"{label}-{suite}-r{rep}-{sid[:8]}"
+    base.with_suffix(".md").write_text(rep_md)
     base.with_suffix(".json").write_text(json.dumps(
-        {"suite": suite, "label": label, "sid": sid, "injected": injected, "extra": str(extra),
-         "passes": passes, "total": len(SUITES[suite]), "decay": decay, "turns": turns},
-        ensure_ascii=False, indent=2))
-    return {"suite": suite, "label": label, "passes": passes, "total": len(SUITES[suite]),
-            "decay": decay, "injected": injected}
+        {"suite": suite, "label": label, "rep": rep, "sid": sid, "injected": injected,
+         "extra": str(extra), "passes": passes, "total": len(SUITES[suite]), "decay": decay,
+         "leak": leak, "turns": turns}, ensure_ascii=False, indent=2))
+    return {"suite": suite, "passes": passes, "total": len(SUITES[suite]), "decay": decay,
+            "injected": injected, "leak": leak}
 
 
-def tournament(suites):
-    """Baseline + every discipline/*.txt variant, across the given suites. Ranked. This is the ONE
-    unattended entry point: approve `python3 eval-agent.py --tournament` and it runs the whole thing."""
+def tournament(suites, repeats=1):
+    """Baseline + every discipline/*.txt variant, across the given suites, `repeats` times each; ranked
+    by the MEDIAN passes per cell (robust to the run-to-run variance we measured). The answer key is
+    hidden for the whole run. This is the ONE unattended entry point."""
     variants = [("baseline", None)]
     if DISCIPLINE_DIR.is_dir():
         variants += [(p.stem, p) for p in sorted(DISCIPLINE_DIR.glob("*.txt"))]
-    print(f"### TOURNAMENT: {len(variants)} variants x {len(suites)} suites "
+    print(f"### TOURNAMENT: {len(variants)} variants x {len(suites)} suites x {repeats} repeat(s) "
           f"({[n for n, _ in variants]})\n", flush=True)
-    grid = {}
-    for name, extra in variants:
-        for s in suites:
-            try:
-                r = run_suite(s, name, extra=extra)
-            except Exception as e:  # one failure must not kill the tournament
-                print(f"!! {name}/{s} crashed: {e}", flush=True)
-                r = {"passes": -1, "total": len(SUITES[s]), "decay": True, "injected": False}
-            grid[(name, s)] = r
-    # ranking
-    print("\n" + "=" * 60 + "\n### RANKING\n" + "=" * 60, flush=True)
-    header = "variant".ljust(16) + "".join(s.center(7) for s in suites) + "  total"
-    print(header, flush=True)
+    grid = {}  # (name, suite) -> list of pass counts across repeats
+    with hidden_answer_key():
+        for name, extra in variants:
+            for s in suites:
+                got = []
+                for r_i in range(repeats):
+                    try:
+                        got.append(run_suite(s, name, extra=extra, rep=r_i)["passes"])
+                    except Exception as e:  # one failure must not kill the tournament
+                        print(f"!! {name}/{s} rep{r_i} crashed: {e}", flush=True)
+                grid[(name, s)] = got
+    print("\n" + "=" * 66 + f"\n### RANKING (median of {repeats} run(s)/cell)\n" + "=" * 66, flush=True)
+    header = "variant".ljust(16) + "".join(s.center(12) for s in suites) + "  total"
     ranked = []
     for name, _ in variants:
-        cells, tot, ttot = "", 0, 0
+        cells, tot, ttot = "", 0.0, 0
         for s in suites:
-            r = grid[(name, s)]
-            cells += f"{r['passes']}/{r['total']}".center(7)
-            tot += max(0, r["passes"])
-            ttot += r["total"]
+            ps = grid.get((name, s)) or []
+            total_q = len(SUITES[s])
+            med = statistics.median(ps) if ps else 0
+            spread = f"[{min(ps)}-{max(ps)}]" if len(ps) > 1 else ""
+            cells += f"{med:g}/{total_q}{spread}".center(12)
+            tot += med
+            ttot += total_q
         ranked.append((tot, ttot, name, cells))
-    for tot, ttot, name, cells in sorted(ranked, reverse=True):
-        print(name.ljust(16) + cells + f"  {tot}/{ttot}", flush=True)
-    (REPORTS / "tournament-ranking.txt").write_text(
-        header + "\n" + "\n".join(name.ljust(16) + cells + f"  {tot}/{ttot}"
-                                  for tot, ttot, name, cells in sorted(ranked, reverse=True)))
+    out = [header] + [name.ljust(16) + cells + f"  {tot:g}/{ttot}"
+                      for tot, ttot, name, cells in sorted(ranked, reverse=True)]
+    print("\n".join(out), flush=True)
+    (REPORTS / "tournament-ranking.txt").write_text("\n".join(out))
     print(f"\nsaved ranking + per-run reports under {REPORTS}", flush=True)
 
 
+def analyze_reports():
+    """Per-turn breakdown + contamination check across eval-reports/*.json — so a round is inspected
+    through this ONE approved script, not ad-hoc shell (which needs per-command approval)."""
+    files = sorted(glob.glob(str(REPORTS / "*.json")))
+    if not files:
+        print("no eval-reports/*.json yet")
+        return
+    for fp in files:
+        d = json.loads(Path(fp).read_text())
+        tags = [t for t, _ in SUITES[d["suite"]]]
+        leak = d.get("leak") or _answer_key_leak(d["sid"])
+        flag = f"  ⚠️ CONTAMINATED read {leak}" if leak else ""
+        print(f"\n### {d['label']}/{d['suite']} rep{d.get('rep', 0)} (inject={d['injected']}){flag}")
+        for tag, t in zip(tags, d["turns"]):
+            v, reasons = grade(tag, t)
+            rd = any("source_search" in x or "read_lines" in x for x in t["tools"])
+            print(f"  {tag} {v:7} tools={len(t['tools']):2} read_src={rd}  {'; '.join(reasons)[:88]}")
+
+
 def main():
+    restore_answer_key()  # recover any files a prior crashed run left in .eval-hidden/, BEFORE anything
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("suite", nargs="?", default=None)
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--tournament", action="store_true")
+    ap.add_argument("--analyze", action="store_true",
+                    help="per-turn breakdown + contamination check over eval-reports/ (no inference)")
     ap.add_argument("--extra", type=Path, help="a discipline variant file to append")
     ap.add_argument("--label", default="run")
-    ap.add_argument("--suites", default="ABCD", help="which suites for --tournament (default ABCD)")
+    ap.add_argument("--repeats", type=int, default=1,
+                    help="runs per (variant,suite); ranking uses the median (beats run-to-run variance)")
+    ap.add_argument("--suites", default="ABCD")
+    ap.add_argument("--model", default=None, help="override ANTHROPIC_MODEL (e.g. qwen3-coder-next)")
     ap.add_argument("--grade-json", type=Path)
     args = ap.parse_args()
+    if args.model:
+        global MODEL_OVERRIDE
+        MODEL_OVERRIDE = args.model
 
     if args.grade_json:
         d = json.loads(args.grade_json.read_text())
         print(report(d.get("label", "regrade"), d["suite"], d["sid"], d["injected"], d["turns"])[0])
         return 0
+    if args.analyze:
+        analyze_reports()
+        return 0
     if args.tournament:
-        tournament([c for c in args.suites.upper() if c in SUITES])
+        tournament([c for c in args.suites.upper() if c in SUITES], repeats=args.repeats)
         return 0
     suites = list(SUITES) if args.all else [args.suite.upper()] if args.suite else []
     if not suites:
-        ap.error("give a suite (A/B/C/D), --all, or --tournament")
-    for s in suites:
-        if s not in SUITES:
-            print(f"no such suite: {s}", file=sys.stderr)
-            return 1
-        run_suite(s, args.label, extra=args.extra)
+        ap.error("give a suite (A/B/C/D), --all, --tournament, or --analyze")
+    with hidden_answer_key():
+        for s in suites:
+            if s not in SUITES:
+                print(f"no such suite: {s}", file=sys.stderr)
+                return 1
+            for r_i in range(args.repeats):
+                run_suite(s, args.label, extra=args.extra, rep=r_i)
     return 0
 
 
