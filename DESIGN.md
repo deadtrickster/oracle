@@ -390,6 +390,45 @@ queries (`raft` → the index). The fix was not a browser feature but a corpus o
 (above) was widened to DROP apparatus, and unambiguous ToC chunks (≥4 dotted-leader lines) were deleted
 outright. *Garbage doesn't have to be wrong to poison you; it only has to be shaped like the query.*
 
+### The eval harness — validating the agent, and tuning the prompt against it
+
+The browser lets a human verify one answer. The eval harness (`eval-agent.py` + `EVAL.md`) does the
+same thing systematically, for the whole agent — because the recurring failure of this system is a
+model that is *fluent and wrong*, and fluency is exactly what a casual read rewards. So the answer key
+is written down BEFORE the run, and a change to the prompt or the tooling is **judged, not admired**.
+
+Three design choices carry the weight:
+
+- **A suite is a CONVERSATION, not a bag of prompts.** The failure we most need to catch —
+  **grounding decay**, where qwen grounds turn 1 and then answers the rest from parametric memory — only
+  appears on turn 2+. So the harness drives all questions in one session (`--session-id` then `--resume`)
+  and records **tool calls per turn**, not just the final text. Zero tool calls on a later turn is the
+  smoking gun.
+- **It measures the agent you actually ship.** The driver runs qwen through `~/bin/qwen` → `qwen.sh`,
+  *never* bare `claude`, so the production DISCIPLINE prompt, the MCP config, and the tool trim are all
+  injected; testing a bare client would measure a different agent. Injection is verified from qwen.sh's
+  banner every turn (Claude Code doesn't persist the appended system prompt to the transcript).
+- **The grader is a frozen instrument.** Each question's rubric encodes `must`/`trap`/`grounded`/
+  `read_source`, and — for enumerations — compares the model's set against the **real source set**
+  (e.g. A4's `WAL_REC_*` codes are diffed against `wal_record.h`: fabricate one and it fails). The
+  rubric is never edited to make a variant pass; that would be gaming the ruler.
+
+**The finding that justified all of it: grounding ≠ correctness.** On **Suite A** (Postgres/OrioleDB,
+well covered by both corpus and clean source) qwen is genuinely good — it read `wal_record.h` and
+enumerated all 19 real WAL records with zero fabrication. On **Suite B** (serenedb, a large private C++
+codebase with *no* corpus coverage) it scored **0/4**: it called tools and then synthesized generic,
+confidently-wrong answers, on B2 never opening the source at all. The facts it missed were all
+`grep`-findable in seconds — so the bottleneck is not the tools but the model's search-and-synthesis on
+an unfamiliar target. That is the boundary of the local stack, and the concrete case for evaluating a
+larger model (`qwen-next`).
+
+**Tuning the prompt is itself a closed loop.** Rather than argue about prompt wording, DISCIPLINE
+tweaks are run as a **tournament**: each variant is a `discipline/*.txt` file appended to production via
+qwen.sh's `ORACLE_DISCIPLINE_EXTRA` hook, and `--tournament` scores baseline + every variant across all
+suites with the *same frozen rubric*, then ranks them. The prompt improves or it doesn't, measured
+against a constant — the same discipline we apply to the corpus and the tools, now applied to the words
+we put in the model's mouth. (Working state and the iteration log live under `discipline/`.)
+
 ### 5.2 The lexical channel — a 1972 solution we weren't using
 
 Retrieval is hybrid: RAGFlow blends a **token** score with a **vector** score, and the default weight

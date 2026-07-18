@@ -739,6 +739,45 @@ browser at all; it was teaching the curation judge that a table of term→page-n
 content, and sweeping it out. The tool that verifies the answers turned out to be the best instrument I
 had for finding what was wrong with the data underneath them.
 
+## Act 15 — I taught the machine to grade itself, and it found the ceiling
+
+The browser verifies one answer at a time, by eye. But the failure that haunts this whole project is a
+model that is *fluent and wrong*, and fluency is precisely what a quick read forgives. So I wrote the
+answer key down first — before any run — so a prompt change could be **judged, not admired**, and then
+built a harness to drive the local model through the questions and grade it against that key.
+
+Two things made it honest. First, it drives the model through the exact launcher I ship (`qwen.sh` —
+production system prompt, MCP tools, the works), never a bare client, because otherwise you're grading a
+different animal than the one that flies. Second, the suites are *conversations*, not lists — because
+the failure I most needed to catch only shows up on turn two. It's called **grounding decay**: the
+model grounds the first question with real tool calls, then quietly stops and answers the rest from
+memory — which is exactly where it starts making things up. You can't see that in a single prompt; you
+have to count tool calls *per turn* across a conversation.
+
+Then the result that made the whole exercise worth it. On the PostgreSQL/OrioleDB suite the local model
+was genuinely good — asked for OrioleDB's WAL records, it opened the actual header and enumerated all
+nineteen, zero invented. I checked every one against the source; it didn't fabricate a single code.
+I was ready to call the local stack good enough.
+
+Then I pointed it at serenedb — a big private C++ codebase the corpus has never seen — and it scored
+**zero out of four**. Not by refusing. By *answering*: it called its tools, got generic noise back, and
+then confidently reconstructed a plausible, wrong story from training memory — describing a Postgres/
+DuckDB engine as if it were MongoDB, claiming a key-ordering behavior the code flatly contradicts. On
+the hardest question it never opened the source at all. And here's the part that reframes everything:
+every fact it missed, I found with `grep` in about ten seconds. The tools weren't the bottleneck. The
+*model* was — its search-and-synthesis on unfamiliar ground. **Grounding is not correctness.** Calling
+the tool and reading what it returns are two different skills, and the second one is where a weak model
+quietly falls back to bullshitting.
+
+That's the ceiling, drawn precisely: strong where the ground is familiar, a confident fabricator where
+it isn't. Which is the entire argument for a bigger brain — and, in the meantime, for one more turn of
+the screw on the prompt. So the last move was to make *prompt-tuning* a closed loop too: each candidate
+DISCIPLINE is a file appended on top of production, and a tournament runs them all across every suite
+against the same frozen rubric, and ranks them. No arguing about wording. The prompt improves or it
+doesn't, measured against a constant — the same discipline I'd already applied to the corpus and the
+tools, finally turned on the words I put in the model's own mouth. I left it running overnight to grade
+and re-grade itself while I slept.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
