@@ -117,8 +117,25 @@ KBS = [
                          "prob-ds/papers/*.pdf"]),   # HLL, count-min, xor/fuse, minhash
     ("books", "book", ["books/*.md", "books/*.txt", "books_raw/*.pdf", "books_raw/*.PDF",
                        "books_raw/*.epub"]),
+    # awesome-book-collection (~/Documents/Books/awesome-book-collection, symlinked to
+    # corpus/collection_raw — corpus/ is disposable so we don't copy 3 GB). 165 category-
+    # organized tech-book PDFs through the DeepDoc "book" parser (real page+bbox + figures).
+    # NOT included: the 12 .epub (RAGFlow's book parser rejects epub — need pandoc->md first,
+    # a follow-up) and the 23 .md (they are catalog listings: README/BOOKS_LIST, not content).
+    # Books already curated into "books" are dropped via EXCLUDE so retrieval doesn't double-hit.
+    ("collection", "book", ["collection_raw/**/*.pdf"]),
     ("links", "naive", ["links/*.md", "tooling/**/*.md"]),   # articles + C3L local-LLM watchdog
 ]
+# Paths (relative to corpus/, POSIX) to skip even when a glob matches them. Purpose: keep the
+# big collection from RE-INGESTING books already in the "books" KB — cross-KB / cross-filename
+# duplicates that the filename-based dedup below cannot see, and which poison retrieval by
+# returning the same book twice. DDIA is here 3x (it also appears 3x inside the collection).
+EXCLUDE = {
+    "collection_raw/Databases/Alex Petrov - Database Internals_ A Deep Dive into How Distributed Data Systems Work-O'Reilly Media (2019).pdf",
+    "collection_raw/Databases/design/Designing Data Intensive Applications - Martin Kleppmann.pdf",
+    "collection_raw/Distributed Systems/_Designing Data Intensive Applications.pdf",
+    "collection_raw/Software Architecture/_Designing Data Intensive Applications.pdf",
+}
 BATCH = 16
 # nginx caps a request at 1024M (docker/nginx/nginx.conf) and MAX_CONTENT_LENGTH defaults to 1 GiB.
 # Batching by COUNT alone is fine for markdown but sends 1.3 GB in one multipart for 400 MB textbook
@@ -201,7 +218,8 @@ def main():
     for name, chunk_method, globs in KBS:
         # convention: a leading "!" on a filename excludes it from ingestion (anywhere)
         files = sorted({f for g in globs for f in C.glob(g)
-                        if f.is_file() and not f.name.startswith("!")})
+                        if f.is_file() and not f.name.startswith("!")
+                        and f.relative_to(C).as_posix() not in EXCLUDE})
         if not files:
             print(f"-- {name}: no files yet, skipped")
             continue
