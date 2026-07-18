@@ -498,6 +498,21 @@ days without ever checking it.)*
   clean copies of themselves. Near-duplicate crowding in its most stupid possible form — and it had
   been silently degrading every PostgreSQL query in the corpus.
 
+### 2026-07-18 — qwen-next KV prefix cache: per-slot, and how we keep sessions warm ✅/🅿️
+- **Behavior:** llama-server caches each slot's KV and routes a new request to the slot whose cached
+  tokens best match the prompt **prefix** (`selected slot by LCP similarity, sim_best = 0.994`). First
+  turn = full PP over the whole ~90 K context (minutes); every turn after reuses the stable prefix and
+  PP's only the delta → the "gets faster after the first prompt" effect. Cache is **per slot**;
+  `kv_unified` only shares the KV *memory pool*, not the cached content. (Full writeup in DESIGN §2.)
+- **Done:** `--parallel 1 → 2` for warm session-switching. The 0.2 tok/s collapse is from two requests
+  generating **at the same instant**, not from having 2 slots — so `--parallel 2` used *sequentially*
+  is free. Hard ceiling is VRAM: the shared ~256 K pool holds two ~120 K sessions but not two huge ones.
+- **🅿️ Parked (post-freeze), no fork needed:** llama-server has `--slot-save-path` + `POST
+  /slots/{id}?action=save|restore`. Teach **the shim** to dump the active slot's KV to a tmpfs on
+  idle (keyed by session) and restore before the next session's first request → unlimited warm
+  sessions in the 125 GB RAM, surviving restarts. Caveat: a dump is void once the prefix changes
+  (DISCIPLINE edit, **context compaction rewriting history**, model/quant/flag change).
+
 ---
 
 # G. THE WORK (the only checklist)

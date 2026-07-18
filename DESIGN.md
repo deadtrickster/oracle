@@ -114,6 +114,39 @@ one landed on CPU at 100%).
   ~21 GB. Now compaction fires at ~200K with the server holding comfortably more. The bug was never the
   size — it was two components disagreeing about how big the box is.
 
+**KV prefix caching and warm session-switching.** After the first turn of a session, follow-up turns
+are *much* faster — the log line `selected slot by LCP similarity, sim_best = 0.994` is why. llama-server
+keeps each slot's KV cache and, on a new request, routes it to the slot whose cached tokens best match
+the new prompt's **prefix** (longest-common-prefix). A coding conversation's prefix (system prompt +
+history) is ~99% stable turn-to-turn, so all but the newly-added tokens are reused instead of re-processed
+— the first turn pays full prompt-processing over the whole ~90 K-token context (~350 tok/s PP, several
+minutes), every turn after pays only the delta. CUDA-graph capture (`graphs reused = …`) compounds it.
+The cache is **per slot** (each slot holds one sequence's KV; reuse is by routing, not cross-slot sharing);
+`kv_unified` only controls whether slots draw from one shared KV *memory pool* vs. fixed partitions — the
+cached *content* is per-sequence either way. This sets up a real `--parallel` trade-off:
+
+| `--parallel` | warm caches | switching cost | concurrent speed |
+|---|---|---|---|
+| **1** | one session warm | switch = full cold re-PP | n/a (requests queue) |
+| **2–3** | each session keeps its slot warm | instant | tanks to ~0.2 tok/s **iff two generate at once** |
+
+The 0.2 tok/s collapse is caused by two requests running at the *same instant* (one slot's 24-thread PP
+starves the other's bandwidth-bound TG), **not** by having multiple slots. So `--parallel 2` used
+*sequentially* (one session active at a time) gives warm switching for free — which is why we run 2, not 1.
+The hard limit is VRAM: two warm prefixes = two KV caches resident; with `kv_unified` the ~256 K pool is
+*shared*, so two ~120 K sessions coexist but two huge ones evict each other, and splitting into fixed
+128 K partitions would reintroduce the overflow bug above. Forking the scheduler can't move that ceiling.
+
+*Parked option — persist KV to RAM/disk (no fork).* llama-server already exposes `--slot-save-path` plus
+`POST /slots/{id}?action=save|restore`, which dump/reload a slot's KV as a file (a memcpy, ~instant vs a
+multi-minute re-PP). It isn't automatic because "session stop" is a *client-side* event the server never
+hears — neither Claude Code nor the shim maps it to a save call. qwen-next's hybrid-linear KV is small and
+we have 125 GB RAM, so pointing `--slot-save-path` at a tmpfs and teaching **the shim** to save the active
+slot on idle (keyed by session) and restore it before the next session's first request would give
+effectively unlimited warm sessions, surviving even server restarts. Caveat: a dump is valid only while
+the token prefix is unchanged — editing the DISCIPLINE system prompt, a **context compaction that rewrites
+history**, or any model/quant/flag change voids it — and it's coupled to the exact llama.cpp build.
+
 ## 3. Components
 
 | Layer | Choice | Why |
