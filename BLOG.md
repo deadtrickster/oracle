@@ -778,6 +778,46 @@ doesn't, measured against a constant — the same discipline I'd already applied
 tools, finally turned on the words I put in the model's own mouth. I left it running overnight to grade
 and re-grade itself while I slept.
 
+## Act 16 — Ollama got me 80%; the last 20% was raw llama.cpp
+
+The model downloaded, Ollama ran it, ~23 tok/s. Fine. Then I noticed the GPU sitting at one busy
+core during generation and wondered what was being left on the table. The answer turned into the most
+satisfying tuning session of the whole project — and a lesson about where convenience stops paying.
+
+Ollama runs `llama-server` under the hood but fixes the important knobs internally. Run that same
+binary directly (once you feed it Ollama's CUDA backend by hand — `GGML_BACKEND_PATH` at
+`cuda_v13/libggml-cuda.so`, an incantation that took a couple of "no usable GPU found" faceplants to
+find) and the knobs come out. The sweep that followed produced a genuinely **counterintuitive** result:
+**prompt processing and token generation want opposite thread counts.** Prompt processing is a big
+parallel matrix-multiply — it wants all 24 cores. Generation is one token at a time, memory-bandwidth
+bound — and piling 24 threads on it made them *fight over the memory bus*: **24 threads → 2 tok/s; 8
+threads → 34.** Fewer threads, faster. Ollama uses one `--threads` for both, so it can't win both — you
+split `--threads` (8) from `--threads-batch` (24) and suddenly you beat it on *both* axes: PP ~1200
+(from a fat `--ubatch`), TG ~34. My first attempt, before I understood any of this, was *15× slower*
+than Ollama because I naively shoved every expert onto the CPU. The tools only help if you know which
+way to turn them.
+
+Then the wiring, which is where I got humbled twice more.
+
+I stood the tuned server up as a systemd unit and pointed everything at it — the agent's shim (one env
+var, since it already spoke the right API) and the corpus synthesizer (a small patch, since it spoke
+Ollama's dialect). One fast qwen-next serving the whole stack; Ollama demoted to embeddings. Clean. And
+completely broken: **"Worked 0s,"** every turn, even a plain "continue." The log: `tools param requires
+--jinja flag`. Claude Code sends its tool schema on *every* request, and llama-server with `--no-jinja`
+*rejects any request that carries tools* — so it wasn't the tool-heavy turns failing, it was **all** of
+them. One flag.
+
+And then, still broken on long sessions, a subtler one — the one worth remembering. Claude Code believes
+qwen-next has a **200K** context window (its model registry says so). I'd capped the server at 128K. A
+143K-token conversation is under 200K, so Claude Code never triggers compaction — it thinks there's
+room — and sends the whole thing. llama-server, capped lower than Claude Code *believes*, rejects it.
+**The overflow protection that should have saved it — compaction — never fired, because it fires against
+the believed limit, not the real one.** The fix is to make the real limit exceed the belief: `-c 262144`.
+Now the server can hold more than Claude Code will ever send, and compaction (at ~200K) always fires
+with headroom to spare. The bug wasn't the size; it was the *disagreement* between two components about
+how big the box was — the same silent-mismatch failure mode this whole project keeps rediscovering,
+wearing yet another hat.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*

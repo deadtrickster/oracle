@@ -145,13 +145,8 @@ def _synthesize(question: str, chunks: list) -> str:
         "in Russian, answer in Russian; if English, English. Never switch to Chinese or any other "
         "language mid-answer.")
     user = f"Question: {question}\n\nExcerpts:\n{context}"
-    r = requests.post(f"{OLLAMA}/api/chat", timeout=300, json={
-        "model": SYNTH_MODEL, "stream": False,
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
-        "options": {"temperature": 0.1}})
-    r.raise_for_status()
-    return r.json()["message"]["content"]
+    return _chat([{"role": "system", "content": system},
+                  {"role": "user", "content": user}], timeout=300)
 
 
 @mcp.tool()
@@ -209,13 +204,22 @@ def search_corpus(question: str, k: int = 8) -> str:
 
 # --------------------------------------------------------------- ask_code
 
-def _qwen(system: str, user: str, timeout: int = 240) -> str:
-    r = requests.post(f"{OLLAMA}/api/chat", timeout=timeout, json={
-        "model": SYNTH_MODEL, "stream": False,
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "options": {"temperature": 0.1}})
+def _chat(messages, timeout: int = 240) -> str:
+    """One synthesis call to the OpenAI /v1/chat/completions endpoint — served by BOTH Ollama and
+    llama.cpp, so ORACLE_OLLAMA_URL can point at either. We point it at the tuned qwen-next
+    llama-server (:18080) so synthesis runs on the fast, MoE-offloaded qwen-next with no model swap.
+    Response shape is OpenAI's choices[0].message.content; max_tokens is generous so answers (which
+    can be long, verbatim source blocks) are not truncated by llama-server's small default."""
+    r = requests.post(f"{OLLAMA}/v1/chat/completions", timeout=timeout, json={
+        "model": SYNTH_MODEL, "stream": False, "messages": messages,
+        "temperature": 0.1, "max_tokens": 4096})
     r.raise_for_status()
-    return r.json()["message"]["content"].strip()
+    return r.json()["choices"][0]["message"]["content"]
+
+
+def _qwen(system: str, user: str, timeout: int = 240) -> str:
+    return _chat([{"role": "system", "content": system},
+                  {"role": "user", "content": user}], timeout).strip()
 
 
 _STOP = {"what", "does", "do", "the", "list", "each", "with", "its", "and", "for", "how",

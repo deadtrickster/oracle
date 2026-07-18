@@ -68,11 +68,57 @@ allowed to use GPU **+** ~50 GB RAM. Loading it unloads the 30 B — they don't 
   quality. And the two compose neatly — the tensors Dynamic squeezes hardest (experts) are the ones
   offload puts in RAM anyway.
 
+**Serving qwen-next: raw llama.cpp, tuned — and why Ollama isn't enough.** Ollama runs qwen-next at a
+respectable ~23 tok/s, but it fixes `--threads`/`--ubatch` internally and offloads by whole layers, so
+you can't tune the MoE hybrid. Running llama.cpp's `llama-server` directly (the *same binary* Ollama
+bundles — point `GGML_BACKEND_PATH` at `cuda_v13/libggml-cuda.so` + `LD_LIBRARY_PATH` at the Ollama lib
+dirs to get its CUDA backend) exposes the knobs, and a config sweep on this box (24 GB VRAM, 24 cores)
+found the win:
+
+- **Prompt processing (PP) and token generation (TG) want *opposite* tuning, and one thread count can't
+  serve both.** PP ingests the whole prompt at once — matrix×matrix, compute-bound, parallel — so it
+  wants **all cores** (`--threads-batch 24`) and a **fat `--ubatch`** (2048 → ~1.5–2× the PP of Ollama's
+  512, because a bigger batch amortizes the streamed expert weights over more tokens). TG is one token
+  at a time — matrix×vector, **memory-bandwidth-bound** — so piling threads on it just makes them fight
+  for DDR5 bandwidth: **`--threads 24` collapsed TG to ~2 tok/s; `--threads 8` gave ~34.** The
+  counterintuitive result — *fewer* threads for generation — is the whole reason to leave Ollama, which
+  uses one `--threads` for both.
+- **`--n-cpu-moe` fills VRAM deliberately.** `-ncmoe 28–30` keeps ~22.5 GB of experts on the GPU (the
+  24 GB ceiling; `≤22` OOMs) and offloads the overflow to RAM — the *opposite* of the naive
+  `-ot ".ffn_.*_exps.=CPU"` (banishes all experts → wastes VRAM → 1.5 tok/s).
+- **`--no-mmap` over mmap** for a coding agent: it loads experts into anon RAM so the PP GEMMs run
+  fault-free (~1233 vs ~860 tok/s PP), at the cost of a ~48 s cold start — worth it because grep-heavy
+  agent turns hammer PP. (`--mlock` is the middle ground: mmap + pinned, best TG ~38, mmap-class PP, and
+  it guarantees the model never swaps.)
+
+**Net: PP ~1.2 k tok/s and TG ~32–34 — beating Ollama on both — from `oracle-qwen-next.service`.** The
+stack is wired so a *single* qwen-next serves everything: the agent (`qwen.sh` → shim, which already
+POSTs to `/v1/chat/completions`, repointed at `:18080`) and synthesis (`ask_corpus`/`ask_code`, whose
+`_chat` now uses the same OpenAI endpoint). Ollama is demoted to serving **only bge-m3** embeddings,
+which fit in the ~3 GB VRAM headroom — so there is exactly one big model on the GPU and no swap thrash
+(the failure mode when two qwen-nexts — Ollama's synth copy and the tuned server — fought for VRAM and
+one landed on CPU at 100%).
+
+**Two gotchas when Claude Code drives a raw llama-server (both cost a debugging session):**
+- **`--jinja` is mandatory.** Claude Code sends its tool schema on *every* request; llama-server under
+  `--no-jinja` rejects any request carrying a `tools` param (`tools param requires --jinja flag`, HTTP
+  500), so *every* turn fails — even a bare "continue" — not just tool-heavy ones. Enabling `--jinja`
+  (which applies the model's chat template) is what makes the agent path work at all.
+- **Match the server's `-c` to the context window Claude Code *believes* the model has, or exceed it.**
+  Claude Code auto-compacts as a conversation approaches the window it *thinks* the model has (200K for
+  an unrecognized model). It never compacts below that. So a 143K-token conversation sails past a server
+  capped at `-c 131072` **without ever triggering compaction** — the safety net is calibrated to the
+  believed 200K, not the real 128K — and llama-server rejects the request (`exceeds the available
+  context size`), surfacing as an empty "Worked 0s" turn. Fix: set `-c 262144` (256K) so the real limit
+  *exceeds* Claude Code's belief; the hybrid-attention KV cache is small enough that 256K still fits in
+  ~21 GB. Now compaction fires at ~200K with the server holding comfortably more. The bug was never the
+  size — it was two components disagreeing about how big the box is.
+
 ## 3. Components
 
 | Layer | Choice | Why |
 |---|---|---|
-| LLM serving | **Ollama** (qwen3-coder:30b, codestral) | native Anthropic + OpenAI APIs; systemd; GPU-only |
+| LLM serving | **Ollama** (qwen3-coder:30b, codestral) + **tuned llama.cpp** (qwen3-coder-next, `:18080`) | Ollama for GPU-only models + APIs; raw llama-server for the MoE-offload qwen-next it can't tune (see §2) |
 | Context | **56K** (`OLLAMA_CONTEXT_LENGTH=57344`), q8_0 KV + flash-attn | max where qwen+bge-m3 both stay GPU-resident (2.1 GB free); 64K evicts bge, 96K spills to CPU |
 | RAG hub | **RAGFlow v0.26.4** (Docker) | best-in-class DeepDoc parsing (2-col PDFs, tables), CPU embeddings, GUI, agents, MCP client |
 | Embeddings | **bge-m3** via Ollama | multilingual (Russian PG books!), 0.66 GB, coexists with qwen |
