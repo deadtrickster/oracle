@@ -467,8 +467,23 @@ def ask_code(question: str, project: str = "") -> str:
             for p in patterns:
                 elsewhere = _rg(p, PROJECTS, max_count=1, context=0)
                 if elsewhere.strip():
-                    repos = sorted({ln.split("/Projects/", 1)[1].split("/", 2)[1]
-                                    for ln in elsewhere.splitlines() if "/Projects/" in ln})
+                    # Emit only ids _resolve_project accepts. Projects can be NESTED
+                    # (~/Projects/orioledb/orioledb-postgres), so the resolvable id is the
+                    # relative-to-Projects path, not the bare 2nd path segment (which the old
+                    # code emitted -> the tool suggested 'orioledb-postgres' then rejected it as
+                    # 'project not found' on the next call). Validate candidate depths (nested
+                    # group/project, then flat) so we can never suggest an id we cannot resolve.
+                    repos = set()
+                    for ln in elsewhere.splitlines():
+                        if "/Projects/" not in ln:
+                            continue
+                        parts = ln.split("/Projects/", 1)[1].split("/")
+                        for depth in (2, 1):
+                            cand = "/".join(parts[:depth])
+                            if depth < len(parts) and _resolve_project(cand):
+                                repos.add(cand)
+                                break
+                    repos = sorted(repos)
                     if repos:
                         return (f"Not found under {root.name}, but /{p}/ occurs in: "
                                 f"{', '.join(repos[:6])}. You are likely scoped to the WRONG repo — "
