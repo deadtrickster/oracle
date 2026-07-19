@@ -855,6 +855,35 @@ the heat of the moment. Fix what's already in the index now; return to the parse
 elbow-deep in it. The same discipline the whole project runs on: know where the real fix lives, even when
 you're taking the pragmatic one.
 
+## Act 18 — The electricity company ran my test for me
+
+There was one item on the list I kept not doing: *verify the stack comes up from cold — needs an
+actual reboot.* It had been sitting there for days, because rebooting a machine that's mid-way through
+parsing 161 books feels like pulling the tablecloth to check the dishes are stable. Then someone needed
+the outlet more than my laptop did, and the test ran itself.
+
+The report card was better than I feared and worse than I hoped. Docker brought the whole RAG stack
+back unprompted. Ollama came back. And — the genuinely pleasant surprise — the ingestion *partially
+resumed on its own*, because RAGFlow's parse queue lives in Redis, and Redis persists. The CPU was
+already grinding again before I'd finished checking what was broken.
+
+Two things were broken, both instructive. First: my backend toggle switched models by *starting* and
+*stopping* systemd units — but the big model's unit was still *enabled*, so the reboot resurrected it,
+and it sat holding 21.6 GB of VRAM against a config file that said the other model was active. A
+switch that only flips the running state is half a switch; the reboot re-decides it. The fix is one
+word — `enable --now` instead of `start` — but the principle generalizes: **state you chose must be
+encoded where the machine reads its boot instructions, or the machine will un-choose it.**
+
+Second, subtler: the queue that survived is also a queue that *lies by omission*. Tasks not yet
+started persisted and resumed. Tasks **in flight** at the moment of death had been popped from the
+queue — gone, unrecorded. A book parsed as ten page-ranges that loses one would finish the other nine
+and then sit at partial progress forever, *silently missing a chunk of itself*. No error, no retry,
+nothing to see unless you already suspected it. That's the failure shape this whole project keeps
+finding: the system does less than it claims and says nothing. The recovery script re-queues every
+book that was mid-parse — at the honest cost of redoing their partial progress, which promptly made
+the ingest "look stalled" and taught the day's last lesson: after you make chunks 46× bigger, watching
+chunks-per-minute is watching the wrong needle and panicking on schedule.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*

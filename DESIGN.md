@@ -726,6 +726,34 @@ All read-only or query-only, bridged stdio→SSE via mcp-proxy, systemd user ser
 | reranker | 9760 | GTE cross-encoder HTTP (Jina rerank API) |
 | claude-shim | 11435 | Anthropic↔OpenAI translation + tool-call salvage for local Claude Code (not MCP; an API shim) |
 
+### 7.1 Surviving a power loss (learned 2026-07-19, the involuntary reboot test)
+
+The electricity failed mid-ingest — an unplanned run of the "does the stack come up from cold" test
+(TODO G3.4). What the episode established:
+
+- **What recovers by itself:** the docker stack (restart policies), Ollama, ES/MySQL/MinIO/Redis, the
+  systemd user services — and, notably, **RAGFlow's parse queue: it lives in Redis, which persists**,
+  so queued-but-unstarted page tasks resume on their own after boot.
+- **What does NOT:** tasks **in flight** at the moment of death are popped from Redis and simply gone.
+  A book parsed as N page-range tasks that loses one finishes its others and then sits `RUNNING` at
+  partial progress forever — **silently missing a page range**, the "did less than it claimed and said
+  nothing" class. Remedy: `requeue-orphans.py` — after a boot, every `RUNNING` doc is by definition
+  orphaned; re-trigger it (RAGFlow answers `code=102` and dedupes against anything Redis already
+  resumed). Cost, honestly: requeued docs restart from page 1, so partial progress is redone — the
+  price of guaranteed completeness. Residual risk to verify per incident: crash-partial docs may end
+  up with duplicated chunks if re-parse doesn't clear the partial set; check one when it completes,
+  exact-content dedupe over the KB if needed.
+- **Stateful toggles must be *enabled*, not just *started*.** qwen-next's unit was `enabled`, so the
+  reboot resurrected it — 21.6 GB of VRAM held against a `backend.env` that pointed at the 30B,
+  mid-ingest. `oracle-backend` now flips units with `systemctl enable --now`/`disable --now`, so the
+  chosen state is what a reboot lands in. General rule: any A/B switch expressed as systemd units must
+  encode the choice in *enablement*, or a power cycle silently re-decides it.
+- **Progress metrics change meaning when the units change.** Post-crash the ingest "looked stalled" at
+  +10 chunks/min — but chunks are now ~2,100 chars (the §5.1b parser fix), ~46× the old 47-char debris,
+  and the requeue had just dumped ~3,900 page tasks back into the queue behind the heaviest,
+  OCR-densest books (the fast text-layer PDFs finish first; the tail is the expensive half). Watch
+  pages and task-queue depth, not chunks/min.
+
 ## 8. Key decisions & rationale (the non-obvious ones)
 
 - **RAGFlow pinned to v0.26.4.** The compose bind-mounts the repo's entrypoint.sh into the image;

@@ -529,6 +529,21 @@ days without ever checking it.)*
 
 ---
 
+### 2026-07-19 — power loss mid-ingest: the reboot test ran itself ⚡
+- **Recovered alone:** docker stack, Ollama, ES/MySQL/MinIO/Redis, user services — and the parse queue
+  (it lives in Redis, which persists), so ingestion partially resumed before anyone touched it.
+- **Needed hands:** (1) qwen-next resurrected via its *enabled* unit while `backend.env` said 30b —
+  21.6 GB VRAM held mid-ingest; stopped, disabled, and `oracle-backend` now switches with
+  `enable --now`/`disable --now` so the choice survives reboots (commit 81eb199). (2) The 129 docs
+  `RUNNING` at crash time: their in-flight page tasks were popped from Redis and lost — without action
+  they'd finish with **silent page gaps**; `requeue-orphans.py` re-triggered all 129 (code=102 =
+  deduped against what Redis resumed). Cost: they restart from page 1 (~3,900 page tasks re-queued).
+- **Open verification:** crash-partial docs might duplicate chunks if re-parse doesn't clear the
+  partial set — spot-check one when it completes; exact-content dedupe over the KB if needed.
+- **Metric lesson:** +10 chunks/min "looked stalled" — but chunks are now ~2,100 chars (46× the old
+  debris) and the queue tail is the OCR-heavy half of the collection. Watch pages/queue depth, not
+  chunks/min. DESIGN §7.1 has the full recovery doctrine.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy
@@ -584,6 +599,11 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       weak model between me and the source.
 - [ ] **G3.4** — **`./oracle-ctl.sh resume` must work from cold.** Verify once, end to end. If the
       stack doesn't come up over the Atlantic, none of the rest matters.
+      *Partial involuntary test 2026-07-19 (power loss):* docker stack + Ollama + user services + the
+      Redis parse queue all came back on their own — but two recovery gaps surfaced (qwen-next's
+      enabled-unit vs backend.env mismatch, fixed in `oracle-backend`; in-flight parse tasks lost →
+      `requeue-orphans.py`). Still NOT a validation of `oracle-ctl.sh resume` itself — nobody ran it;
+      the deliberate end-to-end check remains open. Details: §F 2026-07-19, DESIGN §7.1.
 - [x] **G3.5** — **the corpus browser** (he called it a must-have). Offline, open the actual PDF at the
       cited page. The `[[p.N]]` markers exist for exactly this.
 - [ ] **G3.6** — **diagram-OCR garbage: retrieval-side remove+reingest pass.** `clean-chunks.py` gains a
