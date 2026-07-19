@@ -818,6 +818,43 @@ with headroom to spare. The bug wasn't the size; it was the *disagreement* betwe
 how big the box was — the same silent-mismatch failure mode this whole project keeps rediscovering,
 wearing yet another hat.
 
+## Act 17 — The garbage was hiding inside a good chunk
+
+I'd already built the curation pass — rules and an LLM judge that strip the exercises and the tables of
+contents (Acts 13–14). So when I looked at a session's search results and saw junk, I expected to find a
+chunk we'd missed: some quiz, some index page the judge let through. I grepped the corpus for the query
+and read the raw passages. And the garbage was there — box-drawing glyphs `口□□□`, a run of `DDDDDD`,
+shredded words like `rylooku` and `arely consulted`, loose numbers with no sentence around them. A
+diagram from the ClickHouse huge-pages paper: DeepDoc had tried to OCR a *picture* and produced the
+text-equivalent of static.
+
+The reflex is obvious — add it to the delete list, like the quizzes. But look closer at the chunk and
+the reflex is wrong: the noise wasn't a chunk of its own. It was **interleaved with real prose** —
+`huge pages`, `backend reads a buffer`, `shared_buffers` — in the *same* chunk. The exercises were a
+whole-chunk problem: a quiz is a quiz, delete it. This was a *within*-chunk problem. Delete it and you
+lose the sentence sitting next to the static; keep it and you keep the static. The unit we'd been
+filtering — the chunk — was the wrong unit. The garbage lived *below* it.
+
+That forced two realizations. First, this needs a **repair**, not a deletion: excise the garbage span,
+keep the prose. Second — and this is the part that's easy to get wrong — you can't just overwrite the
+chunk's text. RAGFlow's update-content call changes the *words* but not the *embedding vector*. Patch a
+chunk in place and it keeps the embedding computed from the garbage, so it keeps getting retrieved for
+all the wrong reasons. The only honest repair is to **delete the chunk and add the cleaned text back as a
+new one**, so it re-embeds. Remove and reingest, not patch. My own suggestion to just patch it was the
+lazy answer, and the user caught it.
+
+And the deepest fix isn't at the retrieval layer at all — it's in the parser. DeepDoc *does* separate
+figures from text; it pulls out every region its layout model labels `figure`. The garbage exists only
+because the model **mislabeled a diagram as text**, so its OCR never got pulled. The parser already has
+box-level filters for exactly this shape of problem — it detects PUA/CID gibberish and font-encoding
+garble and throws those boxes away before they become chunks (the same machinery where, months earlier,
+I'd taught it to infer word boundaries from geometry the way `pdftotext` does). A third strategy —
+"this box is a flattened diagram" — belongs right there, and would stop the garbage from ever reaching a
+chunk. But that's a patch to a pinned dependency's guts, so it's written down and deferred, not done in
+the heat of the moment. Fix what's already in the index now; return to the parser when we're next
+elbow-deep in it. The same discipline the whole project runs on: know where the real fix lives, even when
+you're taking the pragmatic one.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*

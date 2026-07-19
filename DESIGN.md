@@ -303,6 +303,78 @@ cross-encoder sees query and passage together and can judge whether a passage *a
 the reranker is not a nicety — and why its silent 30 s timeout fallback (§8) is a correctness bug,
 not a performance one.
 
+### 4.3 Diagram-OCR garbage — a *third* noise class, and why it needs remove+reingest, not delete
+
+Exercises and apparatus (§4.2) are *whole-chunk* problems: a quiz chunk is a quiz chunk, delete it.
+**Diagram-OCR garbage is not.** DeepDoc's `book`/`paper` parsers pull out regions the layout model
+labels `figure` (`_extract_table_figure(need_image=True, …)` in `rag/app/{paper,book}.py`), but when
+the layout model **mislabels a diagram as `text`**, its OCR is flattened into the text stream — box-
+drawing glyphs (`口□□□`), repeat runs (`DDDDDD`), shredded words (`rylooku`, `arely consulted`), loose
+chart axis numbers. Observed live: two chunks of the ClickHouse huge-pages paper interleaved that noise
+*with legit prose* (`huge pages`, `backend reads a buffer`, `shared_buffers`) in the **same** chunk. So
+the split is **inside** the chunk — a whole-chunk `to_delete` throws away the good text; keeping it keeps
+the noise.
+
+The fix is a three-way classify in the post-pass, plus a per-chunk repair that respects embeddings:
+
+| class | action |
+|---|---|
+| ToC / index (pure apparatus) | delete immediately — the existing `to_delete` path |
+| **junk** (diagram OCR mixed with prose) | excise the garbage span, write `(chunk_id, doc_id, cleaned_text, snippet)` to a **worklist file** |
+| clean | keep |
+
+Then a loop over the worklist **removes the old chunk and re-adds the cleaned text as a new chunk**.
+Why not `PATCH` the content in place? Because `PATCH …/chunks/{id}` updates the **text but not the
+embedding vector** — a patched chunk keeps its *garbage* embedding and still gets retrieved. `DELETE` +
+add-chunk forces a **fresh embedding** on the clean text. The worklist file is the checkpoint: you review
+what is about to be re-cut before anything destructive runs, and it is the audit trail. If excision leaves
+nothing legit, it collapses to a plain delete.
+
+**Root cause is upstream, and we will patch it later — like the word boundaries.** The garbage exists
+because the layout model (`deepdoc/parser/pdf_parser.py`, `_layouts_rec` → onnx DLA) mislabels the
+diagram. The parser *already* has box-level garbled-text filters right where the fix belongs
+(`pdf_parser.py` ~810: **Strategy 1** PUA/unmapped-CID chars, **Strategy 2** font-encoding garble → clear
+the box, fall back to OCR) — the same place we earlier fixed word-boundary inference "from geometry
+instead, as pdftotext does." A **Strategy 3** (box-drawing/replacement-glyph density, long repeat runs →
+drop the box *before* chunk assembly) is the correct upstream fix: it removes the garbage box while keeping
+adjacent prose boxes, so no mixed chunk is ever formed. But that is a change to RAGFlow's code inside the
+container against pinned **v0.26.4** — deferred on purpose. For now the retrieval-side remove+reingest
+pass cleans what is already indexed; **[TODO §G: return and patch DeepDoc]** closes it at the source.
+
+**The deterministic detector hit its precision ceiling — next step is a trained CPU classifier.**
+The glyph-density rule shipped in `chunk_judge.find_diagram_garbage` is *safe* (a token-diff over every
+flagged chunk in `papers` showed it removes only stray glyphs — `●`, `口`, `（）`, `DDDDDD` — never a
+real word) but it cannot *decide*: it flags 9% of `papers` and 15% of `books`, because **a per-token
+rule cannot tell a garbage `●` from a meaningful one** (`●` inside flattened-diagram OCR vs `●` as a
+chart-legend marker or bullet). That is a fuzzy judgment — the same shape as exercise curation
+(§4.2: *"purpose cannot be compiled into a regex"*) and the same lesson as the reranker: judgment
+calls want a model. So the detector is demoted to **recall-oriented candidate generator**, and the
+verdict moves to a **trained classifier on the CPU tier** (with the reranker and bge-m3 — never
+fighting the GPU):
+
+- **Features are already computed:** every chunk's **bge-m3 embedding sits in ES** (`q_1024_vec`,
+  1024-dim) — semantic features for 203 K chunks for free — plus cheap surface features (weird-glyph
+  density, script mix, dictionary-word vs gibberish ratio, numeric ratio, repeat runs, HTML-table flag).
+- **Model:** gradient-boosted trees / MLP over those features first; if precision stalls, fine-tune a
+  small multilingual encoder on CPU — *training time is explicitly not a constraint* (hours are fine);
+  only scoring must stay cheap, and a forward pass over stored vectors is.
+- **Labels by bootstrap, not hand-labelling 200 K:** rules nominate candidates, the qwen judge
+  weak-labels a few thousand, a human spot-checks via the same JSONL audit trail as §4.2.
+- **Output classes:** `clean` / `excise` (surgical token removal, then remove+reingest) / `delete`.
+
+**Where the chunks actually live, and the read/write asymmetry.** RAGFlow stores every chunk in
+**Elasticsearch** (`DOC_ENGINE=elasticsearch`, ES 8.11.3 in `docker-es01-1`, exposed on host
+**`localhost:1200`**, auth `elastic:infini_rag_flow`). All KBs share one tenant index
+`ragflow_<tenant_id>` (here `ragflow_a73b470e7d6111f1b22afb6d9f0455fb`, ~203 K chunks / 4.3 GB); each
+chunk doc's `_id` is the RAGFlow chunk id, with `content_with_weight` (the text), `doc_id`, `kb_id`,
+`docnm_kwd`, the BM25 token fields (`content_ltks`/`content_sm_ltks`), and the embedding
+`q_1024_vec` (bge-m3, 1024-dim). This makes the cleanup pass **read direct from ES but write through
+the API**: the detection scan filters the index by `kb_id` and pulls `content_with_weight` in bulk —
+far faster than the API's 100-per-page pagination across 161 books — but a *write* must go through
+RAGFlow's add-chunk endpoint so it regenerates `q_1024_vec` **and** the token fields. Writing raw to ES
+would mean recomputing the bge-m3 vector and the tokenizations by hand and matching the index mapping —
+fragile, and exactly the embedding-consistency trap the remove+reingest design exists to avoid.
+
 ## 5. The grounding pipeline (the heart)
 
 The lesson learned repeatedly (LLM-authored C++ book, qwen's mislabeled `pg_last_wal_replay_lsn`,

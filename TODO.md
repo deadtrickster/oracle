@@ -513,6 +513,20 @@ days without ever checking it.)*
   sessions in the 125 GB RAM, surviving restarts. Caveat: a dump is void once the prefix changes
   (DISCIPLINE edit, **context compaction rewriting history**, model/quant/flag change).
 
+### 2026-07-19 — diagram-OCR garbage found in retrieval; ask_code redirect fixed 🔴/✅
+- **Found (from a qwen session's grep):** the *code* grep was clean, but raw `search_corpus` on the
+  ClickHouse huge-pages paper surfaced two chunks where DeepDoc flattened a **diagram into the text
+  stream** — box-drawing glyphs `口□□□`, repeat runs `DDDDDD`, shredded words — **interleaved with
+  legit prose in the same chunk**. A whole-chunk delete would drop the good text; the split is *inside*
+  the chunk. Plan = G3.6 (remove+reingest post-pass) + G3.7 (deferred DeepDoc Strategy-3). DESIGN §4.3.
+- **Fixed ✅ (commit 0e913a4):** `ask_code`'s scoped-miss redirect emitted the bare 2nd path segment
+  (`orioledb-postgres`) as a project id, which `_resolve_project` then rejected — the tool contradicted
+  itself and the model dead-ended. Now it emits only ids that resolve (`orioledb/orioledb-postgres`).
+- **Non-issue:** `search_corpus`/`ask_corpus` return `-32602` from the **main Opus session** but work
+  fine for qwen (session 74166c2a used ask_corpus post-restart; raw retrieval API returns 30 chunks).
+  It's a main-session tool-call quirk, not a server break. Russian answers to English PG queries are
+  EXPECTED — Rogov's PG books are the unmatched source.
+
 ---
 
 # G. THE WORK (the only checklist)
@@ -572,6 +586,29 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       stack doesn't come up over the Atlantic, none of the rest matters.
 - [x] **G3.5** — **the corpus browser** (he called it a must-have). Offline, open the actual PDF at the
       cited page. The `[[p.N]]` markers exist for exactly this.
+- [ ] **G3.6** — **diagram-OCR garbage: retrieval-side remove+reingest pass.** `clean-chunks.py` gains a
+      three-way classify (ToC/index → delete; **junk** = diagram OCR mixed with prose → excise the
+      garbage span, offload `(chunk_id, doc_id, cleaned_text, snippet)` to a worklist file; clean →
+      keep), then a loop that DELETEs the old chunk and ADDs the cleaned text as a NEW chunk so it
+      re-embeds (PATCH updates text but not the vector → stale garbage embedding). See DESIGN §4.3.
+- [ ] **G3.8** — **train the CPU junk classifier** (he approved; *training time is not a constraint*).
+      The deterministic detector proved SAFE (token-diff: removes only stray glyphs, never words) but
+      flags 9–15% of chunks and can't tell a garbage `●` from a chart-legend `●` — precision ceiling.
+      Demote it to candidate generator; verdict comes from a classifier on the CPU tier. Features:
+      the **already-stored** `q_1024_vec` bge-m3 embeddings (free, in ES) + surface stats. Model: GBT/
+      MLP first, small multilingual encoder fine-tune if needed (hours on CPU are fine). Labels:
+      bootstrap via rules→qwen-judge weak labels→human spot-check (the §4.2 audit pattern). Classes
+      clean/excise/delete. **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
+      calls at a quiet moment — they share the 30B with coding); train/score only after the collection
+      ingest drains (CPU contention). DESIGN §4.3.
+- [ ] **G3.7** — **RETURN AND PATCH DEEPDOC (deferred, like the word-boundary fix).** Root cause: the
+      onnx layout model (`deepdoc/parser/pdf_parser.py`, `_layouts_rec`) **mislabels a diagram as
+      `text`**, so its OCR is flattened inline instead of being pulled out as a `figure`
+      (`_extract_table_figure`, `rag/app/{paper,book}.py:54`). The box-level garbled-text filter at
+      **`pdf_parser.py` ~810** already has Strategy 1 (PUA/CID) + Strategy 2 (font-encoding) that clear
+      a box → OCR fallback; add a **Strategy 3** (box-drawing/replacement-glyph density + long repeat
+      runs → drop the box *before* chunk assembly), so no mixed chunk is ever formed. Change is inside
+      the RAGFlow container against pinned **v0.26.4** — do it when we next touch the parser, not now.
 
 ---
 
