@@ -676,6 +676,31 @@ Written down so they cost nothing to leave alone. **Do not start these.**
   **434/434**. Degraded but NOT the catastrophe `book.py` was (median 47, 51% under 50, zero
   positions) — and for a 10-page paper, a section arguably *is* the right unit. ~64 junk chunks out of
   492. Not worth breaking the freeze; revisit if paper retrieval ever looks wrong.
+- **H11 — CORPUS AS DESIGN CONSCIENCE, not just a search source (his ask, 2026-07-19).** His prompt,
+  verbatim: *"regarding the corpus that ingested/being ingested - so far we have it as a pure search
+  source, like find/synthesize facts. How to make the next step - so you and/or my qwens start to
+  consider say the real sys design best practicies from the corpus when coding?"*
+  **The gap:** the corpus is query-shaped; a coding task doesn't generate queries. When qwen writes a
+  retry loop, DDIA's "retries need idempotency" sits unretrieved — the model doesn't know it's
+  standing next to a question. A vague "consult best practices" DISCIPLINE line is the Axiom-2
+  anti-pattern (prompt papering over a missing harness loop). Three mechanisms that fit the axioms:
+    1. **Facet extraction at plan time** — a `consult_corpus(task)` tool: distill the task into 3–5
+       design facets ("bounded vs unbounded queue", "crash consistency"), multi-query retrieve,
+       return a HARD-CAPPED design brief (top principles + citations; Axiom 1 forbids an 18-chunk
+       dump). Mandate it with a concrete trigger ("before writing the plan, call once") — qwen
+       follows triggers, not advice.
+    2. **Harness-run design critic over the DIFF (the bet).** Closed-loop, no model initiative
+       needed: a script extracts facets from the produced diff, retrieves the principles, runs qwen
+       AS JUDGE: "here's the diff, here are 3 cited principles — violated?" Judging against a stated
+       principle is easier for a weak model than generating under unstated constraints — the same
+       asymmetry as the curation judge cascade. Advisory pre-commit / `design-review.py <diff>`.
+    3. **Distill a principles layer** — one offline qwen-next sweep over the design-heavy sources →
+       a small derived KB of dense, citation-backed maxims ("bound every queue — DDIA/SRE"). Then 1+2
+       retrieve over MAXIMS: precise, tiny in context, checkable, back-referenced to the book page.
+       The retrieval unit finally matches the use.
+  **Do not:** inject excerpts into every coding turn (context occupation), or add trigger-less prompt
+  advice. **Validate:** eval-harness suite with a corpus-covered pitfall (unbounded queue,
+  non-idempotent retry); measure catch-rate with/without. Judged, not admired.
 - **H10 — ingest is DeepDoc-bound, not embedding-bound.** Measured while re-parsing: CPU 94% (task
   executor at 1298%, i.e. 13 of 24 cores), **GPU at 0%**. The 10× chunk reduction cut a stage that was
   already free. If ingest speed ever matters, the lever is DeepDoc's per-page layout pass — a lighter
