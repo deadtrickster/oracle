@@ -602,7 +602,11 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       garbage, boilerplate — replacing the is_obvious_toc rule + statistical strip + recall rules + GPU
       qwen judge + glyph detector; output drives keep/delete/excise/strip. Feature extractor is BUILT:
       `build-junk-features.py` (read-only, `q_1024_vec` + 38 surface features → .npz; probed OK; incl. stopword/sentence-end prose-ness, alphabetized-index order, answer-key/bibliography patterns, code-ratio [the jsonb `?` scar], title-overlap, page position via page_num_int).
-      **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
+      Raw-collection probe (2026-07-19) validated the signals (flagged ToC = real ToC; index-ish at
+      alpha-sorted 0.90 / stopwords 0.08 vs prose 0.28) and grew the taxonomy: **ocr-damaged-code** —
+      numbered code lines OCR'd from PDF page images (`GridPa e`, `R0UND`, fullwidth `，`). Keep-vs-drop
+      hinges on code_ratio × is_pdf × weird_density — a three-way interaction rules can't weigh; model
+      territory. **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
       calls at a quiet moment — they share the 30B with coding); train/score only after the collection
       ingest drains (CPU contention). DESIGN §4.3.
 - [ ] **G3.7** — **RETURN AND PATCH DEEPDOC (deferred, like the word-boundary fix).** Root cause: the
