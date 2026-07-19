@@ -383,6 +383,15 @@ drives the action (`keep` / `delete` / `excise` / `strip`).
 - **Labels by bootstrap, not hand-labelling 200 K:** rules nominate candidates, the qwen judge
   weak-labels a few thousand, a human spot-checks via the same JSONL audit trail as §4.2.
 - **Output classes:** `clean` / `excise` (surgical token removal, then remove+reingest) / `delete`.
+- **A probe on the RAW collection KB (uncurated) validated the signals and grew the taxonomy.** The
+  flagged ToC chunks were real ToC; index-ish separated at alpha-sorted 0.90 / stopwords 0.08 vs prose
+  0.28. But most flagged "debris" was a class we didn't have: **OCR-mangled code listings** — numbered
+  Java lines OCR'd from textbook page images (`GridPa e` for `GridPane`, `R0UND` with a zero, fullwidth
+  `，` commas). Code in md/txt must be KEPT (the jsonb scar); code OCR'd from PDF images is *damaged* —
+  a model quoting `GridPa e` as API truth is the miscopied-value-table failure — so the verdict hinges
+  on the interaction `code_ratio × is_pdf × weird_density` (the fullwidth glyphs are already in our
+  weird range). Rules can't weigh a three-way interaction; the model can. Strongest concrete argument
+  for the classifier so far.
 
 **Where the chunks actually live, and the read/write asymmetry.** RAGFlow stores every chunk in
 **Elasticsearch** (`DOC_ENGINE=elasticsearch`, ES 8.11.3 in `docker-es01-1`, exposed on host
