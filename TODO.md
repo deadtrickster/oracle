@@ -601,7 +601,7 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       model over the WHOLE junk taxonomy — ToC, index, glossary, exercises, bibliography, figure-OCR
       garbage, boilerplate — replacing the is_obvious_toc rule + statistical strip + recall rules + GPU
       qwen judge + glyph detector; output drives keep/delete/excise/strip. Feature extractor is BUILT:
-      `build-junk-features.py` (read-only, `q_1024_vec` + 23 surface features → .npz; probed OK on 3k).
+      `build-junk-features.py` (read-only, `q_1024_vec` + 38 surface features → .npz; probed OK; incl. stopword/sentence-end prose-ness, alphabetized-index order, answer-key/bibliography patterns, code-ratio [the jsonb `?` scar], title-overlap, page position via page_num_int).
       **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
       calls at a quiet moment — they share the 30B with coding); train/score only after the collection
       ingest drains (CPU contention). DESIGN §4.3.

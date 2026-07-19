@@ -359,13 +359,24 @@ qwen judge, and this new glyph detector collapse into a single multi-class CPU m
 drives the action (`keep` / `delete` / `excise` / `strip`).
 
 - **Features are already computed:** every chunk's **bge-m3 embedding sits in ES** (`q_1024_vec`,
-  1024-dim) — semantic features for 203 K chunks for free — plus cheap surface features carrying a
-  signal for *each* class: weird-glyph density + script mix (figure garbage), dotted-leader density
-  (ToC), short-line / page-number-line / definition-dash ratios (index/glossary), MC-option +
-  numbered-question + `?` density (exercises), cite-key + URL density (bibliography), HTML-table flag,
-  plus word-likeness / numeric / repeat / token stats. The trusted regexes become **numeric features**,
-  so the model learns the thresholds and combinations the rules had to hardcode. (Extractor:
-  `build-junk-features.py`, read-only, `q_1024_vec` + 23 surface features → `.npz`.)
+  1024-dim) — semantic features for 203 K chunks for free — plus **38 surface features**, each earning
+  its place as a signal for a specific class, most paid for by a documented scar: weird-glyph density +
+  repeat runs + unique-token ratio (figure garbage — OCR gibberish never recurs), dotted-leader density
+  (ToC), short-line / page-number-line / definition-dash / **alphabetized-line-order** ratios
+  (index/glossary — an index is sorted), MC-option + numbered-question + `?` + **answer-key-pair**
+  density (exercises), cite-key + URL + **year + et-al/pp/ISBN** density (bibliography),
+  **stopword ratio + sentence-end-line ratio** (the strongest cheap prose-vs-apparatus split — §5.1b's
+  47-char layout debris has neither; measured on `books`: stopword 0.15 vs 0.30, sentence-end 0.28 vs
+  0.62 for index-ish vs prose), **code-token ratio** (protects operator tables — the jsonb `?` scar,
+  §4.2), **title-overlap** (running heads repeat the doc name), HTML-table flag, `[[p.N]]` density, and
+  **provenance/position**: source format, `img_id` (present ≈ DeepDoc-parsed; it is the chunk's own
+  page-crop, so provenance not "contains a figure"), and `page_num_int` → **relative position in the
+  document at train time** (ToC lives in the first ~5% of a book, index/bibliography in the last ~5%).
+  Doc-level features (page-relative rank, distance from the document's embedding centroid — garbage is
+  an outlier against its own book) are derived at train time from the stored `page_first`/`doc_id`/`emb`.
+  The trusted regexes become **numeric features**, so the model learns the thresholds and combinations
+  the rules had to hardcode. (Extractor: `build-junk-features.py`, read-only, `q_1024_vec` + 38 surface
+  features → `.npz`.)
 - **Model:** gradient-boosted trees / MLP over those features first; if precision stalls, fine-tune a
   small multilingual encoder on CPU — *training time is explicitly not a constraint* (hours are fine);
   only scoring must stay cheap, and a forward pass over stored vectors is.
