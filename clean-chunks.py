@@ -70,6 +70,48 @@ def api(method, path, **kw):
     return r.json()
 
 
+# RAGFlow keeps chunks in Elasticsearch (DOC_ENGINE=elasticsearch). For a full-KB scan we read them
+# DIRECT from ES (scroll, 1000/req) instead of the 100-per-page HTTP API — far faster over 161 books.
+# Writes still go through the RAGFlow API so embeddings + token fields regenerate (see DESIGN §4.3).
+ES_URL = os.environ.get("ORACLE_ES_URL", "http://localhost:1200")
+ES_AUTH = tuple(os.environ.get("ORACLE_ES_AUTH", "elastic:infini_rag_flow").split(":", 1))
+
+
+def _es_index() -> str:
+    r = requests.get(f"{ES_URL}/_cat/indices?h=index&format=json", auth=ES_AUTH, timeout=30)
+    r.raise_for_status()
+    idx = [x["index"] for x in r.json() if re.fullmatch(r"ragflow_[0-9a-f]{32}", x["index"])]
+    if not idx:
+        raise RuntimeError(f"no ragflow chunk index (ragflow_<tenant>) found at {ES_URL}")
+    return idx[0]
+
+
+def es_chunks(kb_id: str):
+    """Yield {id, doc_id, docnm, content} for every chunk of a KB, read direct from ES via scroll."""
+    idx = _es_index()
+    body = {"size": 1000, "query": {"term": {"kb_id": kb_id}},
+            "_source": ["content_with_weight", "doc_id", "docnm_kwd"]}
+    j = requests.post(f"{ES_URL}/{idx}/_search?scroll=2m", auth=ES_AUTH, json=body, timeout=90)
+    j.raise_for_status()
+    j = j.json()
+    sid = j.get("_scroll_id")
+    try:
+        while j["hits"]["hits"]:
+            for h in j["hits"]["hits"]:
+                s = h["_source"]
+                yield {"id": h["_id"], "doc_id": s.get("doc_id"),
+                       "docnm": s.get("docnm_kwd"), "content": s.get("content_with_weight", "")}
+            r = requests.post(f"{ES_URL}/_search/scroll", auth=ES_AUTH,
+                              json={"scroll": "2m", "scroll_id": sid}, timeout=90)
+            r.raise_for_status()
+            j = r.json()
+            sid = j.get("_scroll_id")
+    finally:
+        if sid:
+            requests.delete(f"{ES_URL}/_search/scroll", auth=ES_AUTH,
+                            json={"scroll_id": sid}, timeout=30)
+
+
 def all_docs(dsid):
     """Every document — PAGINATED.
 
@@ -125,8 +167,17 @@ def is_all_exercise_by_rule(content: str) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("kb", help="dataset name (e.g. books, bio-books)")
+    ap.add_argument("kb", nargs="?", help="dataset name (e.g. books, bio-books). "
+                    "Not needed with --junk-apply (the worklist carries kb/doc ids).")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--junk-out", type=Path, default=None,
+                    help="DIAGRAM-OCR pass: scan the KB direct from ES, and for every chunk carrying "
+                         "flattened-diagram garbage write (chunk_id, doc_id, cleaned_text, snippet) to "
+                         "this worklist file. Read-only — nothing is deleted. Review, then --junk-apply.")
+    ap.add_argument("--junk-apply", type=Path, default=None,
+                    help="Consume a --junk-out worklist: for each record DELETE the old chunk and, if "
+                         "cleaned text remains, ADD it back as a new chunk (which re-embeds). "
+                         "PATCH-in-place would keep the garbage embedding, so we remove+reingest.")
     ap.add_argument("--no-strip-questions", action="store_true",
                     help="only strip boilerplate; leave exercise chunks alone (right for reference "
                          "manuals — see clean-corpus.py)")
@@ -139,11 +190,55 @@ def main() -> int:
                          "tests/corpus-filter — run tests/test-judge.py before trusting it.")
     args = ap.parse_args()
 
+    # --- APPLY worklist (remove+reingest): needs no KB scan; records carry kb/doc ids ---
+    if args.junk_apply:
+        recs = [json.loads(ln) for ln in args.junk_apply.read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+        removed = readded = del_only = 0
+        for r in recs:
+            if not args.dry_run:
+                api("DELETE", f"/datasets/{r['kb_id']}/documents/{r['doc_id']}/chunks",
+                    json={"chunk_ids": [r["chunk_id"]]})
+            removed += 1
+            if r["cleaned"].strip():
+                if not args.dry_run:
+                    api("POST", f"/datasets/{r['kb_id']}/documents/{r['doc_id']}/chunks",
+                        json={"content": r["cleaned"]})
+                readded += 1
+            else:
+                del_only += 1
+        print(f"{'DRY RUN — ' if args.dry_run else ''}remove+reingest: {removed} removed, "
+              f"{readded} re-added clean (re-embedded), {del_only} all-garbage deleted")
+        return 0
+
     ds = {d["name"]: d["id"] for d in api("GET", "/datasets?page_size=100")["data"]}
+    if not args.kb:
+        print("kb is required (unless --junk-apply)", file=sys.stderr)
+        return 1
     if args.kb not in ds:
         print(f"no such dataset: {args.kb}", file=sys.stderr)
         return 1
     dsid = ds[args.kb]
+
+    # --- DETECT diagram-OCR garbage → worklist (read direct from ES, no mutation) ---
+    if args.junk_out:
+        seen = flagged = allgarbage = 0
+        with args.junk_out.open("w", encoding="utf-8") as f:
+            for c in es_chunks(dsid):
+                seen += 1
+                cleaned = _judge.find_diagram_garbage(c["content"])
+                if cleaned is None:
+                    continue
+                flagged += 1
+                allgarbage += (cleaned.strip() == "")
+                f.write(json.dumps({"kb_id": dsid, "doc_id": c["doc_id"], "chunk_id": c["id"],
+                                    "docnm": c["docnm"], "cleaned": cleaned, "orig": c["content"]},
+                                   ensure_ascii=False) + "\n")
+        print(f"scanned {seen} chunks in {args.kb}: flagged {flagged} diagram-junk "
+              f"({allgarbage} all-garbage) -> {args.junk_out}")
+        print(f"review it, then: clean-chunks.py --junk-apply {args.junk_out}")
+        return 0
+
     audit = args.audit.open('w', encoding='utf-8') if args.audit else None
 
     docs = all_docs(dsid)

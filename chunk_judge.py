@@ -63,6 +63,53 @@ def is_obvious_toc(text: str) -> bool:
     return len(_TOC_LEADER.findall(text)) >= 4
 
 
+# Glyphs that never belong in a text chunk of THIS corpus (English + Russian). A diagram the layout
+# model mislabelled as text and OCR'd leaves exactly these behind: box-drawing, block elements,
+# geometric shapes, misc symbols, dingbats, CJK punctuation/kana/ideographs, fullwidth forms, and the
+# Unicode replacement char. DELIBERATELY excludes arrows and math operators (∀∃∑≤ ⌈⌉) — those are legit
+# in CS/math prose and must not be excised.
+_WEIRD = re.compile(
+    r"[─-╿▀-▟■-◿☀-⛿✀-➿"
+    r"　-〿぀-ヿ㐀-鿿＀-￯�]")
+_REPEAT_LETTER = re.compile(r"([A-Za-zА-Яа-я])\1{3,}")          # DDDDDD / ссссс — OCR runs, never a word
+_WEIRD_DENSITY = 0.5   # a token is diagram-glyph noise only if HALF+ of it is weird chars. A math
+                       # term with one OCR'd fullwidth paren "((1+u)-nk）" is ~0.1 and must be KEPT;
+                       # a flattened-diagram token "口□□□I" is ~0.8.
+# NOTE: an earlier version also excised dense runs of chart-axis numbers, but on academic papers that
+# fired on legit data passages ("Skylake system, 100 million keys"), benchmark tables, section numbers,
+# and figure refs. Numbers are real tokens (a diluting nuisance, not glyph poison), so precision wins:
+# we drop only glyph clusters + repeat runs. Pure number-only charts are left to the LLM judge / review.
+
+
+def _weird_frac(tok: str) -> float:
+    return len(_WEIRD.findall(tok)) / max(1, len(tok))
+
+
+def find_diagram_garbage(text: str):
+    """If `text` carries flattened-diagram OCR — dense box-drawing/replacement glyphs, repeated-letter
+    runs, or a dense run of chart-axis numbers — return the text with those spans EXCISED, keeping the
+    prose on either side (the garbage is INTRA-chunk, so a whole-chunk delete would lose good text).
+    Returns None when there is nothing to excise, and "" when the whole chunk was garbage. Precision
+    over recall on purpose: it must NOT eat math formulas (isolated fullwidth parens / Greek / operators
+    stay), so a token is only dropped when it is MOSTLY weird glyphs. The caller writes the result to a
+    worklist for review before any remove+reingest."""
+    toks = text.split()
+    if not toks:
+        return None
+    out, i, n, removed = [], 0, len(toks), 0
+    while i < n:
+        t = toks[i]
+        if _weird_frac(t) >= _WEIRD_DENSITY or _REPEAT_LETTER.search(t):   # diagram-glyph token -> drop
+            removed += 1
+            i += 1
+            continue
+        out.append(t)
+        i += 1
+    if not removed:
+        return None
+    return " ".join(out).strip()
+
+
 def is_candidate(text: str) -> bool:
     """Cheap, recall-oriented pre-filter: might this be droppable apparatus? Err towards YES."""
     if text.count("?") >= 2:
