@@ -597,8 +597,12 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       Demote it to candidate generator; verdict comes from a classifier on the CPU tier. Features:
       the **already-stored** `q_1024_vec` bge-m3 embeddings (free, in ES) + surface stats. Model: GBT/
       MLP first, small multilingual encoder fine-tune if needed (hours on CPU are fine). Labels:
-      bootstrap via rules→qwen-judge weak labels→human spot-check (the §4.2 audit pattern). Classes
-      clean/excise/delete. **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
+      bootstrap via rules→qwen-judge weak labels→human spot-check (the §4.2 audit pattern). It is ONE
+      model over the WHOLE junk taxonomy — ToC, index, glossary, exercises, bibliography, figure-OCR
+      garbage, boilerplate — replacing the is_obvious_toc rule + statistical strip + recall rules + GPU
+      qwen judge + glyph detector; output drives keep/delete/excise/strip. Feature extractor is BUILT:
+      `build-junk-features.py` (read-only, `q_1024_vec` + 23 surface features → .npz; probed OK on 3k).
+      **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
       calls at a quiet moment — they share the 30B with coding); train/score only after the collection
       ingest drains (CPU contention). DESIGN §4.3.
 - [ ] **G3.7** — **RETURN AND PATCH DEEPDOC (deferred, like the word-boundary fix).** Root cause: the

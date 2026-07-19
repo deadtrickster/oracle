@@ -350,11 +350,22 @@ chart-legend marker or bullet). That is a fuzzy judgment — the same shape as e
 (§4.2: *"purpose cannot be compiled into a regex"*) and the same lesson as the reranker: judgment
 calls want a model. So the detector is demoted to **recall-oriented candidate generator**, and the
 verdict moves to a **trained classifier on the CPU tier** (with the reranker and bge-m3 — never
-fighting the GPU):
+fighting the GPU).
+
+Crucially it is **one** model over the **whole** junk taxonomy, not a figure-garbage classifier: ToC,
+index, glossary, exercises, bibliography, figure-OCR garbage, per-page boilerplate. It **replaces the
+patchwork** — the `is_obvious_toc` rule, the statistical boilerplate strip, the recall rules, the GPU
+qwen judge, and this new glyph detector collapse into a single multi-class CPU model whose output
+drives the action (`keep` / `delete` / `excise` / `strip`).
 
 - **Features are already computed:** every chunk's **bge-m3 embedding sits in ES** (`q_1024_vec`,
-  1024-dim) — semantic features for 203 K chunks for free — plus cheap surface features (weird-glyph
-  density, script mix, dictionary-word vs gibberish ratio, numeric ratio, repeat runs, HTML-table flag).
+  1024-dim) — semantic features for 203 K chunks for free — plus cheap surface features carrying a
+  signal for *each* class: weird-glyph density + script mix (figure garbage), dotted-leader density
+  (ToC), short-line / page-number-line / definition-dash ratios (index/glossary), MC-option +
+  numbered-question + `?` density (exercises), cite-key + URL density (bibliography), HTML-table flag,
+  plus word-likeness / numeric / repeat / token stats. The trusted regexes become **numeric features**,
+  so the model learns the thresholds and combinations the rules had to hardcode. (Extractor:
+  `build-junk-features.py`, read-only, `q_1024_vec` + 23 surface features → `.npz`.)
 - **Model:** gradient-boosted trees / MLP over those features first; if precision stalls, fine-tune a
   small multilingual encoder on CPU — *training time is explicitly not a constraint* (hours are fine);
   only scoring must stay cheap, and a forward pass over stored vectors is.
