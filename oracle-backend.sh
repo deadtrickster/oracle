@@ -31,9 +31,12 @@ switch() {
 		exit 1
 	}
 	ln -sfn "$target" "$LINK"
+	# enable/disable (not just start/stop) so the choice SURVIVES A REBOOT — a power loss once
+	# resurrected qwen-next via its enabled unit while backend.env pointed at 30b, and the two
+	# fought over VRAM mid-ingest.
 	case "$name" in
-	30b) systemctl --user stop oracle-qwen-next ;;
-	next) systemctl --user start oracle-qwen-next ;;
+	30b) systemctl --user disable --now oracle-qwen-next ;;
+	next) systemctl --user enable --now oracle-qwen-next ;;
 	esac
 	# EnvironmentFile is re-read on start, so a restart picks up the flipped symlink.
 	systemctl --user restart oracle-claude-shim oracle-ask-bridge
