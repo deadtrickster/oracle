@@ -638,6 +638,73 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       runs → drop the box *before* chunk assembly), so no mixed chunk is ever formed. Change is inside
       the RAGFlow container against pinned **v0.26.4** — do it when we next touch the parser, not now.
 
+### G4 — The SereneDB experiment (his call, 2026-07-20 — runs PARALLEL to G3.8 junk training)
+
+Replace Elasticsearch as RAGFlow's chunk store with **SereneDB** (serenedb.com — per him the public
+pitch is dated: today it leans on **DuckDB for execution + IResearch for storage** rather than the
+historical RocksDB/Velox framing; Postgres wire protocol, single-node Apache 2.0,
+`docker run serenedb/serenedb`). Capability map checks out on paper: `BM25()` + `@@` over inverted
+indexes, IVF vector index with `metric='cosine'` + `<=>`, hybrid lexical+vector in ONE SQL query,
+plain SQL for the mget/scroll/filter/delete surface. **They ship a dedicated ES-migration guide**
+(docs.serenedb.com/sql/indexes/inverted/migrating-from-elasticsearch) that mechanically maps the
+whole surface RAGFlow uses: bool/match → `&&`/`||`/`@@`, boosts (`^`), kNN → `<=>`, hybrid with
+**native RRF** (or exact-weight replication via scorer arithmetic `BM25(...)*w`), `ts_highlight()`
+for RAGFlow's chunk-highlight UI, `optimize_top_k` (WAND) for the top-64 pool, aggregations → SQL;
+its stated limitations (more_like_this, phrase suggester) touch nothing we use. Two facts that
+matter: (a) **the Cyrillic
+stemmer survives** — RAGFlow tokenizes/stems BEFORE storage, so the store needs only
+whitespace+lowercase (`case='lower', stemming=false` dictionary); (b) ES is our heaviest resident
+(4.3 GB index + JVM) — real footprint prize if RocksDB+columnar is leaner.
+
+- [ ] **G4.1 — Phase 0: side-by-side, zero RAGFlow changes.** Export all ~350K chunks from ES (scroll
+      machinery exists), bulk-insert over Postgres wire, index, replicate RAGFlow's hybrid query in
+      SQL. Measure vs ES: ingest time, index size/RAM, query latency, and **recall parity on the
+      gold-query retrieval eval** (the instrument exists; ES sets the bar at recall@64 = 100%).
+      Insider guidance (from him, 2026-07-20):
+      - **Analyzer: do NOT use the `text` template** (native ICU — most capable, slowest). Our
+        `content_ltks` is pre-tokenized/pre-stemmed space-separated lowercase, so the cheapest
+        pipeline wins: `delimiter(' ')` (+ `norm` at most). Templates compose via `pipeline`/
+        `segmentation` dictionaries (docs: create_text_search_dictionary/{pipeline,segmentation}).
+      - **Vector: hierarchical IVF** (built for fast build, small memory, S3) — expect tuning to
+        reach ES-recall, with knobs UNLIKE ES: **quantization at index time** (`sq8` the sane
+        default; NOTE quantization applies only to `l2`/`ip` — `cosine` stays unquantized. bge-m3
+        embeddings are typically L2-normalized ⇒ cosine ≡ `ip`; VERIFY stored `q_1024_vec` norms
+        ≈1.0, then use `metric='ip'` + sq8) and **`sdb_nprobe`** (default 8; with nlist ≈
+        2·√350K ≈ 1.2K clusters that probes <1% — expect to raise it) + **`sdb_rerank_factor`**
+        (exact-distance rerank recovers quantization loss) at query time
+        (docs: sql/indexes/inverted/vector-search). Tune the (quantization × nprobe ×
+        rerank_factor) matrix against the gold-eval recall bar, not against feel.
+      - **Prediction to check:** our corpus is clustered BY CONSTRUCTION (18 KBs of distinct
+        topics), which is IVF-friendly — queries deep inside one topic should recall fine at low
+        nprobe. The stress case is **cross-domain queries landing near cluster borders** (e.g.
+        "huge pages in Postgres" straddling Linux-memory and Postgres-tuning clusters — the exact
+        queries `_diversify` exists for). If recall drops anywhere vs ES's HNSW, expect it there;
+        measure those separately, don't let single-topic queries average the failure away. Also:
+        k-means centroids are trained on the data present at build time — **build the index AFTER
+        the collection ingest drains**, and expect periodic rebuilds as the corpus grows.
+- [ ] **G4.2 — Phase 1 (only on G4.1 parity): `serenedb_conn.py` for RAGFlow.** RAGFlow abstracts the
+      store behind `DOC_ENGINE` (`rag/utils/{es,infinity,opensearch}_conn.py`) — implement the same
+      interface, bind-mount into pinned v0.26.4 like our other patches. Side benefit: every ES-direct
+      scan in clean-chunks/build-junk-features becomes plain SQL.
+- [ ] **G4.3 — dogfood the side stores:** labels DB + feature matrix could ride SereneDB too; daily
+      use also fixes Suite B's "no corpus coverage of serenedb" gap from the inside.
+
+### G5 — Ingest the `ml` shelf (~/Documents/Books/ml — triaged 2026-07-20, NOT yet ingested)
+
+The shelf is clean (deduped, mojibake fixed, djvu→pdf converted, `_dupes/` holds the retired copies)
+but nothing from it is in the corpus yet. Three lanes when we ingest (after the collection drains):
+- [ ] **English born-digital PDFs** (Bishop PRML, ESLII 2e, MML, Shalev-Shwartz, Kochenderfer 2e,
+      Deisenroth integration draft) → DeepDoc `book` lane (real text layers, positions + figures).
+      New `ml` KB or fold into `books` — decide at wiring time.
+- [ ] **Russian scans** (Кн.01–05 «Нейрокомпьютеры и их применение», Окулов/Пестов, + 4
+      papers/theses) → lane decided by the **marker pilot** (in flight): if marker's Cyrillic+math
+      output beats the embedded djvu text layers, marker → md; else `djvutxt`/`pdftotext` → `.txt`
+      with `[[p.N]]` markers (the established Cyrillic lane — DeepDoc garbles Cyrillic CID).
+      Converted PDFs already sit next to the djvu for the browser's page rendering.
+- [ ] Wire the chosen lanes into `ingest-corpus.py` (idempotent, EXCLUDE convention available) and
+      run — AFTER the collection ingest finishes (CPU) and ideally after the G3.8 label pass so the
+      new books enter through whatever curation the classifier ships.
+
 ---
 
 # H. PARKED (good ideas, deliberately not being built)
