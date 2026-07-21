@@ -746,6 +746,29 @@ but nothing from it is in the corpus yet. Three lanes when we ingest (after the 
 
 Written down so they cost nothing to leave alone. **Do not start these.**
 
+- **H13 — WRITE-TIME CHUNK ENRICHMENT (from the A-Mem paper, NeurIPS 2025 — in the corpus).**
+  A-Mem's eq. 3: embed LLM-generated keywords + context WITH the content, so the vector moves toward
+  the queries that should find it. This attacks "topical proximity ≠ answerability" (the мыши case)
+  from the INDEX side — the one lever the reranker can't reach (it only reorders what stage 1
+  finds). Build `enrich-chunks.py` (inverse of clean-chunks: qwen writes per-chunk keywords + a
+  "what questions does this answer" line at idle-GPU time; remove+reingest so it re-embeds), pilot
+  on `bio` where the failure lives, judge on the gold-query eval. Their ablation credibility note:
+  works across 1B-3B local models.
+- **H14 — AGENT MEMORY LAYER, A-Mem-style (the sleeper).** qwen's sessions learn nothing from each
+  other. A small evolving note-store of SESSION LEARNINGS ("orioledb branch names embed issue
+  numbers", "serenedb IVF wants nprobe tuning") beside the corpus — storage-side agency where it
+  belongs: over INTERPRETATIONS, not sources. Notes = A-Mem schema (content, keywords, context,
+  links); link-gen = embedding recall + qwen judge (their ablation: link generation is the
+  load-bearing module, evolution is refinement). Retrieval wired into the DISCIPLINE/MCP as a small
+  "session memory" tool.
+- **H15 — evolution WITH provenance, for Claude's own project memory (cheap, near-term).** A-Mem's
+  update instinct is right (new knowledge reinterprets old notes) but their eq. 7 rewrites memories
+  IN PLACE, silently — the "changed something and said nothing" failure as a feature. Rule for our
+  memory dir: when a memory is updated because meaning changed, append a one-line changelog in the
+  memory file. Evolution + audit trail.
+  **REJECTED (recorded so we don't re-litigate): A-Mem-style evolution applied to the CORPUS.**
+  Chunks are sources, not interpretations; rewriting sources as understanding grows is corruption.
+  The source-store vs experience-store distinction is the line the paper never draws.
 - **H12 — TEACH THE VLM (his idea, 2026-07-21): the transcription lane as a trainable system.**
   The early audit produced exactly the artifacts training needs: an error taxonomy (near-synonym
   substitutions, dropped `⁻¹`, hallucinated `[Рис.:]` stubs, leaked running heads), ground-truth
