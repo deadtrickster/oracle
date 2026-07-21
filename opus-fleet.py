@@ -51,9 +51,11 @@ def n_pages(slug: str) -> int:
 
 
 def done(slug: str, p: int) -> bool:
-    d = GOLD / slug
-    t, j = d / f"p-{p:04}.txt", d / f"p-{p:04}.diff.json"
-    return t.is_file() and t.stat().st_size > 0 and j.is_file() and j.stat().st_size > 0
+    # Protocol v4 (2026-07-21): pure-OCR agents write only the gold .txt — the draft-diff record
+    # was dropped once the VL error profile was banked (255+ pages). The gold transcript alone is
+    # the completion criterion; v3-era pages additionally have p-NNNN.diff.json, which is fine.
+    t = GOLD / slug / f"p-{p:04}.txt"
+    return t.is_file() and t.stat().st_size > 0
 
 
 def missing_pages(slug: str) -> list[int]:
