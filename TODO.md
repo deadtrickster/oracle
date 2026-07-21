@@ -748,6 +748,12 @@ but nothing from it is in the corpus yet. Three lanes when we ingest (after the 
 - [ ] **English born-digital PDFs** (Bishop PRML, ESLII 2e, MML, Shalev-Shwartz, Kochenderfer 2e,
       Deisenroth integration draft) → DeepDoc `book` lane (real text layers, positions + figures).
       New `ml` KB or fold into `books` — decide at wiring time.
+- [x] **RESEQUENCED (2026-07-21 late): the Opus gold fleet REPLACES the audit gate.** Every page is
+      individually verified against its image (verify-and-correct, full transcripts + diff records
+      in corpus/ml/opus-gold/) — a stronger guarantee than the sampled-audit protocol. When the
+      fleet completes: assemble books FROM GOLD (same [[p.N]] format), wire ("ml","naive",
+      ["ml/*.txt"]), **ingest immediately, no gate**. H12 (teach the VLM) is explicitly sequenced
+      AFTER G3.8 (junk classifier); its step-0 temp sweep can use any idle-GPU moment.
 - [x] **Russian scans → LANE DECIDED (2026-07-21): local qwen3-vl transcription** (DESIGN §4.4).
       The bake-off: embedded layer = clean prose / broken math; marker = perfect math / CJK-poisoned
       prose + dropped code terms; **qwen3-vl:30b won all three axes** (char-exact code incl. the
