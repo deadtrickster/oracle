@@ -586,8 +586,15 @@ days without ever checking it.)*
   Adjudication pending; full-sample audit when the run finishes.
 - **SereneDB Phase 0** (G4.1, in the `serenedb-phase0` worktree): container up (Postgres wire,
   IPv4-only, trust-from-container / password-from-host), `serenedb-load.py` written; smoke 1,000
-  chunks in 6 s; **full ~366K load running**. Indexes deliberately NOT built yet — k-means waits
-  for the Russian lane per the G4.1 prediction note.
+  chunks in 6 s; **full load COMPLETE: 243,900 chunks in 23 min (173/s), exact ES mirror**
+  (books 5,531 = 5,531 verified). Indexes deliberately NOT built yet — k-means waits for the
+  Russian lane per the G4.1 prediction note.
+- **🔴 Load exposed: the corpus was NEVER ~365K chunks.** RAGFlow's per-doc `chunk_count` is
+  STALE after re-parse — `books` metadata says 74,258 while ES holds 5,531 (the pre-fix debris
+  count survived the reparse in metadata only). `ingest-status.py` sums those fields, so it
+  overstates the corpus by ~120K; **real corpus = 243,900 (ES ground truth)**. Our own status
+  tool reporting more than the store holds — the house failure-shape, in the house tooling.
+  PROPOSED (his go pending): teach ingest-status.py to count from ES per kb_id instead.
 
 # G. THE WORK (the only checklist)
 
