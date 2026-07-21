@@ -117,6 +117,11 @@ KBS = [
                          "prob-ds/papers/*.pdf"]),   # HLL, count-min, xor/fuse, minhash
     ("books", "book", ["books/*.md", "books/*.txt", "books_raw/*.pdf", "books_raw/*.PDF",
                        "books_raw/*.epub"]),
+    # ML shelf, English born-digital half (~/Documents/Books/ml, symlinked into corpus/ml_raw with
+    # clean names). Real text layers -> DeepDoc book parser (positions + figures). The RUSSIAN half
+    # (qwen3-vl transcripts, corpus/ml/*.txt) is NOT wired yet ON PURPOSE: the VL lane is gated on
+    # the 20-page blind audit (DESIGN §4.4) — add ("ml", "naive", ["ml/*.txt"]) only after it passes.
+    ("ml-books", "book", ["ml_raw/*.pdf"]),
     # awesome-book-collection (~/Documents/Books/awesome-book-collection, symlinked to
     # corpus/collection_raw — corpus/ is disposable so we don't copy 3 GB). 165 category-
     # organized tech-book PDFs through the DeepDoc "book" parser (real page+bbox + figures).
