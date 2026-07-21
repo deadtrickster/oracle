@@ -420,6 +420,16 @@ blind second-grader review before anything is ingested (the RUBRIC three-defense
 to an extraction lane: VLM OCR can silently paraphrase, so the lane is trusted by measured
 agreement, not by two good pilot pages).
 
+*Early-audit results (2026-07-21, 8 blind pages of Кн.01/Кн.02):* prose ~98% verbatim with **zero
+hallucinated scripts**; 13/15 display formulas exact (incl. `\eqno` equation numbers); figures 3/3
+correct `[Рис.: caption]` stubs. Measured error classes: one **near-synonym substitution**
+(`безошибочным`→`безопасным` — the predicted prior-driven paraphrase, ~1 word in 8 pages), one
+dropped `⁻¹` in a formula (twice on one page), **2 hallucinated figure stubs** on figure-less pages
+(one echoing the prompt's own placeholder), running heads leaked on 3/8 pages, page-edge hyphen
+stubs dropped. The stub/running-head classes are deterministic assembly-time cleanups; the
+substitution/superscript classes are the irreducible residue — rare, and mitigated by the browser's
+page-render (text retrieves, the typeset page verifies). Standing recommendation: pass-with-cleanups.
+
 **Serving:** the same tuned-llama.cpp pattern as qwen-next — Unsloth **UD-Q4_K_XL** (quality-per-
 byte matters most when the failure mode is a miscopied glyph) + `mmproj-F16` on the bundled
 `llama-server --mmproj` (`:18081`), fully GPU-resident (~21 GB — no MoE offload needed), Unsloth's

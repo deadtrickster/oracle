@@ -576,6 +576,19 @@ days without ever checking it.)*
 - Fixed: `have` now registers suffix-stripped names too (ratchet can't turn); 27 copies deleted;
   verified `0 new` on a fresh pass.
 
+### 2026-07-21 (evening) — early VL audit (8 blind pages) + SereneDB Phase 0 load started ⚙️
+- **Early audit** (Кн.01/02, seeded random, image-first blind): prose ~98% verbatim, ZERO
+  hallucinated scripts; 13/15 formulas exact; 3/3 real figures stubbed correctly. Errors: 1
+  near-synonym substitution (безошибочным→безопасным — the predicted paraphrase class), 1 dropped
+  `⁻¹` (×2 on one page), 2 hallucinated figure stubs on figure-less pages (one echoes the prompt
+  placeholder), running heads on 3/8 pages, page-edge hyphen stubs dropped. Recommendation
+  standing: **pass-with-cleanups** (stub + running-head strips at assembly, deterministic).
+  Adjudication pending; full-sample audit when the run finishes.
+- **SereneDB Phase 0** (G4.1, in the `serenedb-phase0` worktree): container up (Postgres wire,
+  IPv4-only, trust-from-container / password-from-host), `serenedb-load.py` written; smoke 1,000
+  chunks in 6 s; **full ~366K load running**. Indexes deliberately NOT built yet — k-means waits
+  for the Russian lane per the G4.1 prediction note.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy
@@ -746,6 +759,16 @@ but nothing from it is in the corpus yet. Three lanes when we ingest (after the 
 
 Written down so they cost nothing to leave alone. **Do not start these.**
 
+- **H16 — KV SLOT SAVE/RESTORE: warm sessions parked in RAM (promoted from a §F footnote —
+  it was never in this list; DESIGN §2 describes it).** llama-server already exposes
+  `--slot-save-path` + `POST /slots/{id}?action=save|restore` (a slot's KV dumped/reloaded as a
+  file — memcpy-fast vs a multi-minute re-PP). It isn't automatic because "session stop" is a
+  client-side event the server never hears. Teach the **shim** to save the active slot's KV to a
+  tmpfs on idle (keyed by session) and restore before the next session's first request →
+  effectively unlimited warm qwen-next sessions in the 125 GB RAM, surviving server restarts.
+  Caveats: a dump is void when the prefix changes (DISCIPLINE edit, compaction rewriting history,
+  model/quant/flag change) and is coupled to the exact llama.cpp build. (H14's memory layer and
+  this compose: one remembers *knowledge*, the other remembers *context*.)
 - **H13 — WRITE-TIME CHUNK ENRICHMENT (from the A-Mem paper, NeurIPS 2025 — in the corpus).**
   A-Mem's eq. 3: embed LLM-generated keywords + context WITH the content, so the vector moves toward
   the queries that should find it. This attacks "topical proximity ≠ answerability" (the мыши case)
