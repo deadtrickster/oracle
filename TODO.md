@@ -760,7 +760,12 @@ Written down so they cost nothing to leave alone. **Do not start these.**
   belongs: over INTERPRETATIONS, not sources. Notes = A-Mem schema (content, keywords, context,
   links); link-gen = embedding recall + qwen judge (their ablation: link generation is the
   load-bearing module, evolution is refinement). Retrieval wired into the DISCIPLINE/MCP as a small
-  "session memory" tool.
+  "session memory" tool. **Design requirement — evolution with provenance BY CONSTRUCTION (his
+  point, 2026-07-21):** qwen can't be trusted to append changelogs (that would be a prompt
+  workaround, Axiom 2), so the store must make silent rewrites impossible: **append-only versions +
+  a `latest` view** (the labels-DB pattern) — an "update" is an INSERT with a reason field; history
+  is free; provenance is schema, not behavior. (Claude's own memory uses the discipline form of the
+  same rule — [memory dir] — because a written rule suffices there.)
 - **REJECTED (recorded so we don't re-litigate): A-Mem-style memory evolution applied to the
   CORPUS.** Chunks are sources, not interpretations; rewriting sources as understanding grows is
   corruption. The source-store vs experience-store distinction is the line the paper never draws.
