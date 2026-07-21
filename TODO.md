@@ -761,14 +761,11 @@ Written down so they cost nothing to leave alone. **Do not start these.**
   links); link-gen = embedding recall + qwen judge (their ablation: link generation is the
   load-bearing module, evolution is refinement). Retrieval wired into the DISCIPLINE/MCP as a small
   "session memory" tool.
-- **H15 — evolution WITH provenance, for Claude's own project memory (cheap, near-term).** A-Mem's
-  update instinct is right (new knowledge reinterprets old notes) but their eq. 7 rewrites memories
-  IN PLACE, silently — the "changed something and said nothing" failure as a feature. Rule for our
-  memory dir: when a memory is updated because meaning changed, append a one-line changelog in the
-  memory file. Evolution + audit trail.
-  **REJECTED (recorded so we don't re-litigate): A-Mem-style evolution applied to the CORPUS.**
-  Chunks are sources, not interpretations; rewriting sources as understanding grows is corruption.
-  The source-store vs experience-store distinction is the line the paper never draws.
+- **REJECTED (recorded so we don't re-litigate): A-Mem-style memory evolution applied to the
+  CORPUS.** Chunks are sources, not interpretations; rewriting sources as understanding grows is
+  corruption. The source-store vs experience-store distinction is the line the paper never draws.
+  (A-Mem's update-with-provenance instinct was adopted for Claude's own memory discipline instead —
+  not an Oracle work item.)
 - **H12 — TEACH THE VLM (his idea, 2026-07-21): the transcription lane as a trainable system.**
   The early audit produced exactly the artifacts training needs: an error taxonomy (near-synonym
   substitutions, dropped `⁻¹`, hallucinated `[Рис.:]` stubs, leaked running heads), ground-truth
