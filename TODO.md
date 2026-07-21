@@ -544,6 +544,21 @@ days without ever checking it.)*
   debris) and the queue tail is the OCR-heavy half of the collection. Watch pages/queue depth, not
   chunks/min. DESIGN §7.1 has the full recovery doctrine.
 
+### 2026-07-21 — the OCR bake-off: local qwen3-vl beat the specialist stack ✅
+- **Measured on the same Okulov pages:** embedded djvu layer (clean prose, math *wrong as written* —
+  `а13 = (((ааа)2)2)а`), marker (perfect LaTeX, but hallucinates CJK/Georgian into Russian prose and
+  DROPPED `+ Fib(n-2)` from code), **qwen3-vl:30b UD-Q4_K_XL: all three axes right** at ~10 s/page.
+  Marker's failure is literally our weird-glyph junk class — ingesting it would manufacture garbage.
+- **Lane shipped:** `transcribe-scans.py` (all-in-one, per-page resume, ensures its own server,
+  `[[p.N]]` assembly, seeded 20-page audit export). 2,614 pages running on the GPU while DeepDoc
+  owns the CPU. Ingest GATED on the blind audit (three-defense discipline).
+- **Serving:** Unsloth UD quant + mmproj on the bundled `llama-server --mmproj` (:18081), fully
+  GPU-resident, Unsloth Instruct samplers (presence_penalty 1.5 = OCR anti-repetition).
+- **The war story** (BLOG Act 19): marker's downloader hung on a dead socket (no timeout), my
+  salvage skipped a dotfile (glob), the CDN changed the model mid-resume (Franken-file caught by
+  safetensors header math) → the fetch doctrine is now: resumable + stall-abort + **sha256 from the
+  API**, existence checks are not integrity checks.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy
@@ -696,11 +711,14 @@ but nothing from it is in the corpus yet. Three lanes when we ingest (after the 
 - [ ] **English born-digital PDFs** (Bishop PRML, ESLII 2e, MML, Shalev-Shwartz, Kochenderfer 2e,
       Deisenroth integration draft) → DeepDoc `book` lane (real text layers, positions + figures).
       New `ml` KB or fold into `books` — decide at wiring time.
-- [ ] **Russian scans** (Кн.01–05 «Нейрокомпьютеры и их применение», Окулов/Пестов, + 4
-      papers/theses) → lane decided by the **marker pilot** (in flight): if marker's Cyrillic+math
-      output beats the embedded djvu text layers, marker → md; else `djvutxt`/`pdftotext` → `.txt`
-      with `[[p.N]]` markers (the established Cyrillic lane — DeepDoc garbles Cyrillic CID).
-      Converted PDFs already sit next to the djvu for the browser's page rendering.
+- [x] **Russian scans → LANE DECIDED (2026-07-21): local qwen3-vl transcription** (DESIGN §4.4).
+      The bake-off: embedded layer = clean prose / broken math; marker = perfect math / CJK-poisoned
+      prose + dropped code terms; **qwen3-vl:30b won all three axes** (char-exact code incl. the
+      `+ Fib(n-2)` marker dropped, `$a^{13}$` superscripts intact, clean prose). Full 6-book run
+      (2,614 pages, ~10 GPU-hours, resumable `transcribe-scans.py`) **RUNNING**; output
+      `corpus/ml/<slug>.txt` with `[[p.N]]`. GATE before ingest: blind 20-page audit sample
+      (agreement protocol — VLM OCR can silently paraphrase). The 4 papers/theses have usable text
+      layers except ЭЧАЯ (CID-garbled) — run it through the VL lane too (51 pages, minutes).
 - [ ] Wire the chosen lanes into `ingest-corpus.py` (idempotent, EXCLUDE convention available) and
       run — AFTER the collection ingest finishes (CPU) and ideally after the G3.8 label pass so the
       new books enter through whatever curation the classifier ships.

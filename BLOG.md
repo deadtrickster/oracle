@@ -884,6 +884,47 @@ book that was mid-parse — at the honest cost of redoing their partial progress
 the ingest "look stalled" and taught the day's last lesson: after you make chunks 46× bigger, watching
 chunks-per-minute is watching the wrong needle and panicking on schedule.
 
+## Act 19 — Three OCRs walked into a bar, and the winner wasn't an OCR
+
+The ml shelf had four djvu scans of Russian neural-network books from 2000 — the kind of books
+where the formulas *are* the content. Extracting them offered two roads, both bad. The embedded
+text layers (some librarian's OCR from 2013) read the prose beautifully and mangled every formula
+into modern art: `а13 = (((ааа)2)2)а`, which as written is simply *wrong* — that's a¹³ with its
+superscripts amputated. The specialist alternative, marker — a 3.3 GB stack of layout models and a
+math-recognition network — did the opposite: gorgeous LaTeX (`$$f[i,k]=\sum_{j=1}^{k}f[i-k,j]$$`),
+while quietly hallucinating Chinese, Georgian and Thai glyphs *into the Russian prose* and dropping
+a `+ Fib(n-2)` from a code listing. One tool couldn't see math; the other couldn't stop dreaming.
+
+Getting marker running was its own comedy of layered failures, each teaching the same lesson at a
+different altitude. Its model downloader had no timeout, so a connection blip left it hanging on a
+dead socket forever. My salvage of its 98.6%-complete download skipped a 1.5 KB `.gitattributes` —
+shell globs don't match dotfiles — and the loader's existence-only manifest check responded by
+re-downloading 1.4 GB. Then the CDN quietly swapped the model file between my resume attempts, and
+I stitched the old file's head onto the new file's tail: sizes matched perfectly, contents were
+garbage, and only the safetensors header arithmetic caught it. Existence checks are not integrity
+checks; size checks are not integrity checks; the fetch doctrine that survived is curl with resume,
+a stall-abort, and a sha256 from the API — verified before anything gets to claim it's a model.
+
+Then came the twist. The user asked: if *you* can read these formulas off the page, maybe qwen can
+too? The text-only qwen can't — no eyes — but Qwen3-VL exists, Unsloth ships it as a
+quality-per-byte UD quant, and our tuned llama-server turned out to already speak `--mmproj`. Ten
+seconds after loading, the general-purpose vision model read the same scanned page and produced
+`$a^{13}=(((a\cdot a\cdot a)^2)^2)\cdot a$` — superscripts intact — then transcribed the Pascal
+block character-for-character *including the term marker had dropped*, in clean Russian prose with
+zero hallucinated scripts. The 17 GB generalist beat the 3.3 GB specialist at the specialist's own
+job, on the first try, running locally on hardware that was idle anyway.
+
+There's a genuine architectural lesson under the anecdote. The specialist stack is a *pipeline* —
+detection model feeds recognition model feeds math model — and every seam is a place where errors
+compound silently. The VLM is one model looking at the whole page the way a person does, and when
+it reads "Fib(n-1)" it knows, in a way no pipeline stage does, that Pascal code tends to say
+`Fib(n-1) + Fib(n-2)`. Its language prior is doing restoration work the OCR pipeline structurally
+cannot. So now 2,614 pages are streaming through the GPU at ten seconds each while DeepDoc chews
+the CPU — the two heaviest jobs on the box, not competing — and the output goes behind the same
+gate as everything else here: a blind 20-page audit against the page images before a single chunk
+is ingested. Because a model that reads beautifully is exactly the kind of witness this project has
+learned not to trust without a second grader.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*

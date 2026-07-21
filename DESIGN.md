@@ -231,8 +231,8 @@ browser that can deep-link into the original PDF.
 
 | | route | why |
 |---|---|---|
-| Cyrillic PDFs | `pdftotext` → `.txt`, naive | DeepDoc garbles Cyrillic CID fonts (Новиков → HOBMKOB) |
-| scanned PDFs | `ocr-pdf.sh` (tesseract) → `.txt` | no text layer at all |
+| Cyrillic PDFs (text layer) | `pdftotext` → `.txt`, naive | DeepDoc garbles Cyrillic CID fonts (Новиков → HOBMKOB) |
+| scanned PDFs / djvu | **qwen3-vl transcription** (`transcribe-scans.py`) → `.txt` | see §4.4 — the local VLM beat both tesseract-class OCR layers and marker on prose, code AND math |
 | Latin PDFs | **PDF → DeepDoc** (`book`) | keeps page+bbox positions **and extracts figures** — a biology textbook is half diagrams, which `pdftotext` silently discards |
 
 Two traps in that last row, both of which fail *silently*: RAGFlow's uploader accepts up to 1 GB but
@@ -392,6 +392,40 @@ drives the action (`keep` / `delete` / `excise` / `strip`).
   on the interaction `code_ratio × is_pdf × weird_density` (the fullwidth glyphs are already in our
   weird range). Rules can't weigh a three-way interaction; the model can. Strongest concrete argument
   for the classifier so far.
+
+### 4.4 The VL transcription lane — a bake-off settled by evidence (2026-07-21)
+
+For scanned Cyrillic books (the «Нейрокомпьютеры» series, Окулов — djvu/image PDFs), three
+extraction candidates were measured on the same pages of the same book:
+
+| | prose | code | math |
+|---|---|---|---|
+| embedded djvu text layer | ✓ clean | ~ (`Fib(n-l)`, dropped nothing) | ✗ `а13 = (((ааа)2)2)а` — *wrong as written* |
+| marker (surya OCR + texify) | ✗ hallucinates CJK/Georgian *into Russian prose* | ✗ dropped `+ Fib(n-2)` | ✓ perfect LaTeX (`$$\sum$$`, `\begin{cases}`) |
+| **qwen3-vl:30b (local, UD-Q4_K_XL)** | ✓ clean | ✓ char-exact incl. the term marker dropped | ✓ `$a^{13}=(((a\cdot a\cdot a)^2)^2)\cdot a$` |
+
+The general local VLM beat the specialist OCR stack on its home turf, at ~10–15 s/page, fully
+offline. Notable detail: marker's failure mode (foreign-script hallucination in Cyrillic OCR) is
+*exactly the weird-glyph junk class* the curation classifier hunts — ingesting marker output would
+have manufactured FIGURE_GARBAGE at scale.
+
+**The lane** (`transcribe-scans.py`, all-in-one, resumable): render page → qwen3-vl transcribes
+(prose verbatim, code in fences, display math as `$$LaTeX$$`, `[Рис.: …]` stubs for figures, no
+running heads) → per-page files (crash = resume, not restart) → assemble `corpus/ml/<slug>.txt`
+with `[[p.N]]` markers (browser deep-links the real pages) → **20-page seeded audit sample** for a
+blind second-grader review before anything is ingested (the RUBRIC three-defense discipline applied
+to an extraction lane: VLM OCR can silently paraphrase, so the lane is trusted by measured
+agreement, not by two good pilot pages).
+
+**Serving:** the same tuned-llama.cpp pattern as qwen-next — Unsloth **UD-Q4_K_XL** (quality-per-
+byte matters most when the failure mode is a miscopied glyph) + `mmproj-F16` on the bundled
+`llama-server --mmproj` (`:18081`), fully GPU-resident (~21 GB — no MoE offload needed), Unsloth's
+Instruct samplers (`temp 0.7, top_p 0.8, top_k 20, presence_penalty 1.5` — the presence penalty is
+the anti-repetition guard for OCR). Runs entirely on the GPU while DeepDoc ingestion owns the CPU —
+the two heaviest jobs on the box don't contend.
+
+marker keeps its original role (English/Latin papers via `prep-collection.sh`); it is only the
+Cyrillic-scan lane it lost.
 
 **Where the chunks actually live, and the read/write asymmetry.** RAGFlow stores every chunk in
 **Elasticsearch** (`DOC_ENGINE=elasticsearch`, ES 8.11.3 in `docker-es01-1`, exposed on host
