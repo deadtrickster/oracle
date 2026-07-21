@@ -1,5 +1,10 @@
 # Upstream PR draft — infiniflow/ragflow
 
+**STATUS (2026-07-21): both submitted.**
+PR 1 → [infiniflow/ragflow#16958](https://github.com/infiniflow/ragflow/pull/16958) — **MERGED**.
+PR 2 → [infiniflow/ragflow#16959](https://github.com/infiniflow/ragflow/pull/16959) — open
+(closes upstream #12109).
+
 **Checked against `origin/main` (51 commits ahead of our `v0.26.4` pin, as of 2026-07-14): both bugs
 are still present, unfixed — in BOTH the Python and the Go implementation.**
 

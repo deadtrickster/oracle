@@ -411,7 +411,9 @@ against a hardcoded 218-token limit and only merges groups of size one; anything
 as-is, however tiny. The single branch that honours `chunk_token_num` was dead code for real books.
 
 So: the setting was accepted by the API, stored in the config, echoed back to me on request, and
-silently discarded by the code that actually ran. **Nothing errored. Nothing warned.** It is the same
+silently discarded by the code that actually ran. **Nothing errored. Nothing warned.** (The fix is
+now upstream as [infiniflow/ragflow#16959](https://github.com/infiniflow/ragflow/pull/16959),
+closing their #12109 — turns out everyone's textbooks were 47 characters long.) It is the same
 bug as the parser that reports `DONE` on zero output, the reranker that times out and returns the
 unranked list, the stemmer that isn't there. **Silence read as success**, one more time, and this time
 it was quietly wrecking every English book I own.
@@ -526,7 +528,10 @@ the gap-from-geometry fix — gated on an `asciiWordPattern` regex, so every non
 excluded by construction. The kicker: the Python code's *own* space regex, a few lines from the bug,
 already includes Cyrillic. Someone ported that character class to Go and deleted the `а-яА-Я`.
 
-The fix is small and it went upstream as two PRs. But the thing I keep turning over is that I sat on
+The fix is small and it went upstream as two PRs —
+[infiniflow/ragflow#16958](https://github.com/infiniflow/ragflow/pull/16958) (word boundaries for
+non-Latin scripts + the OCR-fallback guard, **merged**) and
+[#16959](https://github.com/infiniflow/ragflow/pull/16959) (the `chunk_token_num` fix, Act 9's bug). But the thing I keep turning over is that I sat on
 top of this for weeks behind a four-word note — *"DeepDoc garbles Cyrillic"* — that was wrong in every
 particular, and I never questioned it until someone else did.
 

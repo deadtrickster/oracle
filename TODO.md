@@ -559,6 +559,14 @@ days without ever checking it.)*
   safetensors header math) → the fetch doctrine is now: resumable + stall-abort + **sha256 from the
   API**, existence checks are not integrity checks.
 
+### 2026-07-21 — both DeepDoc fixes UPSTREAMED; #16958 MERGED ✅
+- [ragflow#16958](https://github.com/infiniflow/ragflow/pull/16958) (word boundaries for non-Latin
+  scripts + skip-OCR-fallback-the-recogniser-can't-serve) — **merged**.
+- [ragflow#16959](https://github.com/infiniflow/ragflow/pull/16959) (honour `chunk_token_num` in
+  book/paper chunkers, keep page positions; closes upstream #12109) — open.
+- This is the precedent G3.7 ("return and patch DeepDoc") relies on: our container patches have a
+  path upstream, so Strategy-3 can go the same route when built.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy

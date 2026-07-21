@@ -330,7 +330,10 @@ add-chunk forces a **fresh embedding** on the clean text. The worklist file is t
 what is about to be re-cut before anything destructive runs, and it is the audit trail. If excision leaves
 nothing legit, it collapses to a plain delete.
 
-**Root cause is upstream, and we will patch it later — like the word boundaries.** The garbage exists
+**Root cause is upstream, and we will patch it later — like the word boundaries** (that precedent
+is now proven: our word-boundary + OCR-fallback-guard fix **merged** as
+[infiniflow/ragflow#16958](https://github.com/infiniflow/ragflow/pull/16958), and the
+`chunk_token_num` fix is open as [#16959](https://github.com/infiniflow/ragflow/pull/16959)). The garbage exists
 because the layout model (`deepdoc/parser/pdf_parser.py`, `_layouts_rec` → onnx DLA) mislabels the
 diagram. The parser *already* has box-level garbled-text filters right where the fix belongs
 (`pdf_parser.py` ~810: **Strategy 1** PUA/unmapped-CID chars, **Strategy 2** font-encoding garble → clear
@@ -565,6 +568,8 @@ Measured on one book before re-parsing all 19 (`lbdl.pdf`):
 So we keep DeepDoc's page mapping **and** get sane chunks — but only after fixing bug 2. The
 trade-off we thought we faced (good chunks *or* a corpus browser) did not exist; the code was simply
 wrong in two places. Requires re-parsing `books` and `bio-books`.
+**Upstreamed:** [infiniflow/ragflow#16959](https://github.com/infiniflow/ragflow/pull/16959)
+(closes upstream #12109 — the bug bit anyone who set `chunk_token_num` on real books).
 
 **And the lesson, which is this system's recurring one:** the setting was accepted by the API, stored
 in the config, and displayed back to us — then silently ignored by the code path that actually ran.
