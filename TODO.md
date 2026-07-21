@@ -746,6 +746,26 @@ but nothing from it is in the corpus yet. Three lanes when we ingest (after the 
 
 Written down so they cost nothing to leave alone. **Do not start these.**
 
+- **H12 — TEACH THE VLM (his idea, 2026-07-21): the transcription lane as a trainable system.**
+  The early audit produced exactly the artifacts training needs: an error taxonomy (near-synonym
+  substitutions, dropped `⁻¹`, hallucinated `[Рис.:]` stubs, leaked running heads), ground-truth
+  corrections, and a frozen acceptance sample. Three rungs, cheapest first:
+    1. **Prompt tournament** (not really parked — folds into the lane cleanup): variants scored
+       against the frozen audit sample, DISCIPLINE-tournament style. Targets the two systematic
+       bugs (template-echo figure stubs, running heads).
+    2. **DPO from audit corrections**: every audit fix is a preference pair (page image, flawed
+       transcript, corrected transcript). Audits become training data, not just gatekeeping.
+    3. **RLVR/GRPO with a VERIFIABLE reward**: synthesize pages we control (Cyrillic prose + LaTeX
+       + Pascal in book typography, scan-degradation augmentation) → reward = edit-distance +
+       formula-exact-match against the generated source. No human labels in the loop; Unsloth
+       ships Qwen3-VL RL notebooks.
+  **Constraints:** Unsloth free-tier training targets the 8B dense (24 GB QLoRA-friendly); the
+  30B-A3B MoE is unproven for training on this box → first measure stock-8B vs stock-30B on the
+  audit sample; the prize is a tuned 8B that beats stock 30B at 2× speed. ROI is the *permanent
+  lane* (future scans), not the current books (they'll be done first).
+  **Open decision (when the OCR run finishes): teach the junk detector (G3.8) or the VLM first.**
+  Grounding for the RL work: Lambert's RLHF book is in the corpus — ask_corpus its own handbook.
+
 - **H1 — CONTEXT-AWARE CHUNK VALUE (his idea, 2026-07-14 — the best one on this page).**
   The judge asks *"is this chunk good?"*. The right question is **"does this chunk ADD anything?"**
   Value is **marginal, not intrinsic**: a beautiful passage that says what 40 others already say has
