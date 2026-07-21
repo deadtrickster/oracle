@@ -835,6 +835,16 @@ Written down so they cost nothing to leave alone. **Do not start these.**
     (3) RL only if SFT plateaus with measurable errors left — then it's multi-H200 verl GRPO on
     the 30B (the proven scale), with the synthetic-RLVR reward (edit-distance + formula-exact).
     The 8B survives only as a deep contingency, not a plan step.
+  - **STEP 0, BEFORE ANY RENTAL — fix the temperature and re-baseline (his catch):** the lane ran
+    Unsloth's CHAT samplers (temp 0.7) on a single-right-answer task; p.47 transcribed correctly in
+    one run and wrongly in another — part of the 72%-major rate is sampling noise, not capability.
+    Re-run gold-covered pages at temp 0/0.1/0.3 (keep a repetition guard — greedy makes loops
+    likelier; presence_penalty exists for a reason), score mechanically against gold, and make the
+    winner the lane's permanent setting. The SFT go/no-go and expected gains are measured against
+    the LOW-TEMP baseline, never the chat-sampler one. Also: **hold out one full book** from
+    training (train on 5, eval on the 6th) — the tune must generalize past these books' typography.
+    Predicted gains by class: habits (stubs/headers/hyphens/eqno/HTML-tags) — high; domain vocab
+    (acronyms, Latin/Cyrillic contamination) — medium-high; 150dpi perception limits — none (floor).
   **Open decision (when the OCR run finishes): teach the junk detector (G3.8) or the VLM first.**
   Grounding for the RL work: Lambert's RLHF book is in the corpus — ask_corpus its own handbook.
 
