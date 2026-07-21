@@ -15,6 +15,7 @@ Run:  uv run ingest-corpus.py --api-key <KEY> [--wait]
 Re-runnable: existing datasets are reused, already-uploaded filenames skipped.
 """
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -245,6 +246,11 @@ def main():
         have, new_ids = set(), []
         for d in list_docs(s, args.base, dsid):
             have.add(d["name"])
+            # RAGFlow sometimes stores an upload under name(N).ext (its internal name-collision
+            # registry can fire even when no same-named doc is visible). Our plain-name check then
+            # misses it and re-uploads — one duplicate PER RUN, forever (found as 28 copies of one
+            # io_uring man page). Register the suffix-stripped form too, so the ratchet can't turn.
+            have.add(re.sub(r"\(\d+\)(\.[^.]+)$", r"\1", d["name"]))
             run = d.get("run")
             if run in ("UNSTART", "FAIL") or (run == "DONE" and not d.get("chunk_count")):
                 new_ids.append(d["id"])

@@ -567,6 +567,15 @@ days without ever checking it.)*
 - This is the precedent G3.7 ("return and patch DeepDoc") relies on: our container patches have a
   path upstream, so Strategy-3 can go the same route when built.
 
+### 2026-07-21 — the duplicate ratchet: 28 copies of one man page 🔴→✅
+- His catch ("ingest status says there are new items"): every idempotent ingest run had been
+  re-uploading `io_uring_check_version.3.txt` — RAGFlow's internal name registry stores it as
+  `name(N).txt`, our dedup checked the PLAIN name, never matched, re-uploaded: +1 duplicate per run,
+  28 copies (27 parsed) quietly competing in retrieval. Same near-dup crowding class as the
+  twice-ingested Russian books, in miniature — and invisible until someone read the status line.
+- Fixed: `have` now registers suffix-stripped names too (ratchet can't turn); 27 copies deleted;
+  verified `0 new` on a fresh pass.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy
