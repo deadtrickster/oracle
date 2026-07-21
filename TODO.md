@@ -814,10 +814,27 @@ Written down so they cost nothing to leave alone. **Do not start these.**
        + Pascal in book typography, scan-degradation augmentation) → reward = edit-distance +
        formula-exact-match against the generated source. No human labels in the loop; Unsloth
        ships Qwen3-VL RL notebooks.
-  **Constraints:** Unsloth free-tier training targets the 8B dense (24 GB QLoRA-friendly); the
-  30B-A3B MoE is unproven for training on this box → first measure stock-8B vs stock-30B on the
-  audit sample; the prize is a tuned 8B that beats stock 30B at 2× speed. ROI is the *permanent
-  lane* (future scans), not the current books (they'll be done first).
+  **Constraints — RESEARCHED 2026-07-21 (he can rent an H200):**
+  - **QLoRA-4bit on the 30B MoE is off the table everywhere** — BitsandBytes doesn't support MoE
+    quantized training (Unsloth: "not recommended right now"; explains their missing 30B BnB
+    upload). So the 24 GB local box genuinely can't train the 30B — not a skill issue.
+  - **LoRA-16bit SFT of 30B-A3B: ~63 GB @4K ctx (Unsloth H100 bench) → fits ONE rented H200
+    (141 GB) comfortably**, vision tower included. Community recipe exists for Qwen3-VL-30B-A3B
+    LoRA; caveats: DeepSpeed **ZeRO-3 breaks LoRA gradient flow on this MoE — use ZeRO-2**; leave
+    the router frozen (default). Gold-SFT epoch over ~2.6K pages ≈ hours; rental cost trivial.
+  - **RL (GRPO/GSPO): 8B has the beaten path** — official Unsloth VLM-RL notebooks (runs on a T4!),
+    custom python reward fns (our edit-distance + formula-exact RLVR reward plugs straight in),
+    vLLM rollouts via fast_inference=True. **30B-A3B GRPO is proven only at 8×H200 scale** (verl
+    bench: ~252 s/step); single-H200 30B GRPO would be pioneering (BF16 weights alone ~61 GB ×
+    trainer+rollout copies) — not the first move.
+  - **Plan (his call: skip the 8B — train the model we actually run):** the 30B-A3B activates
+    ~3B/token, so at inference it's CHEAPER than an 8B dense — there is no deployment win in the
+    smaller model; its only advantage was trainability without rental, which the H200 removes.
+    (1) **Gold-SFT-LoRA the 30B-A3B on one rented H200** (ZeRO-2, router frozen, ~63 GB@4K,
+    hours/epoch over the 2,614-page gold set); (2) judge on the gold eval vs stock-30B;
+    (3) RL only if SFT plateaus with measurable errors left — then it's multi-H200 verl GRPO on
+    the 30B (the proven scale), with the synthetic-RLVR reward (edit-distance + formula-exact).
+    The 8B survives only as a deep contingency, not a plan step.
   **Open decision (when the OCR run finishes): teach the junk detector (G3.8) or the VLM first.**
   Grounding for the RL work: Lambert's RLHF book is in the corpus — ask_corpus its own handbook.
 
