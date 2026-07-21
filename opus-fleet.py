@@ -28,7 +28,7 @@ REPO = Path(__file__).parent
 VL_PAGES = REPO / "corpus/ml/vl-pages"
 GOLD = REPO / "corpus/ml/opus-gold"
 BOOKS_DIR = Path.home() / "Documents/Books/ml"
-BATCH = 15
+BATCH = 25   # v4 (pure OCR, no draft diff) runs ~2-3x faster than v3 — bigger batches, fewer spawns
 
 BOOKS = [  # (pdf filename, slug) — must match transcribe-scans.py
     ("Нейрокомпьютеры и их применение. Книга 01. _Галушкин А.И._ Теория нейронных сетей.(2000).pdf",
