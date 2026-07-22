@@ -217,3 +217,71 @@ Ask in order, in one conversation. Nothing here is about code — that is the po
 - **The obvious-but-wrong answer** — B2.
 - **Grounding decay** — grounds the first turn, then answers the rest of the conversation from
   parametric memory. Suite A is a *conversation*: A2–A4 must still call tools.
+
+---
+
+## The three referential failures (they are NOT the same bug)
+
+All three produce confident, well-formed prose that fails a check — but they fail differently, and
+only the first one dies to a grep. Ranked by how hard they are to catch:
+
+| class | what it does | caught by |
+|---|---|---|
+| **1. Fabrication** | invents a symbol/value that does not exist (A4's original: WAL codes conjured from `add_*_wal_record` names) | any grep — the string isn't in the repo |
+| **2. Substitution** | cites REAL symbols that answer a DIFFERENT question (A4 2026-07-12: `XLogBeginInsert()` &co — genuine PostgreSQL WAL API offered as OrioleDB's record types) | only a grader who checks *"did it answer THIS question"*, not *"did it hallucinate"* |
+| **3. Misattribution** | a REAL observation bound to the WRONG address — right content, wrong coordinates | only by opening the cited location |
+
+**Class 3, measured (2026-07-22, qwen-next, `~/.claude-next` session `6ee5e104`, reviewing
+`~/.emacs.d/init.el`).** Asked to review a 3,081-line config and suggest improvements, it wrote
+*"Line 2668-2740 have many projectile-related functions, but `projectile-mode` is only enabled at
+line 1942."* Verified against the file: `projectile-mode +1` **is** exactly line 1942 ✓, and a
+second citation (session-restore block at 939) is exact ✓ — but the projectile helpers actually
+live at **1268–1430**, and 2668–2740 is `diff-mode` code with no projectile in it. The *pattern* it
+reported is real; the address is off by ~1,300 lines. The recommendation resting on it collapses
+(with the true layout the helpers already precede the mode, and elisp `defun`s don't execute at
+definition anyway).
+
+Why this is mechanically distinct from 1 and 2: citing a line range is not inference. The line
+numbers arrive as prefixes printed beside the content, so an accurate citation only requires the
+model to keep content bound to the number next to it. That is an **indexing** task, and it degrades
+with context occupation rather than with question difficulty — Axiom 1 in a new place: not worse
+reasoning, looser *bindings*. Note it had read the whole file (Read 1–2000, then offset 1658 for
+the remainder), so this is NOT a coverage failure.
+
+Suggestive, n=3, treat as hypothesis: **both exact citations (939, 1942) came from the FIRST read
+chunk; the wrong one came from the second** — later material, deeper into an already-full context.
+
+### Probe: positional citation accuracy (cheap, verifiable ground truth)
+
+Rare property for an eval — grading needs no judge, just `sed -n`. Ask for N citations spread
+across a long file, then score each by opening it, and bucket accuracy by position in context.
+
+1. Pick a long file (`~/.emacs.d/init.el`, 3,081 lines) and ask for ~10 improvements, each
+   **required to cite `file:line`**.
+2. Score: for each citation, does the cited range contain what the model says it contains?
+3. Bucket by depth (first 25% of context vs last 25%). If accuracy falls with depth, class 3 is
+   positional, not random.
+
+**Arm B — the design question this actually tests.** Re-run the identical task with harness `Read`
+DISABLED, forcing `source_search` + `read_lines` (or `ask_code`). Same model backs both arms today
+(`ORACLE_SYNTH_MODEL=qwen3-coder-next` on :18080 — the very model that produced the bad citation),
+so the arms differ ONLY in how content reaches it.
+
+Be precise about *why* that should matter, because the naive reason is wrong: `read_lines` prefixes
+line numbers exactly like `Read` does (`NNN<tab>content`, under a `path lines A-B:` header), so
+both arms show addresses. The difference is **window size and recency**:
+
+  Arm A  ONE call returns 2,000 numbered lines. Every later citation is a long-range recall over a
+         block read thousands of tokens ago — the binding must survive the whole review.
+  Arm B  MANY small calls, each fetching the specific region being written about, at the moment of
+         writing about it. The header states the range explicitly, and the binding is short and fresh.
+
+So the hypothesis is not "addresses help" — it is that **binding decays with distance and volume,
+and small just-in-time windows keep it short**. That also predicts the failure is recoverable
+without a better model, which is the whole point of running the arms.
+
+If Arm B's citations are accurate where Arm A's decay, that is a **harness result, not a model
+result** (Axiom 2): the fix is never to ask a model to remember an address it was shown 2,000 lines
+ago — carry the address with the content. It would also generalize a rule we already follow for
+values ("trust the RAW SOURCE lines over any prose summary — models miscopy value tables") from
+*values* to *locations*.
