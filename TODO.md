@@ -778,6 +778,38 @@ whitespace+lowercase (`case='lower', stemming=false` dictionary); (b) ES is our 
         normalize BM25 before weighting it against cosine. So the fusion that wins recall is the
         one pure SQL cannot express here; we fuse client-side instead (+~7 ms, identical math).
         This is a Phase-1 constraint too: `serenedb_conn.py` will hit it.
+      **TUNING PASS 2026-07-22 (after parity) — what moved the needle and what backfired.**
+      recall@64 is SATURATED (ES and SereneDB both 5/5), so it cannot show improvement; the eval now
+      reports **recall@8, MRR and mean rank of gold**, which have headroom (the mice query was
+      "recalled" at rank 40 — present, but far outside the window a synthesizer reads).
+      | config | r@64 | r@8 | MRR | mean rank | ms |
+      |---|---|---|---|---|---|
+      | weighted fusion (parity config) | 5/5 | 4 | 0.81 | 8.8 | 36 |
+      | plain RRF | 4/5 | 4 | 0.57 | 1.8* | 19 |
+      | **weighted RRF (`wrrf`)** | **2/5** | 0 | **0.02** | 24.0 | 21 |
+      | weighted + cross-encoder rerank | 5/5 | 4 | 0.81 | **3.8** | 10393 |
+      | RRF + cross-encoder rerank | 4/5 | 4 | 0.80 | 1.0* | 10494 |
+      *mean rank is computed over FOUND queries only, so a config that MISSES the hard query
+      flatters its own average — MRR is the honest summary. Noted because it nearly fooled me.
+      - **`wrrf` was my idea and it FAILED — instructively.** The plan: weight the reciprocal ranks
+        instead of the scores, so no `max(BM25)` is needed and the whole fusion fits in ONE query
+        the planner can serve (killing the client-side second round trip). Result 2/5, MRR 0.02.
+        Why: weighting ranks ≠ weighting scores. In score space a weak lexical match contributes a
+        small number; in rank space the top lexical hit contributes 1/61 **however bad it is**, so
+        the 0.7 lexical weight AMPLIFIED the 7,901-match stopword flood instead of emphasizing good
+        lexical evidence. Rank-based fusion discards the "how good is this match" signal — which is
+        precisely the signal the hard query needs. The planner limitation therefore still costs us
+        a round trip; it is not routable around this way.
+      - **The real quality lever was a MISSING STAGE, not a knob.** RAGFlow's pipeline is
+        retrieve→RERANK; our SereneDB path was retrieval-only, so the comparison had been unfair to
+        BOTH sides. Adding the same GTE cross-encoder (:9760): mean rank **8.8 → 3.8**, and the
+        mice query **@40 → @15** — the bi-encoder scores resemblance (bats = "летучие мыши" beat the
+        rodent passage 0.762 vs 0.471), a cross-encoder reads query+passage together and scores
+        answerability. Cost: **10.4 s** on CPU for 64 docs. Note this is PARITY, not advantage —
+        ES pays the identical stage.
+      - **STILL MISSING for any "better than ES" claim: the ES latency baseline.** We measured
+        SereneDB at 19–36 ms retrieval-only and never timed the ES hybrid on the same queries, so
+        "faster" is currently unmeasured. Do that before tuning further.
 - [ ] **G4.2 — Phase 1 (only on G4.1 parity): `serenedb_conn.py` for RAGFlow.** RAGFlow abstracts the
       store behind `DOC_ENGINE` (`rag/utils/{es,infinity,opensearch}_conn.py`) — implement the same
       interface, bind-mount into pinned v0.26.4 like our other patches. Side benefit: every ES-direct
