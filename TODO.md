@@ -740,6 +740,44 @@ whitespace+lowercase (`case='lower', stemming=false` dictionary); (b) ES is our 
         measure those separately, don't let single-topic queries average the failure away. Also:
         k-means centroids are trained on the data present at build time — **build the index AFTER
         the collection ingest drains**, and expect periodic rebuilds as the corpus grows.
+      **MEASURED 2026-07-22 — Phase 0 done, PARITY REACHED. Scripts: `serenedb-load.py` (mirror),
+      `serenedb-index.py` (normalize+build), `serenedb-eval.py` (recall), `serenedb-repro-planner.py`
+      (the limitation, minimal).**
+      - **Mirror**: 247,665 chunks (ES scroll → Postgres wire, ~181 rows/s, idempotent top-up).
+      - **The norms prediction was HALF WRONG, and it mattered.** Guidance said bge-m3 is
+        L2-normalized ⇒ cosine ≡ ip ⇒ ip+sq8 quantization is free. Measured: stored `q_1024_vec`
+        norms are **0.935–0.976 (mean 0.950)**, NOT 1.0. On the raw column `ip` would silently
+        boost longer vectors ~4% and rank differently from ES's cosine. Fix: materialize a
+        normalized column `embn` (one set-wise DuckDB `list_transform` statement, 807s for 247K —
+        NOT 247K client round trips) and index that with `metric='ip', quant='sq8'`. On unit
+        vectors ip IS cosine, so we keep ES semantics AND unlock quantization. Raw `emb` stays an
+        untouched mirror. Post-check: norms exactly 1.000000.
+      - **Index build: 4.7s** for 247K×1024 (inverted + IVF in ONE index, incl.
+        `optimize_top_k='bm25(1.2,0.75)'`). Verified real, not lazy: self-retrieval returns the
+        query's own chunk at rank 1, and `<#>` is negative-ip (ascending = most similar).
+      - **The delimiter analyzer choice is validated by the stemmer surviving**: `мыш` matches 103
+        chunks via `@@` vs ~983 by naive substring — because `мышц` (muscle) is correctly a
+        DIFFERENT token. Our Snowball patch reaches SereneDB intact, and the query side reproduces
+        it (rag_tokenizer loads standalone by stubbing `common.settings.DOC_ENGINE_INFINITY`).
+      - **RECALL@64: 5/5 = ES parity, 24.7 ms mean** (weighted fusion, nprobe=8). Better ranks than
+        RRF on three queries (photosynthesis @3→@1, lsn-general @2→@1).
+      - **The IVF-border prediction did NOT reproduce; the real risk was FUSION.** nprobe 8→512
+        changed recall not at all (flat 4/5 on RRF) and only cost latency (16→48 ms) — so the miss
+        was never the index probing too few clusters. Cause: `@@` over a tokenized question is OR
+        semantics (the 5-token mice query matches **7,901** chunks), so equal-weight RRF lets
+        stopword hits flood the pool and evict a gold chunk sitting at **vector rank 50**.
+        Weighted fusion (0.7*bm25_norm + 0.3*cosine, RAGFlow's own weights) recovers it to @40.
+        **Lesson: for engine-swap parity, replicate the incumbent's FUSION, don't accept the new
+        store's default.** RRF is not wrong in general — it is wrong as a parity claim.
+      - **LIMITATION FOUND (worth reporting upstream — he knows the team).** Certain query shapes
+        lose the inverted-index access path and fail at PLAN time with
+        `UndefinedFunction: Table Function with name iresearch_scan does not exist! Did you mean
+        "iceberg_scan"?`. Narrowed by the reproducer (which corrected our first guess — joining two
+        index branches is FINE): the breaking construct is a **scalar subquery over an
+        index-scanning CTE**, i.e. `(SELECT max(s) FROM lex)` — exactly the natural way to
+        normalize BM25 before weighting it against cosine. So the fusion that wins recall is the
+        one pure SQL cannot express here; we fuse client-side instead (+~7 ms, identical math).
+        This is a Phase-1 constraint too: `serenedb_conn.py` will hit it.
 - [ ] **G4.2 — Phase 1 (only on G4.1 parity): `serenedb_conn.py` for RAGFlow.** RAGFlow abstracts the
       store behind `DOC_ENGINE` (`rag/utils/{es,infinity,opensearch}_conn.py`) — implement the same
       interface, bind-mount into pinned v0.26.4 like our other patches. Side benefit: every ES-direct

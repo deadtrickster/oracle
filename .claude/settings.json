@@ -3,7 +3,14 @@
     "allow": [
       "Bash(python3 opus-fleet.py:*)",
       "Bash(python3 ingest-status.py:*)",
-      "Bash(python3 transcribe-scans.py:*)"
+      "Bash(python3 transcribe-scans.py:*)",
+      "Bash(python3 find-session.py:*)",
+      "Bash(python3 assemble-gold.py:*)",
+      "Bash(python3 eval-retrieval.py:*)",
+      "Bash(uv run serenedb-load.py:*)",
+      "Bash(uv run serenedb-index.py:*)",
+      "Bash(uv run serenedb-eval.py:*)",
+      "Bash(uv run serenedb-repro-planner.py:*)"
     ]
   }
 }

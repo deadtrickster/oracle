@@ -36,6 +36,21 @@ A4 is the one that previously produced *fabricated* record codes: `search_graph`
 `add_*_wal_record` **functions**, and the model invented codes from their names. It must enumerate
 the real ones. (This is why `ask_code`'s source tier uses `search_code`, not `search_graph`.)
 
+**A4 has a SECOND failure mode — substitution, not fabrication** (observed 2026-07-12, qwen3-coder:30b
+in `~/.emacs.d`, session `24dba826`; 12 `ask_corpus` calls, no `ask_code`). The answer was fluent,
+well-structured, and correct about OrioleDB's *architecture* (row-level vs page-level WAL, undo log
+instead of VACUUM, parallel apply). Under "Technical Implementation → WAL Construction Functions" it
+then listed `XLogBeginInsert()`, `XLogRegisterBuffer()`, `XLogRegisterData()`, `XLogRegisterBufData()`,
+`XLogInsert()` — **stock PostgreSQL WAL API, not OrioleDB record types**. Nothing is invented, every
+name is real, and the question is still unanswered: no struct codes appear anywhere.
+
+This scores as FAIL, and it is more dangerous than the fabrication mode: fabricated codes look wrong
+to anyone who greps for them, whereas real-but-adjacent symbols survive scrutiny. A grader checking
+"did it hallucinate?" passes this answer; only a grader checking "did it answer *this* question?"
+catches it. **So the A4 rubric is: the listed codes must be OrioleDB's own — presence of plausible
+PostgreSQL symbols is not partial credit, it is the failure.** Note the tool trace supports the
+diagnosis: 12 corpus calls and zero source calls, i.e. it answered a source-level question from prose.
+
 ---
 
 ## Suite B — serenedb (mirrors suite A, one difficulty ramp harder)
