@@ -396,6 +396,30 @@ drives the action (`keep` / `delete` / `excise` / `strip`).
   weird range). Rules can't weigh a three-way interaction; the model can. Strongest concrete argument
   for the classifier so far.
 
+**Policy change (his call, 2026-07-22): DEMOTE BY DEFAULT, delete only the irrecoverable.** The
+classifier's job description changed from *delete-list generator* to **metadata annotator**. Insight:
+a ToC is retrieval poison for content queries but retrieval *gold* for navigational ones ("which
+chapter covers DP on trees?") — deletion throws that away; demotion makes it a tunable policy.
+
+- **Storage:** classifier output becomes chunk metadata in ES (`junk_class`, `junk_score` — written
+  once by update-by-query after scoring; the full book stays in RAG).
+- **Actuator, by class:**
+  | class | action | why |
+  |---|---|---|
+  | ToC, index, glossary, bibliography, exercises | **demote** — score × per-class weight (e.g. toc 0.2, index 0.15) | wrong for content queries, right for navigational/apparatus queries |
+  | figure-OCR garbage, ocr-damaged-code | **delete** (or excise for mixed chunks) | no query class ever wants `GridPa e` quoted as API truth |
+  | clean | keep, weight 1.0 | |
+- **Where the demotion lives: our `ask_corpus`/rerank layer** — the one funnel all retrieval passes
+  through, in code we own (Axiom 2: harness, not RAGFlow patch). Score multiply before the rerank
+  cut; weights are config, not code. ES `boosting` queries (`negative_boost`) remain the engine-side
+  alternative but require patching RAGFlow's query builder — not needed while ask_corpus is the funnel.
+  In SereneDB (G4) the same policy is one SQL expression (`score * CASE junk_class WHEN 'toc' THEN
+  0.2 … END`) — score-shaping-as-SQL is a genuine bake-off point in its favor.
+- **Later twist:** a navigational-query detector flips the weights — "оглавление", "which chapter",
+  "structure of" queries *boost* ToC instead. Same metadata, inverted policy, zero re-ingestion.
+- **Eval bar:** gold-eval before/after — content-query recall must not regress; navigational queries
+  should improve. Weights are judged, not admired.
+
 ### 4.4 The VL transcription lane — a bake-off settled by evidence (2026-07-21)
 
 For scanned Cyrillic books (the «Нейрокомпьютеры» series, Окулов — djvu/image PDFs), three

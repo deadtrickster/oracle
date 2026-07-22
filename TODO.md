@@ -672,7 +672,13 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       bootstrap via rules→qwen-judge weak labels→human spot-check (the §4.2 audit pattern). It is ONE
       model over the WHOLE junk taxonomy — ToC, index, glossary, exercises, bibliography, figure-OCR
       garbage, boilerplate — replacing the is_obvious_toc rule + statistical strip + recall rules + GPU
-      qwen judge + glyph detector; output drives keep/delete/excise/strip. Feature extractor is BUILT:
+      qwen judge + glyph detector. **Output contract (his call 2026-07-22): DEMOTE BY DEFAULT** —
+      classifier writes `junk_class`/`junk_score` chunk metadata to ES; apparatus classes (ToC, index,
+      glossary, bibliography, exercises) get score-demoted in the ask_corpus rerank layer (per-class
+      weights, config not code); ONLY irrecoverable classes (figure-OCR garbage, ocr-damaged-code)
+      still delete/excise. Full book stays in RAG; navigational queries can later invert the weights.
+      Eval bar: content-query recall must not regress, navigational should improve. DESIGN §4.3
+      policy-change block. Feature extractor is BUILT:
       `build-junk-features.py` (read-only, `q_1024_vec` + 38 surface features → .npz; probed OK; incl. stopword/sentence-end prose-ness, alphabetized-index order, answer-key/bibliography patterns, code-ratio [the jsonb `?` scar], title-overlap, page position via page_num_int).
       Raw-collection probe (2026-07-19) validated the signals (flagged ToC = real ToC; index-ish at
       alpha-sorted 0.90 / stopwords 0.08 vs prose 0.28) and grew the taxonomy: **ocr-damaged-code** —

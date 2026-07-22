@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 opus-fleet.py:*)",
+      "Bash(python3 ingest-status.py:*)",
+      "Bash(python3 transcribe-scans.py:*)"
+    ]
+  }
+}

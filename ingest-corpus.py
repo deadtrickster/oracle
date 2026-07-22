@@ -119,10 +119,12 @@ KBS = [
     ("books", "book", ["books/*.md", "books/*.txt", "books_raw/*.pdf", "books_raw/*.PDF",
                        "books_raw/*.epub"]),
     # ML shelf, English born-digital half (~/Documents/Books/ml, symlinked into corpus/ml_raw with
-    # clean names). Real text layers -> DeepDoc book parser (positions + figures). The RUSSIAN half
-    # (qwen3-vl transcripts, corpus/ml/*.txt) is NOT wired yet ON PURPOSE: the VL lane is gated on
-    # the 20-page blind audit (DESIGN §4.4) — add ("ml", "naive", ["ml/*.txt"]) only after it passes.
+    # clean names). Real text layers -> DeepDoc book parser (positions + figures).
     ("ml-books", "book", ["ml_raw/*.pdf"]),
+    # ML shelf, RUSSIAN scanned half: the Opus gold-OCR fleet assemblies (assemble-gold.py, from
+    # corpus/ml/opus-gold/ per-page transcripts, [[p.N]] markers). 2,614 pages fully transcribed by
+    # Opus subagents — gold replaces the VL-draft audit gate (2026-07-22), so no audit precondition.
+    ("ml", "naive", ["ml/*.txt"]),
     # awesome-book-collection (~/Documents/Books/awesome-book-collection, symlinked to
     # corpus/collection_raw — corpus/ is disposable so we don't copy 3 GB). 165 category-
     # organized tech-book PDFs through the DeepDoc "book" parser (real page+bbox + figures).

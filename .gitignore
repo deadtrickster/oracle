@@ -19,3 +19,8 @@ __pycache__/
 eval-reports/
 .eval-hidden/
 labels.db
+
+# Claude Code project state: keep only the shared permission allowlist.
+# settings.local.json is machine-local; worktrees/ are full repo checkouts.
+.claude/*
+!.claude/settings.json
