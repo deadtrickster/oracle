@@ -169,6 +169,36 @@ def anthropic_to_openai(body: dict) -> dict:
     return out
 
 
+def backend_error_text(status: int | None, detail: str) -> str:
+    """A VISIBLE explanation of a backend failure.
+
+    Why this exists (2026-07-22): while llama-server was down (the VL model still held the VRAM,
+    so qwen-next OOMed and then spent a minute loading), every request came back as an assistant
+    message with an EMPTY content list. Structurally valid, semantically nothing — so the CLI
+    printed "[Your previous response had no visible output]" and the user saw a brain-dead agent
+    six turns in a row, with no hint that the model simply was not up. The shim HAD the 503 and
+    threw it away. Axiom 2: the harness must surface what it knows instead of failing silently.
+    """
+    if status == 503 or "loading" in detail.lower():
+        hint = ("the local model is still LOADING into VRAM — wait for it and retry "
+                "(`curl -s localhost:18080/health`)")
+    elif status is None:
+        hint = ("the local model server is NOT REACHABLE — check "
+                "`systemctl --user status oracle-qwen-next` and whether another process "
+                "(e.g. a VL server) is holding the GPU: `nvidia-smi`")
+    else:
+        hint = "the local model server returned an error"
+    return f"[shim] {hint}.\nbackend status={status} detail={detail[:300]}"
+
+
+def error_message(model: str, text: str) -> dict:
+    """A well-formed Anthropic message whose content is the error — never an empty turn."""
+    return {"id": "msg_" + uuid.uuid4().hex[:24], "type": "message", "role": "assistant",
+            "model": model, "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
@@ -230,61 +260,84 @@ async def stream_translate(oai_req: dict, model: str):
             "type": "content_block_delta", "index": block_idx[key],
             "delta": {"type": "input_json_delta", "partial_json": frag}})]
 
+    def fail_events(status, detail):
+        """Terminate the SSE stream with a VISIBLE error instead of an empty turn."""
+        evs = list(emit_text(backend_error_text(status, detail))) + list(close_cur())
+        evs.append(_sse("message_delta", {"type": "message_delta",
+                                          "delta": {"stop_reason": "end_turn",
+                                                    "stop_sequence": None},
+                                          "usage": {"output_tokens": 0}}))
+        evs.append(_sse("message_stop", {"type": "message_stop"}))
+        return evs
+
     async with httpx.AsyncClient(timeout=None) as client:
-        async with client.stream("POST", OAI_URL, json=oai_req) as resp:
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload)
-                except Exception:
-                    continue
-                if chunk.get("usage"):
-                    out_tokens = chunk["usage"].get("completion_tokens", out_tokens)
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                fin = choices[0].get("finish_reason")
+        try:
+            async with client.stream("POST", OAI_URL, json=oai_req) as resp:
+                if resp.status_code != 200:
+                    # An error body is NOT SSE, so the loop below would yield nothing at all and
+                    # the user would get an empty turn. Surface it as text.
+                    body = (await resp.aread()).decode("utf-8", "replace")
+                    for ev in fail_events(resp.status_code, body):
+                        yield ev
+                    return
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except Exception:
+                        continue
+                    if chunk.get("usage"):
+                        out_tokens = chunk["usage"].get("completion_tokens", out_tokens)
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    fin = choices[0].get("finish_reason")
 
-                txt = delta.get("content")
-                if txt:
-                    if salvage is not None:
-                        salvage += txt
-                    else:
-                        text_hold += txt
-                        hit = [text_hold.find(m) for m in _MARKERS if m in text_hold]
-                        if hit:  # a tool marker leaked into text -> start salvaging
-                            pos = min(hit)
-                            if text_hold[:pos]:
-                                for s in emit_text(text_hold[:pos]):
-                                    yield s
-                            salvage = text_hold[pos:]
-                            text_hold = ""
+                    txt = delta.get("content")
+                    if txt:
+                        if salvage is not None:
+                            salvage += txt
                         else:
-                            emit, text_hold = _hold_split(text_hold)
-                            if emit:
-                                for s in emit_text(emit):
-                                    yield s
+                            text_hold += txt
+                            hit = [text_hold.find(m) for m in _MARKERS if m in text_hold]
+                            if hit:  # a tool marker leaked into text -> start salvaging
+                                pos = min(hit)
+                                if text_hold[:pos]:
+                                    for s in emit_text(text_hold[:pos]):
+                                        yield s
+                                salvage = text_hold[pos:]
+                                text_hold = ""
+                            else:
+                                emit, text_hold = _hold_split(text_hold)
+                                if emit:
+                                    for s in emit_text(emit):
+                                        yield s
 
-                for tc in delta.get("tool_calls") or []:
-                    oi = ("oai", tc.get("index", 0))
-                    fn = tc.get("function") or {}
-                    if oi not in block_idx:
-                        for s in open_tool(oi, tc.get("id") or ("toolu_" + uuid.uuid4().hex[:24]),
-                                           fn.get("name") or ""):
-                            yield s
-                    else:
-                        cur = ("tool", oi)
-                    if fn.get("arguments"):
-                        for s in tool_args(oi, fn["arguments"]):
-                            yield s
+                    for tc in delta.get("tool_calls") or []:
+                        oi = ("oai", tc.get("index", 0))
+                        fn = tc.get("function") or {}
+                        if oi not in block_idx:
+                            for s in open_tool(oi, tc.get("id") or ("toolu_" + uuid.uuid4().hex[:24]),
+                                               fn.get("name") or ""):
+                                yield s
+                        else:
+                            cur = ("tool", oi)
+                        if fn.get("arguments"):
+                            for s in tool_args(oi, fn["arguments"]):
+                                yield s
 
-                if fin:
-                    stop_reason = _STOP_MAP.get(fin, "end_turn")
+                    if fin:
+                        stop_reason = _STOP_MAP.get(fin, "end_turn")
+
+        except Exception as e:   # backend not listening / dropped mid-stream
+            for ev in fail_events(None, repr(e)):
+                yield ev
+            return
 
     # end of stream: salvage a leaked call, or flush any held text
     if salvage is not None:
@@ -353,8 +406,20 @@ async def messages(request: Request):
     oai_req["stream"] = False
     oai_req.pop("stream_options", None)
     async with httpx.AsyncClient(timeout=None) as client:
-        r = await client.post(OAI_URL, json=oai_req)
-        return JSONResponse(openai_to_anthropic_full(r.json(), model))
+        try:
+            r = await client.post(OAI_URL, json=oai_req)
+        except Exception as e:
+            return JSONResponse(error_message(model, backend_error_text(None, repr(e))))
+        try:
+            payload = r.json()
+        except Exception:
+            payload = {}
+        # A 503 ("Loading model") or any error body has no `choices`, which would translate into
+        # an assistant message with an EMPTY content list — a silently dead turn. Say it instead.
+        if r.status_code != 200 or not payload.get("choices"):
+            return JSONResponse(error_message(
+                model, backend_error_text(r.status_code, json.dumps(payload)[:400] or r.text)))
+        return JSONResponse(openai_to_anthropic_full(payload, model))
 
 
 @app.post("/v1/messages/count_tokens")

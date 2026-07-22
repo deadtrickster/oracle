@@ -18,13 +18,41 @@ single time, and the naive `grep model` gets it wrong (a Claude session that mer
 """
 import argparse
 import json
+import os
 import re
 import sys
 import time
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path.home() / ".claude/projects"
+# THE LOCAL MODELS DO NOT WRITE TO ~/.claude. The launchers in ~/bin deliberately isolate them:
+#   qwen       -> CLAUDE_CONFIG_DIR=~/.claude-local   (qwen3-coder:30b)
+#   qwen-next  -> CLAUDE_CONFIG_DIR=~/.claude-next    (tuned llama.cpp qwen-next)
+# so their sessions and memory never mix with Claude's. Searching only ~/.claude and concluding
+# "there is no such session" is therefore a FALSE NEGATIVE — which is exactly how this script's
+# first version got a session-existence question wrong (2026-07-22). Always scan all roots, and
+# print which root a session came from so the model behind it is never in doubt.
+ROOTS = [Path(p) / "projects" for p in dict.fromkeys(
+    ([os.environ["CLAUDE_CONFIG_DIR"]] if os.environ.get("CLAUDE_CONFIG_DIR") else [])
+    + [str(Path.home() / d) for d in (".claude", ".claude-local", ".claude-next")])]
+
+
+def roots():
+    return [r for r in ROOTS if r.is_dir()]
+
+
+def all_sessions():
+    for r in roots():
+        yield from r.glob("*/*.jsonl")
+
+
+def root_tag(path: Path) -> str:
+    """Which config dir this session lives in — i.e. which agent wrote it."""
+    for r in roots():
+        if str(path).startswith(str(r)):
+            return {".claude": "claude", ".claude-local": "qwen",
+                    ".claude-next": "qwen-next"}.get(r.parent.name, r.parent.name)
+    return "?"
 
 
 def parse_since(s: str) -> float:
@@ -79,7 +107,7 @@ def is_local(models: Counter) -> bool:
 
 def listing(args):
     rows = []
-    for f in ROOT.glob("*/*.jsonl"):
+    for f in all_sessions():
         if args.project and args.project.lower() not in f.parent.name.lower():
             continue
         if f.stat().st_mtime < parse_since(args.since):
@@ -87,28 +115,32 @@ def listing(args):
         rows.append(f)
     rows.sort(key=lambda p: p.stat().st_mtime)
     rows = rows[-args.limit:]
-    print(f"{'when':16} {'size':>6} {'id':10} {'model':22} {'turns':>5}  project / cwd")
+    print(f"scanning: {', '.join(str(r) for r in roots())}")
+    print(f"{'when':13} {'agent':10} {'size':>6} {'id':10} {'model':20} {'turns':>5}  cwd")
     for f in rows:
         s = scan(f)
-        if args.qwen and not is_local(s["models"]):
+        tag = root_tag(f)
+        if args.qwen and not (is_local(s["models"]) or tag.startswith("qwen")):
             continue
-        if args.claude and is_local(s["models"]):
+        if args.claude and (is_local(s["models"]) or tag.startswith("qwen")):
             continue
         model = s["models"].most_common(1)[0][0] if s["models"] else "-"
         cwd = s["cwds"].most_common(1)[0][0] if s["cwds"] else f.parent.name
         when = time.strftime("%m-%d %H:%M", time.localtime(s["mtime"]))
-        print(f"{when:16} {s['size'] / 1e6:5.1f}M {f.stem[:8]:10} {model[:22]:22} "
+        print(f"{when:13} {tag:10} {s['size'] / 1e6:5.1f}M {f.stem[:8]:10} {model[:20]:20} "
               f"{s['turns']:>5}  {cwd}")
 
 
 def show(args):
-    matches = [f for f in ROOT.glob("*/*.jsonl") if f.stem.startswith(args.show)]
+    matches = [f for f in all_sessions() if f.stem.startswith(args.show)]
     if not matches:
-        print(f"no session id starting with {args.show!r}")
+        print(f"no session id starting with {args.show!r} in:")
+        for r in roots():
+            print(f"    {r}")
         return 1
     f = matches[0]
     s = scan(f)
-    print(f"session {f.stem}\n  file    {f}")
+    print(f"session {f.stem}   [agent: {root_tag(f)}]\n  file    {f}")
     print(f"  when    {time.strftime('%Y-%m-%d %H:%M', time.localtime(s['mtime']))}  "
           f"{s['size'] / 1e6:.1f} MB, {s['lines']} records, {s['turns']} user turns")
     print(f"  models  {dict(s['models'])}")
