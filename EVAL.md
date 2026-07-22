@@ -291,3 +291,40 @@ result** (Axiom 2): the fix is never to ask a model to remember an address it wa
 ago — carry the address with the content. It would also generalize a rule we already follow for
 values ("trust the RAW SOURCE lines over any prose summary — models miscopy value tables") from
 *values* to *locations*.
+
+### RESULT — run 2026-07-22 (`probe-citations.py`, qwen-next, `ragflow rag/nlp/__init__.py` @ `cb93883`, 1,725 lines, 8 citations/arm)
+
+| | Arm A (bulk `Read`) | Arm B (`Read` denied) |
+|---|---|---|
+| strict score (symbol literally inside cited range) | **5/8** | **7/8** |
+| after hand-checking every failure | 7/8 locations right | 7/8, the miss off by **2 lines** |
+| worst error | `not_bullet` cited at **29-30**, actually **298-300** | `chardet` cited at 21-27, actually 29 |
+| **file coverage of the 8 citations** | **2% – 53%** | **1% – 100%** |
+| second half of file | 1 citation | 5 citations, all correct |
+
+**The coverage gap is the robust finding, not the score.** Both arms were told "spread across the
+WHOLE file". Arm A never cited past 53% — and this is NOT truncation: 1,725 lines fit inside a
+single 2,000-line `Read`, so it *had* the whole file and still answered from the front of it. Arm B,
+forced to walk the file, cited all the way to line 1,725.
+
+**CONFOUND — report it, don't bury it. Arm B did not use the tools the probe intended.** Denied
+`Read`, it reached for `Bash`: `cat` (twice, whole file), then `head -200`, `sed -n '200,400p'`,
+`'400,600p'`, … marching in 200-line windows — 17 Bash calls and exactly ONE `read_lines`. So the
+arms contrast *bulk read* vs *windowed traversal*, NOT `Read` vs our MCP tools. The tooling claim
+is untested; the mechanism claim is tested, and arguably better: **`sed` prints no line numbers at
+all**, so Arm B computed positions from the window bounds it had just requested — and still beat a
+fully pre-numbered bulk read. That kills the naive "addresses help" explanation outright. What
+helped was traversing in bounded windows.
+
+**The one clean class-3 error is stranger than the hypothesis predicted.** Arm A described lines
+299-300 verbatim (`patt = [...]` / `return any([...])`) and cited **29-30** — both numbers lost
+their final digit. That is a transcription failure on the number, not positional drift, and it
+disagrees with the `init.el` case (1268→2668, a leading digit). Two cases, two mechanisms, n far
+too small to choose.
+
+**Also: the metric needs work.** Two of Arm A's three "failures" were scoring artifacts — at
+173-174 and 910-918 it located the construct *exactly* (line 918 really is
+`return contexts if return_context else res`) but named a symbol that wasn't a literal string in
+the window. "Symbol appears in range" conflates *wrong place* with *right place, loose label*.
+Before trusting these numbers, tighten the prompt to require a verbatim substring copied from the
+window, and re-run across several files — 8 citations, one file, one model is directional only.

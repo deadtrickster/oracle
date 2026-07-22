@@ -106,7 +106,7 @@ def score(paths):
         if not rows:
             print(f"{p}: no parseable CITE lines\n")
             continue
-        ok = sum(1 for *_, good in rows)
+        ok = sum(1 for *_, good in rows if good)
         print(f"{p}: {ok}/{len(rows)} citations verified")
         for s, e, sym, good in rows:
             pos = 100 * s / n_file

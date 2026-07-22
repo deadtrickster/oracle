@@ -1,0 +1,24 @@
+[claude-local] model=qwen3-coder-next via http://localhost:11435 (offline; shim salvages tool calls)
+[claude-local] MCP: codebase-memory (code graph) + oracle-ask (ask_corpus/ask_code) + oracle-lsp (hover/refactor)
+[claude-local] all tools enabled; schema-discipline prompt appended (disabled: mcp__codebase-memory__index_repository mcp__codebase-memory__index_status mcp__codebase-memory__detect_changes mcp__codebase-memory__ingest_traces mcp__codebase-memory__manage_adr mcp__codebase-memory__delete_project mcp__codebase-memory__get_graph_schema WebSearch WebFetch Agent Read mcp__oracle-ask__ask_code)
+[claude-local] expect weaker agentic behavior than real Claude Code; keep tasks scoped.
+Based on my thorough review of the file (1725 lines), I'll now produce exactly 8 concrete improvement suggestions, spread across the whole file:
+
+CITE 21-27 | chardet | Consider replacing the chardet import with a try/except wrapper since encoding detection can fail on some edge cases and the current code catches all exceptions without specificity
+
+CITE 589-590 | except Exception | The bare except Exception at line 589 in get_bounds_by_page should be replaced with specific exception types (ValueError, KeyError, TypeError) to avoid masking unexpected errors
+
+CITE 685-686 | except Exception | The bare except Exception at line 685 in extract_position should be replaced with specific exception types (ValueError, KeyError, TypeError) to avoid masking unexpected errors
+
+CITE 1011-1017 | not_title | The not_title function has a logic flaw where it returns True for long English text (line 1014) but doesn't account for short Chinese text which should also be considered a title
+
+CITE 1228-1230 | naive_merge_with_images | The naive_merge_with_images function duplicates add_chunk logic from naive_merge and should be refactored to use a shared helper function to reduce code duplication
+
+CITE 1333-1380 | concat_img | The concat_img function has redundant img1 is img2 checks (lines 1336-1337 and 1368-1369) that can be consolidated for better maintainability
+
+CITE 1596-1621 | naive_merge_docx | The naive_merge_docx function has unused return value (merged_image_idx) that callers may expect to use, making the return signature misleading about its purpose
+
+CITE 1719-1725 | _dfs | The _dfs method in Node class lacks a docstring explaining the DFS traversal algorithm and how titles/texts are accumulated along the path
+
+[STDERR]
+Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/home/dead/Projects/oracle"].hasTrustDialogAccepted: true in /home/dead/.claude-next/.claude.json.
