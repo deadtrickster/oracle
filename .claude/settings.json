@@ -10,7 +10,10 @@
       "Bash(uv run serenedb-load.py:*)",
       "Bash(uv run serenedb-index.py:*)",
       "Bash(uv run serenedb-eval.py:*)",
-      "Bash(uv run serenedb-repro-planner.py:*)"
+      "Bash(uv run serenedb-repro-planner.py:*)",
+      "Bash(uv run label-fleet.py:*)",
+      "Bash(uv run build-junk-features.py:*)",
+      "Bash(python3 label-db.py:*)"
     ]
   }
 }

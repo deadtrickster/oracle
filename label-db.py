@@ -35,9 +35,10 @@ CREATE TABLE IF NOT EXISTS labels (
   label          TEXT NOT NULL CHECK (label IN ({",".join(repr(c) for c in CLASSES)})),
   note           TEXT NOT NULL DEFAULT '',
   nominated      TEXT,                  -- which heuristic queued it (never shown to the labeler)
-  labeler        TEXT NOT NULL,         -- 'human' | 'qwen' | 'claude'
+  labeler        TEXT NOT NULL,         -- 'human' | 'qwen' | 'opus' | 'claude'
   rubric_version TEXT NOT NULL,
   text           TEXT NOT NULL DEFAULT '',
+  certainty      REAL,                  -- model labelers only (0..1); NULL for human rows
   created_at     TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_labels_chunk   ON labels(chunk_id);
@@ -49,7 +50,25 @@ CREATE TABLE IF NOT EXISTS spans (
 CREATE VIEW IF NOT EXISTS latest AS
   SELECT * FROM labels WHERE id IN (
     SELECT max(id) FROM labels GROUP BY chunk_id, labeler);
+-- The training-set view: HUMAN overrides any model labeler for the same chunk. Precedence is by
+-- labeler class, then recency; certainty rides along so training can weight by it.
+CREATE VIEW IF NOT EXISTS effective AS
+  SELECT * FROM (
+    SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY chunk_id
+        ORDER BY (labeler = 'human') DESC, id DESC) AS _rn
+    FROM latest)
+  WHERE _rn = 1;
 """
+
+
+def _migrate(conn) -> None:
+    """Idempotent column adds for DBs created before a schema change (SQLite has no IF NOT EXISTS
+    for columns). The effective view depends on nothing new, so CREATE VIEW IF NOT EXISTS covers it."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(labels)")}
+    if "certainty" not in cols:
+        conn.execute("ALTER TABLE labels ADD COLUMN certainty REAL")
+        conn.commit()
 
 
 def rubric_version() -> str:
@@ -67,17 +86,19 @@ def connect(db: Path = DEFAULT_DB) -> sqlite3.Connection:
     conn = sqlite3.connect(db, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def add_label(conn, *, chunk_id: str, label: str, labeler: str, kb_id: str = "", doc_id: str = "",
               docnm: str = "", note: str = "", nominated: str = "", text: str = "",
-              spans: list[str] | None = None) -> int:
+              certainty: float | None = None, spans: list[str] | None = None) -> int:
     cur = conn.execute(
         "INSERT INTO labels (chunk_id, kb_id, doc_id, docnm, label, note, nominated, labeler,"
-        " rubric_version, text) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (chunk_id, kb_id, doc_id, docnm, label, note, nominated, labeler, rubric_version(), text))
+        " rubric_version, text, certainty) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (chunk_id, kb_id, doc_id, docnm, label, note, nominated, labeler, rubric_version(), text,
+         certainty))
     for s in spans or []:
         conn.execute("INSERT INTO spans (label_id, span) VALUES (?,?)", (cur.lastrowid, s))
     conn.commit()

@@ -24,3 +24,7 @@ labels.db
 # settings.local.json is machine-local; worktrees/ are full repo checkouts.
 .claude/*
 !.claude/settings.json
+
+# feature snapshots are rebuildable from ES (build-junk-features.py) and ~500MB
+features.npz
+*.npz
