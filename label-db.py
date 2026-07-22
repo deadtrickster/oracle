@@ -110,6 +110,33 @@ def labeled_ids(conn, labeler: str) -> set[str]:
             conn.execute("SELECT chunk_id FROM latest WHERE labeler = ?", (labeler,))}
 
 
+def fleet_stats(conn) -> dict:
+    """Everything the fleet's milestone reports need, in ONE allowlisted call —
+    per-class counts with mean certainty, a certainty histogram, span/note counts, and
+    human-vs-opus agreement. Exists so the orchestrator never has to inline sqlite
+    (inline one-liners are not allowlisted and prompt the human every time)."""
+    out = {"by_class": {}, "certainty_hist": {}, "agreement": {}}
+    for r in conn.execute("SELECT label, count(*) n, round(avg(certainty),2) ac "
+                          "FROM latest WHERE labeler='opus' GROUP BY label ORDER BY n DESC"):
+        out["by_class"][r["label"]] = {"n": r["n"], "avg_certainty": r["ac"]}
+    for r in conn.execute(
+            "SELECT CASE WHEN certainty>=0.9 THEN 'c) 0.9+' WHEN certainty>=0.8 THEN 'b) 0.8-0.9' "
+            "WHEN certainty>=0.65 THEN 'a) 0.65-0.8' ELSE '_) <0.65' END b, count(*) n "
+            "FROM latest WHERE labeler='opus' GROUP BY b ORDER BY b"):
+        out["certainty_hist"][r["b"]] = r["n"]
+    a = conn.execute("SELECT count(*) n, sum(h.label = o.label) same FROM latest h "
+                     "JOIN latest o ON o.chunk_id = h.chunk_id AND o.labeler='opus' "
+                     "WHERE h.labeler='human'").fetchone()
+    out["agreement"] = {"overlap": a["n"] or 0, "same": a["same"] or 0}
+    out["spans_opus"] = conn.execute("SELECT count(*) FROM spans s JOIN latest l ON l.id=s.label_id "
+                                     "WHERE l.labeler='opus'").fetchone()[0]
+    out["total_opus"] = conn.execute(
+        "SELECT count(*) FROM latest WHERE labeler='opus'").fetchone()[0]
+    out["total_human"] = conn.execute(
+        "SELECT count(*) FROM latest WHERE labeler='human'").fetchone()[0]
+    return out
+
+
 def stats(conn) -> dict:
     out = {}
     for r in conn.execute("SELECT labeler, label, count(*) n FROM latest GROUP BY 1,2"):
@@ -129,6 +156,8 @@ def main() -> int:
     conn = connect(db)
     if cmd == "stats":
         print(json.dumps(stats(conn), indent=2, ensure_ascii=False))
+    elif cmd == "fleet-stats":
+        print(json.dumps(fleet_stats(conn), indent=2, ensure_ascii=False))
     elif cmd == "export":
         labeler = None
         if "--labeler" in sys.argv:

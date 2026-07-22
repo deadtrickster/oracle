@@ -687,6 +687,23 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       territory. **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
       calls at a quiet moment — they share the 30B with coding); train/score only after the collection
       ingest drains (CPU contention). DESIGN §4.3.
+- [ ] **G3.9 — RE-OCR REPAIR for OCR_DAMAGED_CODE (his call 2026-07-22: "reocr is the way").**
+      Damaged code (dropped glyphs `GridPa e`, digit swaps `R0UND`/`Fib(n-l)`, fullwidth `，`,
+      column-interleaving) is the one junk class that is wrong IN THE PAYLOAD — and often the only
+      copy of a book's listing, so deletion wastes real value. Plan, three tiers, his pick is 3:
+      1. RUBRIC v1.2 (pending his wording): mixed chunks take the DOMINANT class + mandatory spans
+         over the damaged code; pure damaged-code chunks stay OCR_DAMAGED_CODE.
+      2. Excise actuator: spans -> §4.3 remove+reingest (machinery exists; prose survives).
+      3. **REPAIR, not delete**: the classifier finds damaged-code chunks corpus-wide; each carries
+         page provenance (page_first/doc_id) -> re-render the source page -> re-transcribe with the
+         VL lane (qwen3-vl now; gold-tuned VL after H12; Opus for high-value listings) -> replace
+         the damaged region. **Acceptance is MECHANICAL, not judged**: the repaired snippet must
+         (a) parse under the target language's grammar and (b) stay within small edit distance of
+         the damaged original — the parser is the hard stop (soft-limits/hard-stops, DESIGN §9.0);
+         anything failing falls back to tier-2 excision. Sequencing: AFTER the classifier trains —
+         detection at corpus scale is precisely what the model is for. Note the virtuous loop: the
+         Opus gold pages already give the VL lane its fine-tune set (H12), and a better VL directly
+         raises tier-3 repair yield.
 - [ ] **G3.7** — **RETURN AND PATCH DEEPDOC (deferred, like the word-boundary fix).** Root cause: the
       onnx layout model (`deepdoc/parser/pdf_parser.py`, `_layouts_rec`) **mislabels a diagram as
       `text`**, so its OCR is flattened inline instead of being pulled out as a `figure`
