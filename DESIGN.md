@@ -917,6 +917,38 @@ project names are gone (call `list_projects`), and the DISCIPLINE no longer fram
 coding-only (it refused biology as "out of scope" — the prompt over-narrowed the domain, same bug
 class as the hardcoded names).
 
+**Axiom 2, stated mechanically: prompts are SOFT limits, hooks are HARD STOPS.** (His framing,
+2026-07-22 — the right one.) A robot arm has two kinds of constraint. A *soft limit* lives in the
+controller: it is advisory, it depends on the controller being correct, and a bad command walks
+straight through it. A *hard stop* is a physical block or an interlock: it does not consult the
+controller, it does not care why the command was issued, and it fails safe. You do not delete the
+mechanical stop because the firmware "should" handle it — you install it precisely BECAUSE firmware
+is fallible.
+
+Map it: **the DISCIPLINE prompt is a soft limit. A `PreToolUse` hook is the hard stop.** The
+evidence for needing both is already recorded here — DISCIPLINE says verbatim *"read the SMALLEST
+relevant portion (grep first) and never read the same file twice"*, and the qwen-next `.emacs.d`
+session (2026-07-22) `Read` the whole 3,081-line file anyway, then read it again. The instruction
+was present, well-formed, and ignored. Adding a firmer sentence is tightening a soft limit that has
+already been driven through; the fix that changes physics is a hook that can DENY the call and say
+why (the rejection text is feedback, so it is an interlock that explains itself — better than a
+mechanical stop, which only clunks).
+
+This is the same move as every other harness fix in §9.0: the shim SALVAGES a malformed tool call
+instead of asking for better formatting; `source_search` REDIRECTS instead of a prompt rule about
+searching the right repo. The pattern is always *make the wrong action impossible or
+self-correcting, rather than discouraged*. The robotics framing adds the reason it generalises:
+**a safety interlock must not depend on the correctness of the thing it constrains.** A prompt rule
+is enforced by the model — the very component whose failure it is meant to catch. A hook is
+enforced outside it. That independence, not the wording, is what makes it hold.
+
+*Caveat kept deliberately:* hard stops also remove legitimate motion. A `Read` cap would block the
+cases where reading a whole file IS correct, so the constraint has to be scoped (size threshold,
+session class) and, like a real interlock, be visible and overridable by the operator. And the
+measurement that would justify installing one is not yet strong enough — see EVAL.md's citation
+probe (16 citations/arm, one already-failed replication). The principle is sound; this particular
+stop is not yet earned.
+
 ### 9.1 Corollaries
 
 1. **The model is the weak link; scaffold around it.** Deterministic control, scoped sub-tasks,

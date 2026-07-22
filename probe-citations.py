@@ -66,6 +66,13 @@ ARMS = {
     "A": BASE + " Bash mcp__source-grep__read_lines mcp__source-grep__source_search "
                 "mcp__oracle-ask__ask_code mcp__codebase-memory__get_code_snippet",
     "B": BASE + " Bash Read mcp__oracle-ask__ask_code",
+    # Arm C — the tool we may already own for exactly this. ask_code greps, reads, and synthesizes
+    # in ONE call, returning file:line citations plus a RAW SOURCE block, so the address never has
+    # to be remembered. If C matches B's accuracy at A's cost, the answer is "route citation tasks
+    # to ask_code" and no Read-limiting hook is needed at all. Note the confound to report: its
+    # synthesis runs on the SAME qwen-next, so C is that model reading its own grep output.
+    "C": BASE + " Bash Read mcp__source-grep__read_lines mcp__source-grep__source_search "
+                "mcp__codebase-memory__get_code_snippet mcp__codebase-memory__search_code",
 }
 
 CITE_RE = re.compile(r"CITE\s*(\d+)\s*-\s*(\d+)\s*\|\s*([^|]+?)\s*\|\s*(.*)")
@@ -89,7 +96,9 @@ def run_arm(arm: str, timeout: int):
     check_pin()
     OUT.mkdir(exist_ok=True)
     env = dict(os.environ, CLAUDE_LOCAL_DISALLOW=ARMS[arm])
-    print(f"-- arm {arm}: disallowing {'source tools' if arm == 'A' else 'Read'}")
+    what = {"A": "everything but Read", "B": "Read and Bash (source tools only)",
+            "C": "everything but ask_code"}[arm]
+    print(f"-- arm {arm}: disallowing {what}")
     r = subprocess.run([WRAPPER, "-p", PROMPT], env=env, capture_output=True,
                        text=True, timeout=timeout)
     dest = OUT / f"{arm}.txt"
@@ -138,7 +147,7 @@ def score(paths):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--arm", choices=["A", "B"])
+    ap.add_argument("--arm", choices=["A", "B", "C"])
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--score", nargs="*", metavar="FILE")
     a = ap.parse_args()
