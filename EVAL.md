@@ -232,7 +232,11 @@ only the first one dies to a grep. Ranked by how hard they are to catch:
 | **3. Misattribution** | a REAL observation bound to the WRONG address — right content, wrong coordinates | only by opening the cited location |
 
 **Class 3, measured (2026-07-22, qwen-next, `~/.claude-next` session `6ee5e104`, reviewing
-`~/.emacs.d/init.el`).** Asked to review a 3,081-line config and suggest improvements, it wrote
+`~/.emacs.d/init.el`).** Line numbers are only meaningful against a pinned file, so: repo
+`~/.emacs.d` at **HEAD `c0309a9`**, `init.el` last modified by **`c58eff8`** (2026-07-16), working
+tree **clean**, 3,081 lines — and unchanged since, so every number below is reproducible with
+`git show c58eff8:init.el | sed -n '2668,2740p'`. Asked to review the config and suggest
+improvements, it wrote
 *"Line 2668-2740 have many projectile-related functions, but `projectile-mode` is only enabled at
 line 1942."* Verified against the file: `projectile-mode +1` **is** exactly line 1942 ✓, and a
 second citation (session-restore block at 939) is exact ✓ — but the projectile helpers actually
@@ -256,8 +260,10 @@ chunk; the wrong one came from the second** — later material, deeper into an a
 Rare property for an eval — grading needs no judge, just `sed -n`. Ask for N citations spread
 across a long file, then score each by opening it, and bucket accuracy by position in context.
 
-1. Pick a long file (`~/.emacs.d/init.el`, 3,081 lines) and ask for ~10 improvements, each
-   **required to cite `file:line`**.
+1. Pick a long file and **pin it to a commit** — line-number ground truth rots the moment the file
+   is edited, so a probe that doesn't record the revision is unscoreable a week later. Here:
+   `~/.emacs.d/init.el` @ `c58eff8` (3,081 lines). Ask for ~10 improvements, each **required to
+   cite `file:line`**.
 2. Score: for each citation, does the cited range contain what the model says it contains?
 3. Bucket by depth (first 25% of context vs last 25%). If accuracy falls with depth, class 3 is
    positional, not random.
