@@ -328,3 +328,41 @@ too small to choose.
 the window. "Symbol appears in range" conflates *wrong place* with *right place, loose label*.
 Before trusting these numbers, tighten the prompt to require a verbatim substring copied from the
 window, and re-run across several files — 8 citations, one file, one model is directional only.
+
+### RUN 2 — same day, three fixes applied
+
+Fixes: (1) **Bash denied in both arms**, closing run 1's confound; (2) the prompt demands a
+**≥15-char verbatim quote** instead of a remembered symbol name; (3) the scorer **enforces** that
+length — run 2 caught Arm A "citing" `#`, which matches nearly any window and scored as a hit until
+the check existed. A metric that accepts one-character evidence is a sieve.
+
+Tool traces confirm the arms finally did what the design says: **Arm A — `Read` ×1. Arm B —
+`read_lines` ×19 + `source_search` ×1, no Bash.**
+
+| | Arm A (`Read` only) | Arm B (source tools only) |
+|---|---|---|
+| run 1 (loose metric) | 5/8 | 7/8 |
+| **run 2 (strict metric)** | **3/8** (+1 rejected as too short) | **5/8** (+2 rejected) |
+| coverage | 0%–99% | 1%–95% |
+
+Arm B leads by exactly 2 in both runs. Direction is consistent; n is 16 citations per arm total, so
+this is a signal to keep testing, NOT a measurement to quote.
+
+**The paired case is the sharpest evidence.** `def not_bullet(line):` is at line **298**:
+
+  - run 1, Arm A (bulk read) → cited **29-30**   ✗
+  - run 2, Arm A (bulk read) → cited **25-28**   ✗
+  - run 2, Arm B (`read_lines`) → cited **298-300**  ✓
+
+Same model, same file, same target, twice wrong from a bulk read and right when the window was
+fetched deliberately. Note also that Arm A's two wrong answers disagree with EACH OTHER (29-30 vs
+25-28), which is what an unstable reconstruction looks like — and it weakens the tidy
+"digit-truncation" story from run 1: 298→29 fits truncation, 298→25-28 does not.
+
+**Run 2 also erased run 1's coverage gap** (Arm A reached 99% this time), so the one finding I
+called robust did not replicate. Treat it as unproven.
+
+**Cost, which the accuracy table hides:** Arm B's session is 303 records / 0.5 MB against Arm A's
+12 records / 0.1 MB — roughly 25× the transcript for +2 citations. Windowed retrieval buys accuracy
+with a large number of round trips, which is itself context occupation (Axiom 1). Whether that
+trade is worth it depends on whether the answer must carry addresses at all.

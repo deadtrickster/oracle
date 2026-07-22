@@ -34,16 +34,19 @@ ABS = REPO / TARGET
 WRAPPER = "/home/dead/bin/qwen-next"
 OUT = Path("/home/dead/Projects/oracle/probe-out")
 N = 8
+MIN_QUOTE = 15          # chars a citation quote must have to be evidence of anything
 
 PROMPT = f"""Review the file {ABS} and propose exactly {N} concrete improvements.
 
 Output ONLY {N} lines, each EXACTLY in this format and nothing else:
 
-CITE <start>-<end> | <SYMBOL> | <suggestion>
+CITE <start>-<end> | <QUOTE> | <suggestion>
 
   <start>-<end>  a line range in that file (1-indexed) that your suggestion is about
-  <SYMBOL>       an identifier or literal string that ACTUALLY APPEARS on some line inside
-                 <start>-<end> — it will be checked automatically against the file
+  <QUOTE>        at least 15 characters COPIED VERBATIM, character for character, from ONE line
+                 inside <start>-<end>. Not a paraphrase, not a symbol name you remember — an exact
+                 substring of the real text. It is checked automatically against the file.
+                 (Do not include the '|' character in the quote.)
   <suggestion>   one sentence
 
 Spread the {N} suggestions across the WHOLE file, not just the beginning. No preamble, no summary,
@@ -55,10 +58,14 @@ BASE = ("mcp__codebase-memory__index_repository mcp__codebase-memory__index_stat
         "mcp__codebase-memory__detect_changes mcp__codebase-memory__ingest_traces "
         "mcp__codebase-memory__manage_adr mcp__codebase-memory__delete_project "
         "mcp__codebase-memory__get_graph_schema WebSearch WebFetch Agent")
+# Bash is disallowed in BOTH arms — the 2026-07-22 run showed Arm B ignoring read_lines and
+# walking the file with `sed -n 'A,Bp'` instead (17 Bash calls, one read_lines), which tested
+# windowed-vs-bulk but left the actual tooling question unanswered. Denying Bash forces each arm
+# onto exactly one content path.
 ARMS = {
-    "A": BASE + " mcp__source-grep__read_lines mcp__source-grep__source_search "
+    "A": BASE + " Bash mcp__source-grep__read_lines mcp__source-grep__source_search "
                 "mcp__oracle-ask__ask_code mcp__codebase-memory__get_code_snippet",
-    "B": BASE + " Read mcp__oracle-ask__ask_code",
+    "B": BASE + " Bash Read mcp__oracle-ask__ask_code",
 }
 
 CITE_RE = re.compile(r"CITE\s*(\d+)\s*-\s*(\d+)\s*\|\s*([^|]+?)\s*\|\s*(.*)")
@@ -102,18 +109,28 @@ def score(paths):
             s, e, sym = int(m.group(1)), int(m.group(2)), m.group(3).strip().strip("`'\"")
             s, e = max(1, s), min(n_file, e)
             window = "\n".join(lines[s - 1:e]) if s <= e else ""
-            rows.append((s, e, sym, sym in window))
+            # Whitespace is normalized on both sides: the model retyping a quote with different
+            # indentation is not a citation error, and we are scoring LOCATION accuracy.
+            norm = lambda t: " ".join(t.split())  # noqa: E731
+            # A too-short quote is not evidence of anything — "#" or ")" matches almost any
+            # window, so it would score as a hit while proving nothing about the location.
+            # The prompt demands >= MIN_QUOTE chars; enforce it here or the metric is a sieve.
+            valid = len(norm(sym)) >= MIN_QUOTE
+            rows.append((s, e, sym, valid and norm(sym) in norm(window), valid))
         if not rows:
             print(f"{p}: no parseable CITE lines\n")
             continue
-        ok = sum(1 for *_, good in rows if good)
-        print(f"{p}: {ok}/{len(rows)} citations verified")
-        for s, e, sym, good in rows:
+        ok = sum(1 for r in rows if r[3])
+        short = sum(1 for r in rows if not r[4])
+        print(f"{p}: {ok}/{len(rows)} citations verified"
+              + (f"   ({short} rejected: quote < {MIN_QUOTE} chars)" if short else ""))
+        for s, e, sym, good, valid in rows:
             pos = 100 * s / n_file
-            print(f"   {'OK  ' if good else 'MISS'} {s:>5}-{e:<5} ({pos:4.0f}% into file)  {sym[:40]}")
+            tag = "OK  " if good else ("SHRT" if not valid else "MISS")
+            print(f"   {tag} {s:>5}-{e:<5} ({pos:4.0f}% into file)  {sym[:44]}")
         # positional split — the hypothesis is that accuracy decays with depth
-        early = [g for s, _, _, g in rows if s <= n_file / 2]
-        late = [g for s, _, _, g in rows if s > n_file / 2]
+        early = [r[3] for r in rows if r[0] <= n_file / 2]
+        late = [r[3] for r in rows if r[0] > n_file / 2]
         f = lambda b: f"{sum(b)}/{len(b)}" if b else "n/a"  # noqa: E731
         print(f"   first half: {f(early)}   second half: {f(late)}\n")
 

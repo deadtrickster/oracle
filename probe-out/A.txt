@@ -1,22 +1,22 @@
 [claude-local] model=qwen3-coder-next via http://localhost:11435 (offline; shim salvages tool calls)
 [claude-local] MCP: codebase-memory (code graph) + oracle-ask (ask_corpus/ask_code) + oracle-lsp (hover/refactor)
-[claude-local] all tools enabled; schema-discipline prompt appended (disabled: mcp__codebase-memory__index_repository mcp__codebase-memory__index_status mcp__codebase-memory__detect_changes mcp__codebase-memory__ingest_traces mcp__codebase-memory__manage_adr mcp__codebase-memory__delete_project mcp__codebase-memory__get_graph_schema WebSearch WebFetch Agent mcp__source-grep__read_lines mcp__source-grep__source_search mcp__oracle-ask__ask_code mcp__codebase-memory__get_code_snippet)
+[claude-local] all tools enabled; schema-discipline prompt appended (disabled: mcp__codebase-memory__index_repository mcp__codebase-memory__index_status mcp__codebase-memory__detect_changes mcp__codebase-memory__ingest_traces mcp__codebase-memory__manage_adr mcp__codebase-memory__delete_project mcp__codebase-memory__get_graph_schema WebSearch WebFetch Agent Bash mcp__source-grep__read_lines mcp__source-grep__source_search mcp__oracle-ask__ask_code mcp__codebase-memory__get_code_snippet)
 [claude-local] expect weaker agentic behavior than real Claude Code; keep tasks scoped.
-CITE 29-30 | not_bullet | Consider consolidating the `patt` list creation and `any()` check into a single generator expression to avoid intermediate list allocation.
+CITE 1-5 | `#` | Add a proper package/module docstring describing the nlp module's purpose and main responsibilities.
 
-CITE 173-174 | QUESTION_PATTERN | The English question patterns use inconsistent casing (`ONE|TWO` vs `I+V?|VI*`) - normalize to either all uppercase words or Roman numerals for consistency.
+CITE 25-28 | `def not_bullet(line):` | The `not_bullet` function uses a global list `patt` defined inline but never used elsewhere; consider moving it inside the function or using a module-level constant.
 
-CITE 222-237 | index_int | Extract the nested try-except chain into a helper function to reduce duplication and improve readability.
+CITE 43-44 | `from cn2an import cn2an` | The `cn2an` import is used but the module's docstring and `__all__` don't indicate this is a public API module; consider if these utilities should be exposed.
 
-CITE 258-290 | BULLET_PATTERN | Consider extracting `BULLET_PATTERN` into a separate configuration module to improve testability and allow runtime customization.
+CITE 90-94 | `def is_chinese(text):` | The `is_chinese` function iterates character by character which is inefficient; use a compiled regex or Unicode range check for better performance.
 
-CITE 323-340 | is_english | The pattern `r"[`a-zA-Z0-9\s.,':;/\"?<>!\(\)\-]+"` incorrectly allows backtick characters and could be simplified using `\w` and `string.punctuation`.
+CITE 157-158 | `except Exception:` | The `find_codec` function catches generic `Exception` twice in a row without logging; catch specific exceptions and add logging for debugging.
 
-CITE 364-375 | split_with_pattern | The function catches `re.error` but logs a warning instead of raising it, potentially masking invalid patterns passed by callers.
+CITE 240-242 | `def qbullets_category(sections):` | The `qbullets_category` function modifies `global QUESTION_PATTERN` but never changes it; remove the `global` declaration as it's unnecessary and misleading.
 
-CITE 444-460 | tokenize_chunks_with_images | The `zip(chunks, images)` will silently truncate if lists have different lengths - consider adding explicit length validation.
+CITE 400-403 | `except NotImplementedError:` | The `tokenize_chunks` function catches `NotImplementedError` silently and passes; this hides potential issues and should log a warning or handle appropriately.
 
-CITE 910-918 | append_context2table_image4pdf | The function has dual return behavior (`return contexts if return_context else res`) which makes type checking difficult - split into two functions instead.
+CITE 1715-1716 | `tree_list.append("\n".join(path_titles + texts))` | The `_dfs` method in `Node` class uses `path_titles + texts` concatenation which creates a new list each recursion; consider using itertools.chain for memory efficiency.
 
 [STDERR]
 Ignoring 10 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/home/dead/Projects/oracle"].hasTrustDialogAccepted: true in /home/dead/.claude-next/.claude.json.
