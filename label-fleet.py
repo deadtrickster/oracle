@@ -134,7 +134,19 @@ def plan(k: int):
     while emitted < k and queue:
         take, queue = queue[:BATCH], queue[BATCH:]
         chunks = fetch_chunks(idx, [c for c, _ in take])
-        rows = [{"chunk_id": cid, "nominated": nom, **chunks[cid]}
+
+        def clip(t: str) -> str:
+            # A chunk that is ONE physical multi-K-token line is unreadable by the agents' Read
+            # tool (line-based paging cannot split a single line — found the hard way in b-0058,
+            # where a 28K-token glibc line forced a blind label after 50 futile Reads). Head+tail
+            # is plenty to classify: junk signals live at the boundaries and in texture, not in
+            # the middle of a long listing.
+            if len(t) <= 8000:
+                return t
+            return t[:6000] + "\n…[EXPORT-TRUNCATED: middle elided for labeling]…\n" + t[-1500:]
+
+        rows = [{"chunk_id": cid, "nominated": nom, **chunks[cid],
+                 "text": clip(chunks[cid]["text"])}
                 for cid, nom in take if cid in chunks and chunks[cid]["text"].strip()]
         if not rows:
             continue

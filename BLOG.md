@@ -981,6 +981,34 @@ things actually happened — most beats are a thing I set out to do, the wall I 
 17. **Ops, throughout.** `oracle-ctl.sh` to free VRAM for gaming, `ingest-status.py` to watch the
     parse backlog drain, and finally — the first `git commit`.
 
+18. **The SereneDB experiment — and reporting bugs the right way.** Swapping Elasticsearch for a
+    Postgres-wire engine (one inverted index carrying both BM25 text and IVF vectors) hit a wall of
+    *silent* failures: BM25 returning 0.0 for every row, `ORDER BY` over the scorer emptying the
+    result set, a vector predicate quietly zeroing an ANN scan. Each one I distilled to a
+    self-contained reproducer — a few rows, no corpus, run-and-see — and handed upstream. The
+    SereneDB team turned two of the four around in a **same-day point release** (26.07.4); I verified
+    the fixes against the released image, then deleted the workarounds from my connector and let it
+    rely on the fixes. The measured payoff for the swap: **ES-parity retrieval recall at ~5× lower
+    query latency and ~2.4× higher QPS**, in-app through RAGFlow's real pipeline — not a microbench.
+    Lesson: a good bug report is a gift you can act on, and a minimal repro is what makes it one.
+
+19. **Feeding the firehose — dedup is two problems, not one.** Cloned several book collections (~420
+    files) to widen the corpus. Deduping *within* that pile was the expected hard part — a
+    cheap→expensive cascade (filename containment → page-count → let qwen-next read the first pages
+    and extract `{title, year, pages}`, then match in **Python**, not in the model). It caught the
+    fun failures: three different "Deep Learning" books union-found into one group; two files with the
+    same title, same 462 pages, different md5 — a second *scan*, not a newer *edition*, so "prefer the
+    recent edition" had nothing to prefer. But the catch that mattered came later: **341 "unique"
+    books, and 165 of them were already in the corpus** — whole collections I'd ingested months
+    earlier, sitting behind other knowledge-base names. Deduping the incoming pile is not the same as
+    deduping against what you already ingested; the second check keys off *what's parsed in a KB*, not
+    *what's on disk*, and blind ingestion would have returned every one of those 165 books twice at
+    retrieval. So the real ingest was 176 new books, not 341. And the last surprise was cost:
+    the "good" parser (DeepDoc — real page positions, figure extraction) explodes each PDF into one
+    task *per page*; 132 books = ~4,500 page-tasks, **~28 hours on CPU**. The figures aren't free, and
+    for a shelf of general/fiction/pop-science books they may not be worth 28 hours — the fast
+    `pdftotext → naive` lane exists for exactly that call.
+
 ## Assets to include
 - The rank-3→rank-1 rerank A/B (real output).
 - The mislabeled-LSN screenshot vs the grounded `ask_corpus` answer.
@@ -1003,3 +1031,13 @@ things actually happened — most beats are a thing I set out to do, the wall I 
 - "I diagnosed a system bug from my own typo."
 - "The passage that answers scored 0.471. The passage about bats — literally 'flying mice' in Russian — scored 0.762. The embedder wasn't wrong; it was measuring resemblance, and I'd asked it for truth."
 - "A hallucination wearing a footnote is worse than a naked one."
+- "BM25 returned 0.0 for every row and never once raised. A scorer that can't score should crash, not shrug."
+- "The engine wasn't broken — my dictionary was missing one flag. But 'fails silently' turned a config typo into a lost day."
+- "The connector passed its unit test and returned zero recall in production. The interface it implemented lied by omission — two methods the retriever calls were never marked abstract."
+- "Parity isn't a number you cite once; it's a number you re-earn every time the engine, the query, or the config moves."
+- "The dedup grouped three different 'Deep Learning' books as one copy. I caught it by reading the tool's own suspect list — which is the entire reason that list exists."
+- "Same title, same 462 pages, different md5. Not a newer edition — just a second scan. 'Prefer the recent edition' has nothing to prefer."
+- "Use the weak local model to *extract* structure, then do the matching in code. Don't ask it to be the eyes and the algorithm."
+- "They shipped the fix the same afternoon I filed the repro. Two of my four bugs, gone in a point release — so I deleted my own workarounds."
+- "Deduping the pile you're about to add is the easy half. The hard half is that a third of it was already inside, under a different name."
+- "The figures aren't free. DeepDoc turns 132 books into 4,500 page-tasks and 28 hours — and a fiction shelf doesn't need figures."

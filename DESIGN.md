@@ -477,6 +477,59 @@ RAGFlow's add-chunk endpoint so it regenerates `q_1024_vec` **and** the token fi
 would mean recomputing the bge-m3 vector and the tokenizations by hand and matching the index mapping —
 fragile, and exactly the embedding-consistency trap the remove+reingest design exists to avoid.
 
+### 4.5 Deduping the book firehose — a cascade, with qwen-next as a *feature extractor* (2026-07-24)
+
+Ingesting large book collections (~420 PDF/EPUB across the local library) means the same book
+arrives many times: different scans, PDF-vs-EPUB, older-vs-newer editions, terse-vs-verbose
+filenames. `dedup-books.py` resolves this with a **cheap→expensive cascade**, never trusting one
+signal alone:
+
+1. **Filename** — normalize to a title token set (edition/year/publisher noise stripped). Exact key
+   match groups instantly; a high *containment* (overlap ÷ the *smaller* set — robust when
+   `clean-code.pdf` meets `Clean Code_ A Handbook…`) catches the rest.
+2. **Page count** (`pdfinfo`) — corroborates a fuzzy filename match. This is load-bearing: distinct
+   books share domain phrases ("deep learning", "database design"), and union-find would otherwise
+   *chain* them (Grokking DL + Goodfellow DL + Generative DL collapsed into one group, silently
+   dropping 3 real books). Requiring equal page counts on the fuzzy path breaks the chain — the books
+   have 335/801/330 pages. **Found by reading the tool's own SUSPECT-merge list**, which exists
+   precisely so a reviewer can catch this.
+3. **Inside the file** — for the residual ambiguous pairs, ask **qwen-next** to identify the book.
+
+**qwen-next usage (reminder — it's the tuned llama-server on `:18080`, alias `qwen3-coder-next`,
+OpenAI-compatible `/v1/chat/completions`; see §2 for why raw llama.cpp not Ollama).** The right shape
+is **qwen as a one-pass *feature extractor*, matching stays in Python** — NOT qwen doing pairwise
+comparison (that was O(n²) model calls and monopolized the GPU until a client timeout). So:
+`--extract` loops every PDF once, feeds `pdftotext -f 1 -l 5` (first pages, ≤4000 chars) to qwen with
+a JSON-constrained prompt (`response_format: json_object`, temp 0) → `{title, authors, edition,
+year}`, cached to `.book-identities.json` keyed by path+size (resumable, N calls). The default match
+phase is then **pure Python** over those clean structured titles — instant, re-runnable, no model in
+the loop. General principle, restated: use the weak local model to *extract structure*, then do the
+deterministic logic in code — don't ask the model to also be the algorithm.
+
+### 4.6 Wiring the KEEP set into ingest — dedup is *two* problems (2026-07-24)
+
+The cascade (§4.5) dedupes the incoming pile against **itself**. Ingest surfaced the second, easily
+missed problem: dedup against **what is already in the corpus**. Of 341 KEEP books, **165 were
+already ingested** — the `awesome-book-collection` repo *is* the `collection` KB (its dir is
+`corpus/collection_raw`, a symlink already parsed), and likewise `ml`/`bio`. The dedup's
+"already-ingested" check only compared *files on disk*; it could not see that a whole repo was
+already *parsed under a KB name*. Ingesting all 341 would have returned those 165 books **twice** at
+retrieval — the exact failure the `EXCLUDE` set in `ingest-corpus.py` was built to prevent, at repo
+scale. `wire-keep-books.py` closes it: read `keep-plan.json`, drop any book whose source repo is
+already a `*_raw`→KB symlink, symlink only the **176 genuinely-new** into `corpus/keep_raw/`, and
+list the 44 `.epub` separately (the `book` parser is PDF/DOCX/TXT-only → a pandoc→md follow-up). A new
+`--only <KB>` flag on `ingest-corpus.py` targets just this KB instead of re-scanning 14,840 parsed
+docs. The ingest itself is list-driven (from the dedup output), never a re-glob of whole repos —
+re-globbing would silently re-admit the 65 dropped editions.
+
+**Parser cost is a per-shelf decision.** The `book` parser (DeepDoc) records real page/bbox positions
+and extracts figures — worth it for a diagram-heavy *textbook*. But it explodes each PDF into one
+task *per page*: 132 books ≈ 4,500 page-tasks ≈ **~28 h on the CPU RAGFlow instance** (all cores; the
+per-page layout + CPU bge-m3 embed is the cost, and bumping executor concurrency does nothing when
+the box is already core-saturated). For a general/fiction/pop-science shelf where figures don't
+matter, the fast `pdftotext → naive` lane (the same one the `bio`/`ml` shelves use for Cyrillic CID
+fonts DeepDoc garbles) is minutes, not hours. Pick the parser per shelf, not once.
+
 ## 5. The grounding pipeline (the heart)
 
 The lesson learned repeatedly (LLM-authored C++ book, qwen's mislabeled `pg_last_wal_replay_lsn`,

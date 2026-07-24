@@ -132,6 +132,13 @@ KBS = [
     # a follow-up) and the 23 .md (they are catalog listings: README/BOOKS_LIST, not content).
     # Books already curated into "books" are dropped via EXCLUDE so retrieval doesn't double-hit.
     ("collection", "book", ["collection_raw/**/*.pdf"]),
+    # KEEP book library (G5.1 dedup, 2026-07-24): the NEW collections not already in a KB
+    # (Books-Collection, Book-Collection, My-Books-Collections, oreilly-books-collection- +
+    # loose PDFs). Symlinked into corpus/keep_raw/ by wire-keep-books.py, which ALSO drops the
+    # 165 KEEP books already covered by collection/ml/bio so retrieval doesn't double-hit. The 44
+    # .epub in KEEP are excluded here (book parser rejects epub) — listed in
+    # corpus/keep_raw-needs-conversion.txt for a pandoc->md follow-up.
+    ("keep-books", "book", ["keep_raw/*.pdf", "keep_raw/*.PDF"]),
     ("links", "naive", ["links/*.md", "tooling/**/*.md"]),   # articles + C3L local-LLM watchdog
 ]
 # Paths (relative to corpus/, POSIX) to skip even when a glob matches them. Purpose: keep the
@@ -207,6 +214,9 @@ def main():
     ap.add_argument("--base", default="http://localhost:9380")
     ap.add_argument("--wait", action="store_true",
                     help="poll until parsing finishes (do this before flying!)")
+    ap.add_argument("--only", action="append", metavar="KB",
+                    help="restrict to these KB name(s); repeatable. Skips scanning the rest "
+                         "(e.g. --only keep-books avoids re-listing 14k already-parsed docs).")
     ap.add_argument("--curate", action="store_true",
                     help="after parsing, run the chunk-level curation sweep (clean-chunks.py --judge) "
                          "on every KB. Curation is a POST-parse step — RAGFlow's parser is a black box "
@@ -224,6 +234,8 @@ def main():
                 (api(s, args.base, "GET", "/datasets?page_size=100") or [])}
 
     for name, chunk_method, globs in KBS:
+        if args.only and name not in args.only:
+            continue
         # convention: a leading "!" on a filename excludes it from ingestion (anywhere)
         files = sorted({f for g in globs for f in C.glob(g)
                         if f.is_file() and not f.name.startswith("!")
@@ -282,6 +294,8 @@ def main():
         while True:
             busy = failed = 0
             for name, _, _ in KBS:
+                if args.only and name not in args.only:
+                    continue
                 if name not in existing:
                     ds = {d["name"]: d for d in
                           (api(s, args.base, "GET", "/datasets?page_size=100") or [])}
@@ -307,6 +321,8 @@ def main():
         # hand — wired here so it isn't a step to remember after every re-ingest.
         print("\nCurating — dropping exercise/apparatus chunks per KB (clean-chunks.py --judge):")
         for name, _, _ in KBS:
+            if args.only and name not in args.only:
+                continue
             print(f"== curate {name}")
             r = subprocess.run([sys.executable, str(ROOT / "clean-chunks.py"), name, "--judge"],
                                cwd=ROOT)

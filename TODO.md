@@ -687,6 +687,22 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       territory. **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
       calls at a quiet moment — they share the 30B with coding); train/score only after the collection
       ingest drains (CPU contention). DESIGN §4.3.
+- [ ] **G3.8-LABELS — Opus label fleet PARKED at 13,307/24,766 (53.7%) on 2026-07-24** (his call:
+      approaching weekly limit, resume later). The labeled set feeds the G3.8 classifier. State:
+      - **Resume: `cd ~/Projects/oracle` then loop `uv run label-fleet.py --import` → `--plan 1` →
+        hand the staged `corpus/labels/batches/b-<NNNN>.json` to a labeling agent → `--import`.**
+        Next batch to dispatch is **b-0541** (b-0540 imported). `python3 label-db.py fleet-stats`
+        for the live count/class histogram. Disk-truth resume: re-importing is idempotent.
+      - **Rubric lives at `./RUBRIC.md` (repo root), NOT `corpus/labels/RUBRIC.md`** — the old path
+        in earlier prompts was wrong; agents only worked because they had it internalized.
+      - Agent protocol: Read+Write only, judge every chunk, ALL 25 rows or the importer refuses the
+        file; ignore the batch's `nominated` hints (unreliable — mostly wrong this run).
+      - This session hit the **200-agent spawn cap**, so the last ~90 batches ran by *resuming* two
+        agents (afa83cf09e, a71f509c) — their context balloons to ~1M tokens then the harness trims
+        it; near the ceiling they stall mid-write (recoverable: file is written atomically, re-import
+        or reassign). A fresh session resets the cap → back to fresh-agent-per-batch (cleaner).
+      - Class mix so far: ~87% CLEAN; lowest-confidence classes FIGURE_GARBAGE (0.56) and BOILERPLATE
+        (0.57) — the two-column-merge and license-text boundaries the agents keep flagging.
 - [ ] **G3.9 — RE-OCR REPAIR for OCR_DAMAGED_CODE (his call 2026-07-22: "reocr is the way").**
       Damaged code (dropped glyphs `GridPa e`, digit swaps `R0UND`/`Fib(n-l)`, fullwidth `，`,
       column-interleaving) is the one junk class that is wrong IN THE PAYLOAD — and often the only
@@ -827,10 +843,110 @@ whitespace+lowercase (`case='lower', stemming=false` dictionary); (b) ES is our 
       - **STILL MISSING for any "better than ES" claim: the ES latency baseline.** We measured
         SereneDB at 19–36 ms retrieval-only and never timed the ES hybrid on the same queries, so
         "faster" is currently unmeasured. Do that before tuning further.
+      **RERUN 2026-07-23 — BM25 root cause found upstream; lexical branch now LIVE.** The other
+      session's trace (see ~/Projects/serenedb/SERENEDB-FINDINGS-HANDOFF.md, retest block): the
+      zero scores were a dictionary-config gap, not a scorer bug — the delimiter dictionary needs
+      `frequency = true` (else BM25::PrepareScorer returns a constant-0 scorer, SILENTLY) and
+      `norm = true` (else the `b` length term is inert). serenedb-index.py now builds `chunks_idx`
+      against `ltks_scored` (delimiter + frequency/position/norm; rebuild 5.6 s). Same gold eval,
+      same fusion math, lexical branch finally contributing:
+      | config | r@64 | r@8 | MRR | mean rank | ms |
+      |---|---|---|---|---|---|
+      | ES hybrid (baseline) | 5/5 | 4 | 0.82 | 2.8 | 180 |
+      | weighted fusion, lexical inert (07-22) | 5/5 | 4 | 0.81 | 8.8 | 36 |
+      | **weighted fusion, lexical live** | 5/5 | 4 | **0.82** | **3.0** | **35** |
+      | weighted + GTE rerank stage | 5/5 | **5** | **0.83** | **2.0** | 10515* |
+      *NOT cold-start (first guess, wrong): three runs at 10,393/10,566/10,515 ms = steady-state
+      CPU inference — qwen-next holds 20.6 GB of the card, so GTE runs CPU. A GPU-resident rerank
+      timing requires evicting qwen-next; either way the stage is engine-independent (ES pays the
+      identical rerank), so it cancels in the engine comparison — 35 ms vs 180 ms is the delta.
+      Headline: **ES-parity MRR at ~5× lower latency, and with the (shared) rerank stage SereneDB
+      beats the ES baseline on every quality metric** — mice-species gold @11 fused, @6 reranked.
+      Also from the retest: the `iresearch_scan` plan-copy bug fires on ANY ≥2 references to an
+      index-scanning CTE, and `s / MAX(s) OVER ()` (window fn, single reference) is a pure-SQL
+      workaround — so the weighted fusion IS expressible in one query after all; the wrrf detour
+      above is obsolete. G4.2 is no longer gated: config fix + workaround unblock serenedb_conn.py.
 - [ ] **G4.2 — Phase 1 (only on G4.1 parity): `serenedb_conn.py` for RAGFlow.** RAGFlow abstracts the
       store behind `DOC_ENGINE` (`rag/utils/{es,infinity,opensearch}_conn.py`) — implement the same
       interface, bind-mount into pinned v0.26.4 like our other patches. Side benefit: every ES-direct
       scan in clean-chunks/build-junk-features becomes plain SQL.
+      **2026-07-23: conn WRITTEN and smoke-green** (worktree c70470d). ob_conn-shaped (one table
+      per tenant, ES field names verbatim); every engine choice probe-verified on 26.07.3 first
+      (serenedb-conn-probe.py): multi-column inverted index (OR-match SUMS per-column BM25 — free
+      field boosting), list_contains/unnest arrays, single-query window-norm fusion, ~1s async
+      index refresh (ES refresh_interval semantics), native wire decode. NEW ENGINE FOOTGUN:
+      vector-op predicate inside an ANN scan's WHERE silently EMPTIES the result
+      (serenedb-ivf-probe.py B2/B4) — thresholds must wrap the scan; added to the handoff.
+      test-serenedb-conn.py runs the full lifecycle standalone: ALL PASS.
+      REMAINING to run RAGFlow on it: settings.py `serenedb` branch + msgStoreConn decision
+      (keep ES for memory store during side-by-side), service_conf entry, docker bind-mounts,
+      then in-app eval vs ES before any cutover. Contributable upstream after a port to HEAD.
+      **2026-07-23: RAGFlow now RUNS on SereneDB end-to-end.** Wiring done: settings.py
+      `serenedb` doc-engine branch (+ msgStore stays on ES for the trial), service_conf `serenedb`
+      block, docker-compose bind-mounts (serenedb_conn.py + settings.py), serenedb joined to the
+      docker_ragflow network. Full ES->SereneDB migration THROUGH conn.insert(): 247,665/247,665
+      docs, 0 errors, 44 min at ~95 docs/s (serenedb-migrate-es.py). Post-migration verify
+      (serenedb-verify-migration.py): row count exact, fulltext lane 'мыш'->103 (ES-era match) in
+      3ms, ANN lane serves, conn.search fusion 10 hits in 35ms with distinct scores. Container
+      recreated DOC_ENGINE=serenedb; boot log shows SereneDBConnection initialized; a live
+      search_corpus MCP query returned 5 reranked verbatim Cyrillic passages — retrieval,
+      tokenization, vector fusion, rerank all working with NO ES in the doc path.
+      NEXT: run the gold eval IN-APP on both engines (not just the standalone harness), decide
+      cutover, then retire ES doc store. Note: `serenedb` still logs "Unknown configuration key"
+      (harmless — config_utils allowlist), worth silencing before upstreaming.
+      **QUERY THROUGHPUT measured 2026-07-23 (serenedb-throughput.py, gold queries, thread pool).**
+      SereneDB ~2.4x ES QPS at every concurrency, ~2x tighter tail:
+      | conc | SDB QPS | SDB p99 | ES QPS | ES p99 |
+      |---|---|---|---|---|
+      | 1 | 49 | 27ms | 30 | 53ms |
+      | 8 | 301 | 35ms | 161 | 84ms |
+      | 16 | 514 | 42ms | 241 | 108ms |
+      | 32 | 580 | 112ms | 245 | 232ms |
+      Both saturate ~conc 16-32 (single shared box). SDB tail stays under ES median until sat.
+      **SCORER SWEEP 2026-07-23 (serenedb-quality-sweep.py) — the 07-22 pass ran with BM25 inert,
+      so lexical-scorer choice was never tested.** Harness validated: bm25/prune-off/nprobe-32
+      reproduces the parity 0.818 exactly. Findings (5-query gold, MRR / mean-rank / recall@8):
+      - PRUNE HURTS at real nprobe (bm25 0.818 -> 0.549 with prune on) — earlier "prune is THE fix"
+        was measured with the lexical branch inert; retract it. Keep prune OFF.
+      - **lm_dirichlet (Dirichlet-smoothed LM scorer) BEATS BM25**: MRR 0.829 / rank 2.2 /
+        recall@8 **5/5** at vw~0.25, vs bm25 0.818 / rank 3.0 / 4/5. Robust across vw 0.2-0.4.
+        The win is at RETRIEVAL: lm_dir gets the hard mice query into the top-8 pool; bm25 leaves
+        it at ~11. WITH the GTE rerank stage both converge to 0.833 / rank 2 / 5/5 (reranker
+        re-reads the pool), so the scorer only matters for un-reranked serving.
+      - TFIDF's apparent early lead was a prune-on artifact; it's worse than bm25 with prune off.
+      - HONEST CAVEAT: lm_dirichlet is NOT a SereneDB-only knob — Lucene/ES ship
+        LMDirichletSimilarity too (per-field `similarity` mapping). Neither RAGFlow default uses
+        it. So this improves retrieval on WHICHEVER engine we keep; it does not tilt ES-vs-SDB.
+      TO ADOPT: swap the lexical scorer in serenedb_conn's search SQL from BM25() to
+      lm_dirichlet(); it's a one-line change, same index (no rebuild — LM scorers read the same
+      frequency/norm postings). Gate on the in-app eval confirming the gold-set win survives.
+      **IN-APP PARITY ACHIEVED 2026-07-23 (eval-retrieval.py through RAGFlow /retrieval, both
+      engines).** The in-app eval caught THREE conn bugs the standalone smoke test could not —
+      each a silent 0-recall, exactly why in-app gating matters (worktree 4b7e983):
+      1. get_scores() + create_doc_meta_idx() are called by the retriever but are NOT
+         @abstractmethod on DocStoreConnection — a conformant subclass compiles, smoke-passes, and
+         returns 0 recall. FIX: implemented both. UPSTREAM-WORTHY: add them to the ABC.
+      2. lexical @@ must use MatchTextExpr.matching_text (RAGFlow's tokenized ^-weighted query),
+         not extra_options['original_query'] (raw) — else tokenizer-split terms miss
+         (auto_ptr stored as 'auto _ ptr').
+      3. scored lexical branch matches content_ltks ALONE: ORDER BY BM25 over a multi-column @@
+         OR EMPTIES at scale when 2+ columns densely match (serenedb repro
+         repro-multicolumn-bm25-order-empty.py). ES field boosts (docnm^10) deferred.
+      RESULT — in-app, through the real pipeline, identical gold set:
+      | query | ES rank | SereneDB rank |
+      |---|---|---|
+      | mice-species | 32 | 28 |
+      | photosynthesis | 1 | 1 |
+      | lsn-general | 23 | 6 |
+      | lsn-replay-fn | 3 | 3 |
+      | auto-ptr | 5 | 11 |
+      | recall@8 | 3/5 | 3/5 |
+      | recall@64 | 5/5 | **5/5** |
+      SereneDB ties ES on recall in-app and ranks 2/5 queries better (lsn-general 6 vs 23).
+      Reranked, auto-ptr/photosynthesis/lsn-replay all land @1. Adapter is FUNCTIONALLY COMPLETE.
+      REMAINING before retiring ES: adopt lm_dirichlet (above), silence the config-key warning,
+      re-add ES field boosts via per-column BM25 summed in Python (not OR — see bug #3), forward-
+      port to RAGFlow HEAD for the upstream PR.
 - [ ] **G4.3 — dogfood the side stores:** labels DB + feature matrix could ride SereneDB too; daily
       use also fixes Suite B's "no corpus coverage of serenedb" gap from the inside.
 
@@ -858,6 +974,89 @@ but nothing from it is in the corpus yet. Three lanes when we ingest (after the 
 - [ ] Wire the chosen lanes into `ingest-corpus.py` (idempotent, EXCLUDE convention available) and
       run — AFTER the collection ingest finishes (CPU) and ideally after the G3.8 label pass so the
       new books enter through whatever curation the classifier ships.
+
+### G5.1 — Dedup the book library before ingest (2026-07-24)
+
+~420 PDF/EPUB in ~/Documents/Books (local library + several fetched collections). The same book
+recurs as different scans, PDF-vs-EPUB, edition variants, terse-vs-verbose names. `dedup-books.py`
+resolves it (DESIGN §4.5) — a **cheap→expensive cascade**, split into two phases:
+- [x] **Cascade built + hardened.** Filename (containment, not just Jaccard — catches
+      `clean-code.pdf` ≡ `Clean Code_ A Handbook…`) → page count corroboration → qwen-next inside
+      the file. A review of the tool's own SUSPECT list caught a false-merge class: shared domain
+      phrases ("deep learning") let union-find chain 3 distinct books into one and silently drop 2;
+      fixed by requiring equal page counts / pdf-epub pairing on the fuzzy path. **381 unique books**,
+      12 already-ingested excluded, ~40 dup/older editions dropped.
+- [x] **qwen-next re-architected as a feature extractor, not a matcher** (his call). `--extract`
+      loops each PDF once → `{title,authors,edition,year}` cached to `.book-identities.json`
+      (resumable, N calls, no O(n²)); match phase is pure Python over the cached titles. The
+      pairwise-qwen version monopolized the GPU to a client timeout — the extract/match split fixes
+      it. **Extraction running now** (background, ~380 pdfs).
+- [x] **Extraction + match DONE (2026-07-24).** 355 PDFs → qwen `{title,year,pages}` extracted to
+      `.book-identities.json`, matched in pure Python. Report `~/Documents/Books/dedup-report.txt`,
+      machine list `keep-plan.json` (`{"keep": [<341 absolute paths>]}`). Outcome: **341 KEEP**,
+      65 older editions DROPPED (newest edition of each stays), 14 already-ingested skipped, 67
+      groups flagged "verify". His decisions (2026-07-24): **keep ALL distinct titles — no domain
+      filter** (fiction / pop-sci / philosophy stay in; the corpus is broad, not coding-only); and
+      **drop the 65 older editions** in favour of the newest already in KEEP.
+- [x] **INGEST the new KEEP books — DONE uploading, PARSING 2026-07-24 (his call: "ingest now",
+      scope "new-only").** Critical scoping catch: of the 341 KEEP, **165 were already in a KB**
+      (awesome-book-collection=`collection` 141, `ml` 19, `bio` 5 — their whole repo is a *_raw
+      symlink already parsed), so ingesting all 341 would double-hit retrieval. `wire-keep-books.py`
+      drops those 165 and symlinks the **176 genuinely-new** into `corpus/keep_raw/`: **132 PDFs**
+      symlinked + uploaded to the new **`keep-books` KB** (`book` parser) — all 132 parsing
+      server-side (CPU/DeepDoc, hours). Full key ends `-suiLQTGM` ([[ragflow-api-key]]); ingest via
+      `uv run ingest-corpus.py --api-key <KEY> --only keep-books` (added `--only` filter + the KB line).
+- [ ] **Stage 2 — the 44 KEEP .epub** (book parser rejects epub) listed in
+      `corpus/keep_raw-needs-conversion.txt`. Convert pandoc/calibre→md, then a `keep-books-epub`
+      naive KB (chunk_method is per-dataset, can't mix book+naive in one KB).
+- [ ] **Verify the 67 MERGE groups** (`dedup-report.txt`) for within-KEEP dup filenames — deferred,
+      not blocking; low risk (idempotent by filename within a KB; cross-KB overlap already handled).
+- [ ] **Fix the 3 scripts hardcoding the TRUNCATED key** (`oracle-ingest-mcp.py`, `ingest-status.py`,
+      `scratch-membership.py` → append `-suiLQTGM`); they currently 401. [[ragflow-api-key]]
+- [ ] **Rename KBs + on-disk organization — DEFERRED (his call 2026-07-24: "keep the rubrics for
+      now, deal with them later").** KB/dataset names (`keep-books`, `ml`, `collection`, …) are the
+      retrieval key referenced in 3 places (RAGFlow dataset + `ingest-corpus.py` KBS + code:
+      oracle-ingest-mcp/oracle-browser/build-junk-features/clean-chunks). Also revisit how the book
+      library is laid out on disk (~/Documents/Books repos + corpus/*_raw symlinks). Not urgent.
+- Note: keep-books parse ETA measured **~28h** at full CPU (0.04 tasks/s; 4,531 page-tasks; all 24
+  cores, DeepDoc+CPU-embed is the cost). Runs server-side, resumes on interrupt; `./ingest-status.py`.
+
+### G4.3 — Switch to the native Go SereneDB engine after ingestion (his plan 2026-07-24)
+
+`~/Projects/ragflow/ragflow` branch **`ik-serenedb-go-engine`** adds a full native Go SereneDB engine
+(2,716 lines: `internal/engine/serenedb/{schema,search,chunk,client,metadata,…}.go`) to the RAGFlow
+**Go rewrite**. Plan: switch production to this branch after the keep-books ingest finishes.
+- **KEY FINDING — no re-parse needed.** `schema.go` keeps the **ES mapping field names verbatim**
+  ("the read path needs no renames"): `content_ltks`, `content_with_weight`, `q_1024_vec`,
+  `pagerank_fea`, `page_num_int`, … — the SAME layout as the Python `serenedb_conn.py` I built, with
+  the same landmines baked in (dict `rf_scored_delim` freq/position/norm = the BM25-zero fix;
+  `lexScoredCol="content_ltks"` single-column = the multi-col-OR-empties fix; `q_(\d+)_vec` vector
+  col). So switching is a **data migration, not a reingest** — parsed chunks + bge-m3 embeddings are
+  reused. This resolves his earlier "python vs go data layout differs — reingest?" — layouts DON'T
+  differ at field level; both mirror ES.
+- **Sequence:** (1) keep-books finishes parsing into ES (~28h) → (2) re-run `serenedb-migrate-es.py`
+  (did 247k docs ES→SereneDB in ~44min once already this session) to sync the new ~176 books into
+  SereneDB → (3) switch RAGFlow to the Go branch pointed at SereneDB.
+- **Verify at cutover:** the migrate script's written column set exactly matches `schema.go`'s
+  `columnOrder`/`docMetaColumnOrder` (both ES-derived, should match — but confirm, incl. the
+  `ragflow_doc_meta_*` per-tenant metadata tables the Go engine expects). Relates to [[ragflow-agents-and-api]].
+
+### G4.2/G4.1 — SereneDB: in-app parity + upgraded to 26.07.4 (2026-07-23/24)
+
+- [x] **In-app parity reached** (through RAGFlow /retrieval on both engines): recall@64 5/5 = ES.
+      Three conn bugs the in-app eval caught (not the unit smoke): missing get_scores/
+      create_doc_meta_idx (silent 0-recall — worth adding to the ABC upstream), lexical @@ must use
+      the tokenized matching_text not raw original_query, and single-column BM25 (multi-column OR
+      empties). Adapter FUNCTIONALLY COMPLETE. Contribution handoff written to ~/Projects/ragflow.
+- [x] **Upgraded production to SereneDB 26.07.4** (released 2026-07-23). Verified two of my four
+      reported engine bugs FIXED against the released image: #962 multiref-CTE (iresearch_scan) and
+      #964 vector-op-predicate-in-ANN-WHERE. Simplified the conn to the natural queries relying on
+      those fixes (min engine version now 26.07.4); dropped the workarounds. Container upgraded in
+      place (volume carried forward, index recovered); in-app recall@64 stayed 5/5, auto-ptr @1.
+- [ ] Still open: adopt lm_dirichlet scorer (recall@8 5/5 vs BM25's 4/5), re-add ES field boosts via
+      per-column BM25 summed in Python, silence the `serenedb` config-key warning, forward-port to
+      RAGFlow HEAD for the PR. Multi-column-BM25-order engine bug: production-confirmed, not yet
+      minimally reproduced (needs large matching-set scale) — retest on a future SereneDB release.
 
 ---
 
