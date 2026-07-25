@@ -1021,7 +1021,46 @@ resolves it (DESIGN §4.5) — a **cheap→expensive cascade**, split into two p
 - Note: keep-books parse ETA measured **~28h** at full CPU (0.04 tasks/s; 4,531 page-tasks; all 24
   cores, DeepDoc+CPU-embed is the cost). Runs server-side, resumes on interrupt; `./ingest-status.py`.
 
+### G4.4 — NUL (0x00) in chunk text breaks SereneDB insert (2026-07-25)
+
+Production RAGFlow runs **DOC_ENGINE=serenedb** (confirmed on the container) — the keep-books
+parse writes chunks straight into **SereneDB via `serenedb_conn.py`**, not ES. One keep-books doc
+(a book) FAILed with DuckDB rejecting
+`A string literal cannot contain NUL (0x00) characters`. Origin is NOT OCR (a vision model can't emit
+U+0000) — it's DeepDoc's **pdfminer text-layer extraction**: this PDF has a broken CID→Unicode font
+map, so pdfminer maps unmappable glyphs to U+0000 (its own `_is_garbled_char` docstring names this),
+and those NULs ride the merged text-layer chars into the chunk in two page-ranges. (RAGFlow's error suffix says "Elasticsearch/Infinity" — that's stale boilerplate, NOT
+the active engine.) One failed page-task marks the whole doc FAIL though 353 chunks landed.
+Root cause (verified 2026-07-25): NUL is NOT real content — this PDF has a broken font/encoding
+(`pdftotext` yields NUL on 29,720 lines too), so it's **extraction corruption**, and the fix belongs
+in the PARSER, not the storage adapter (a DB-layer strip would leave the garbage in the embeddings +
+displayed page). NOT a DeepDoc-specific bug — any extractor hits it on this PDF.
+- [ ] **POLICY (his call 2026-07-25): a broken text layer must trigger OCR FALLBACK, not a strip.**
+      Stripping garbled chars *deletes* real content (leaves holes/gibberish where text should be);
+      OCR *recovers* it from the page image, which is already rendered. NUL/control chars cannot be
+      legitimate content, so their presence is a hard signal that pdfminer's CID→Unicode mapping
+      failed for that region → re-OCR that region and use the OCR text, discarding the corrupt
+      text-layer chars. Consistent with "reocr is the way" (G3.9).
+- [ ] **Mechanism in `deepdoc/parser/pdf_parser.py`:** the OCR-fallback machinery already exists —
+      `_is_garbled_text` decides "this block is garbled → OCR it." The bug is the trigger is a **soft
+      0.5 ratio**: a block with a few scattered NULs stays under threshold, never falls back, and the
+      corrupt chars pass through. Fix = make NUL / control chars (anything `_is_garbled_char` flags as
+      `cp < 0x20`, plus the PUA/CID cases) a **hard trigger** — their mere presence routes the block
+      to OCR, independent of the ratio. Never let a NUL survive to the chunk. Go `internal/deepdoc`
+      needs the same before G4.3.
+- [ ] Sequencing: apply, then container restart to reload the parser — the restart re-queues the ~104
+      docs still parsing, so **do it after the bulk parse drains**, then re-parse the FAIL(s).
+      Deterministic: re-parsing WITHOUT the fix fails again on the same NUL.
+
 ### G4.3 — Switch to the native Go SereneDB engine after ingestion (his plan 2026-07-24)
+
+**CORRECTION 2026-07-25: production is ALREADY on SereneDB (DOC_ENGINE=serenedb), so keep-books are
+being written into SereneDB now — NOT ES. My earlier "ingest to ES then migrate" note was wrong.
+The switch to the Go engine needs NO ES→SereneDB migration; the data is already in SereneDB. The
+switch is: swap the Python `serenedb_conn.py` adapter for the Go engine, both reading the SAME
+SereneDB tables — so it reduces to a schema-match check (`serenedb_conn.py` writes vs Go `schema.go`
+`columnOrder`, incl. `ragflow_doc_meta_*`).**
+
 
 `~/Projects/ragflow/ragflow` branch **`ik-serenedb-go-engine`** adds a full native Go SereneDB engine
 (2,716 lines: `internal/engine/serenedb/{schema,search,chunk,client,metadata,…}.go`) to the RAGFlow

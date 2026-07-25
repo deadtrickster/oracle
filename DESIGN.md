@@ -344,6 +344,21 @@ adjacent prose boxes, so no mixed chunk is ever formed. But that is a change to 
 container against pinned **v0.26.4** — deferred on purpose. For now the retrieval-side remove+reingest
 pass cleans what is already indexed; **[TODO §G: return and patch DeepDoc]** closes it at the source.
 
+**Policy: a corrupt text layer triggers OCR fallback — never strip-and-delete (2026-07-25).** A book
+failed ingestion when DuckDB (SereneDB executes on DuckDB) rejected `A string literal cannot contain
+NUL (0x00) characters`. The NUL is not from OCR — a vision model's vocabulary has no U+0000 — it is
+from **pdfminer's text-layer extraction**: the PDF's font has a broken CID→Unicode map, so pdfminer
+maps unmappable glyphs to U+0000. This is the same class Strategy 1/2 already handle (PUA/unmapped-CID
+→ clear the box, fall back to OCR), but the fallback triggers on a *soft* garbled-ratio, so a block
+with a few scattered NULs stays under threshold and the corrupt chars ride the merged text-layer into
+the chunk. The rule: **NUL / control chars (`cp < 0x20`) can never be legitimate content, so their
+mere presence is a *hard* trigger for OCR fallback, independent of ratio** — re-OCR that region and
+use the image-derived text. Stripping is the wrong instinct: it *deletes* real content (leaves holes
+where words should be); OCR *recovers* it from a page image DeepDoc has already rendered. This is the
+same "reocr is the way" stance as §4.3's remove+reingest and G3.9 — recover corrupt extraction, don't
+delete it. Sanitizing at the storage adapter would be worse still: it would leave the garbage in the
+embeddings and the displayed page, papering over a parser defect at the wrong layer.
+
 **The deterministic detector hit its precision ceiling — next step is a trained CPU classifier.**
 The glyph-density rule shipped in `chunk_judge.find_diagram_garbage` is *safe* (a token-diff over every
 flagged chunk in `papers` showed it removes only stray glyphs — `●`, `口`, `（）`, `DDDDDD` — never a
