@@ -266,40 +266,87 @@ def _diversify(query: str, chunks: list, main: int = 18, cross: int = 4) -> list
     return top + other[:cross]
 
 
-def _chat(messages, timeout: int = 300) -> str:
-    j = _req("POST", f"{OLLAMA}/v1/chat/completions", data={
-        "model": SYNTH_MODEL, "stream": False, "messages": messages,
-        "temperature": 0.1, "max_tokens": 2048}, timeout=timeout)
-    return j["choices"][0]["message"]["content"]
+def _chat_stream(messages, timeout: int = 300):
+    """Yield synthesis text deltas as they arrive from the OpenAI-compatible /v1/chat/completions
+    (served by both Ollama and llama.cpp). Streaming so the glued popup fills token-by-token instead
+    of waiting for the whole answer."""
+    body = json.dumps({"model": SYNTH_MODEL, "stream": True, "messages": messages,
+                       "temperature": 0.1, "max_tokens": 2048}).encode()
+    req = urllib.request.Request(f"{OLLAMA}/v1/chat/completions", data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        for raw in resp:  # iterates SSE lines as the socket delivers them
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                delta = json.loads(data)["choices"][0].get("delta", {}).get("content")
+            except Exception:
+                continue
+            if delta:
+                yield delta
 
 
-def explain(selection: str, url: str = "", title: str = "") -> dict:
-    kb_ids = _kb_ids()
+_EXPLAIN_SYSTEM = (
+    "You explain a term or passage the user selected while reading, using ONLY the provided "
+    "documentation excerpts. Protocol: (1) note which excerpts are relevant; (2) explain the "
+    "selection using ONLY facts present in them — every specific claim (names, flags, sizes, "
+    "semantics, versions) must come from an excerpt, never your own knowledge; (3) cite the "
+    "excerpt number/source for key claims; (4) if the excerpts do not explain it, reply exactly: "
+    "'The corpus doesn't cover this.' Be concise (a few sentences). Tag code fences by language. "
+    "Write your entire answer in the SAME language as the selection; never switch languages "
+    "mid-answer.")
+
+
+def explain_stream(selection: str, url: str = "", title: str = ""):
+    """Grounded explain as a stream of (event, data) pairs the handler serialises to SSE:
+      ('sources', {sources, reranked})  once, after retrieval
+      ('delta',   {text})               repeatedly, as synthesis streams
+      ('done',    {})                   at the end
+      ('error',   {error})              on any failure (corpus/synth unreachable)
+    """
+    try:
+        kb_ids = _kb_ids()
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        yield ("error", {"error": "Corpus backend (RAGFlow) is unreachable."})
+        return
+    except Exception as e:
+        yield ("error", {"error": f"corpus error: {e}"})
+        return
     if not kb_ids:
-        return {"answer": "The corpus has no parsed content yet.", "sources": []}
+        yield ("sources", {"sources": [], "reranked": False})
+        yield ("delta", {"text": "The corpus has no parsed content yet."})
+        yield ("done", {})
+        return
     chunks, reranked = _retrieve(selection, kb_ids)
     if not chunks:
-        return {"answer": "The corpus doesn't cover this (no relevant passages retrieved).",
-                "sources": [], "reranked": reranked}
+        yield ("sources", {"sources": [], "reranked": reranked})
+        yield ("delta", {"text": "The corpus doesn't cover this (no relevant passages retrieved)."})
+        yield ("done", {})
+        return
     chunks = _diversify(selection, chunks)
+    yield ("sources", {"sources": sorted({c.get("document_keyword", "?") for c in chunks}),
+                       "reranked": reranked})
     context = "\n\n".join(
         f"[{i+1}] (source: {c.get('document_keyword','?')})\n"
         f"{c.get('content_with_weight') or c.get('content','')}"
         for i, c in enumerate(chunks))
-    system = (
-        "You explain a term or passage the user selected while reading, using ONLY the provided "
-        "documentation excerpts. Protocol: (1) note which excerpts are relevant; (2) explain the "
-        "selection using ONLY facts present in them — every specific claim (names, flags, sizes, "
-        "semantics, versions) must come from an excerpt, never your own knowledge; (3) cite the "
-        "excerpt number/source for key claims; (4) if the excerpts do not explain it, reply exactly: "
-        "'The corpus doesn't cover this.' Be concise (a few sentences). Tag code fences by language. "
-        "Write your entire answer in the SAME language as the selection; never switch languages "
-        "mid-answer.")
     where = f" (seen on: {title or url})" if (title or url) else ""
     user = f"Explain this selection{where}:\n\n\"\"\"\n{selection[:2000]}\n\"\"\"\n\nExcerpts:\n{context}"
-    answer = _chat([{"role": "system", "content": system}, {"role": "user", "content": user}])
-    sources = sorted({c.get("document_keyword", "?") for c in chunks})
-    return {"answer": answer, "sources": sources, "reranked": reranked}
+    try:
+        for delta in _chat_stream([{"role": "system", "content": _EXPLAIN_SYSTEM},
+                                   {"role": "user", "content": user}]):
+            yield ("delta", {"text": delta})
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        yield ("error", {"error": "Synthesis model is unreachable."})
+        return
+    except Exception as e:
+        yield ("error", {"error": f"synthesis error: {e}"})
+        return
+    yield ("done", {})
 
 
 # ------------------------------------------------------------------ status
@@ -346,6 +393,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_sse(self, events):
+        """Stream (event, data) pairs as Server-Sent Events. Connection: close (no Content-Length),
+        so the fetch() ReadableStream in the extension reads deltas until the socket closes."""
+        self.close_connection = True
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for ev, data in events:
+                self.wfile.write(f"event: {ev}\ndata: {json.dumps(data)}\n\n".encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionError):
+            pass  # client closed the popup — stop streaming
+
     def _read_json(self) -> dict:
         n = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(n) or b"{}") if n else {}
@@ -374,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not sel:
                     self._send({"error": "empty selection"}, 400)
                     return
-                self._send(explain(sel, p.get("url", ""), p.get("title", "")))
+                self._send_sse(explain_stream(sel, p.get("url", ""), p.get("title", "")))
             elif self.path.startswith("/drain"):
                 _drain_now.set()
                 self._send(_drain_once())

@@ -42,12 +42,15 @@
     return "<p>" + s + "</p>";
   }
 
-  function render(inner) {
+  let bodyEl = null;
+
+  // build the card shell ONCE (at loading) so streamed deltas only repaint .body — position,
+  // scroll, and drag state survive token-by-token updates.
+  function open() {
     ensureHost();
     place();
     root.innerHTML = `
       <style>
-        :host { }
         .card { width:400px; max-width:92vw; max-height:60vh; overflow:auto;
           font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
           background:#fff; color:#1a1a1a; border:1px solid #d0d0d0; border-radius:10px;
@@ -71,13 +74,21 @@
         .spin { display:inline-block; width:12px; height:12px; border:2px solid rgba(128,128,128,.4);
           border-top-color:#888; border-radius:50%; animation:sp .8s linear infinite; }
         @keyframes sp { to { transform:rotate(360deg); } }
+        .caret { display:inline-block; width:6px; height:1.05em; vertical-align:text-bottom;
+          background:currentColor; opacity:.55; animation:bl 1s steps(2) infinite; margin-left:1px; }
+        @keyframes bl { 50% { opacity:0; } }
       </style>
       <div class="card">
         <div class="bar"><b>Oracle</b><button class="x" title="Close">×</button></div>
-        <div class="body">${inner}</div>
+        <div class="body"></div>
       </div>`;
+    bodyEl = root.querySelector(".body");
     root.querySelector(".x").addEventListener("click", () => host.remove());
     makeDraggable(root.querySelector(".bar"));
+  }
+
+  function setBody(html) {
+    if (bodyEl) bodyEl.innerHTML = html;
   }
 
   function makeDraggable(handle) {
@@ -96,17 +107,39 @@
     window.addEventListener("mouseup", () => { drag = false; });
   }
 
+  // streaming state, reset each time a new explain starts
+  let acc = "", sources = null, reranked = true;
+
+  function esc(s) { return String(s).replace(/</g, "&lt;"); }
+  function footer() {
+    if (!sources || !sources.length) return "";
+    return `<div class="src">Grounded in: ${sources.map(esc).join(", ")}` +
+           `${reranked ? "" : " (reranker busy)"}</div>`;
+  }
+  function paint(streaming) {
+    setBody(md(acc) + (streaming ? `<span class="caret"></span>` : "") + footer());
+  }
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "oracle:explain:loading") {
-      render(`<p><span class="spin"></span> &nbsp;Consulting the corpus…</p>`);
-    } else if (msg.type === "oracle:explain:answer") {
-      const p = msg.payload || {};
-      if (p.error) { render(`<p>${p.error}</p>`); return; }
-      const src = (p.sources && p.sources.length)
-        ? `<div class="src">Grounded in: ${p.sources.map((s) =>
-            String(s).replace(/</g, "&lt;")).join(", ")}${p.reranked ? "" : " (reranker busy)"}</div>`
-        : "";
-      render(md(p.answer || "(no answer)") + src);
+      acc = ""; sources = null; reranked = true;
+      open();
+      setBody(`<p><span class="spin"></span> &nbsp;Consulting the corpus…</p>`);
+      return;
+    }
+    if (msg.type !== "oracle:explain:event") return;
+    const { event, data } = msg.ev || {};
+    if (event === "sources") {
+      sources = data.sources || [];
+      reranked = data.reranked !== false;
+      if (acc) paint(true);
+    } else if (event === "delta") {
+      acc += data.text || "";
+      paint(true);
+    } else if (event === "done") {
+      paint(false);
+    } else if (event === "error") {
+      setBody(`<p>${esc(data && data.error || "error")}</p>`);
     }
   });
 })();

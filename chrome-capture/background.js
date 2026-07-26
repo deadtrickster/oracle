@@ -150,18 +150,42 @@ async function explain(tab, selection) {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["overlay.js"] });
     await chrome.tabs.sendMessage(tab.id, { type: "oracle:explain:loading", selection });
   } catch (_) { return; }
-  // 2) ask the corpus (from the extension origin), 3) hand the answer back to the page
-  let payload;
+  // 2) stream the grounded answer (from the extension origin — the page can't fetch localhost),
+  //    forwarding each SSE event to the overlay so it fills token-by-token.
+  const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:explain:event", ev }).catch(() => {});
   try {
     const r = await fetch(RECEIVER + "/explain", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ selection, url: tab.url, title: tab.title }),
     });
-    payload = r.ok ? await r.json() : { error: "receiver error " + r.status };
+    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {           // one complete SSE event
+        const ev = parseSSE(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+        if (ev) send(ev);
+      }
+    }
   } catch (_) {
-    payload = { error: "Oracle receiver offline — start oracle-capture-receiver.py on the backend." };
+    send({ event: "error", data: { error: "Oracle receiver offline — start oracle-capture-receiver.py on the backend." } });
   }
-  chrome.tabs.sendMessage(tab.id, { type: "oracle:explain:answer", payload }).catch(() => {});
+}
+
+function parseSSE(chunk) {
+  let event = "message", data = "";
+  for (const line of chunk.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  if (!data) return null;
+  try { return { event, data: JSON.parse(data) }; } catch (_) { return null; }
 }
 
 // ---------------------------------------------------------------- badge / notify
