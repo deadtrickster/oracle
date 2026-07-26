@@ -930,6 +930,47 @@ gate as everything else here: a blind 20-page audit against the page images befo
 is ingested. Because a model that reads beautifully is exactly the kind of witness this project has
 learned not to trust without a second grader.
 
+## Act 20 — I taught it to remember what I was reading
+
+The corpus is everything I loaded *before* the flight. But reading isn't a fixed act — on any given
+day I'm down some specific rabbit hole, and the answer I want is coloured by the one I wanted an hour
+ago. The system had no idea. Same query, same ranking, forever, no matter what I'd spent the morning
+on.
+
+Two builds came out of that. The first is a Chrome extension, and it exists because the server-side
+fetcher has a blind spot I kept hitting: it can't see anything behind my login. The good stuff — the
+doc page gated behind SSO, the article that's JavaScript all the way down, the internal wiki — is
+exactly what a from-the-outside fetch returns empty on. So I moved the capture into the one place
+that's already authenticated: the tab in front of me. One click grabs the *rendered* DOM, runs it
+through the same trafilatura the rest of the corpus uses (so a captured page looks like every other
+page, not a special case), keeps a print-to-PDF for the figures, and drops it into the `links` shelf.
+And because the whole point of this project is a laptop at 30,000 feet, it buffers twice: the
+extension holds captures if the receiver's down, the receiver holds them if RAGFlow's down, and it
+all lands when the stack comes back. You can capture with the entire backend switched off.
+
+The second is a right-click: *Explain this with Oracle*. Select a term and a little card, glued to
+the selection, fills in token by token with an answer drawn **only from my corpus** — the same
+grounded pipeline as everything else, so it either explains from the sources or says the corpus
+doesn't cover it. No round trip to a network that isn't there.
+
+And then the idea I actually got excited about, and deliberately did **not** build yet. If the
+extension already sees everything I read, it can keep a small, fading memory of the *topics* I'm
+circling — a fixed handful of slots, each a cluster of related things, the recent ones bright and the
+stale ones decaying out. Feed that into the ranking as a gentle, capped nudge and retrieval becomes
+*associative*: ask an ambiguous question in the middle of a Postgres afternoon and it leans Postgres,
+the way a colleague who's been in the room with you would. All browsing tints the memory, but the
+things I *chose* to save or ask about weigh the most; a page I merely skimmed only tilts it a little,
+and a denylist keeps my inbox out of it entirely.
+
+I wrote the whole design down and left it parked, for one reason this repo has taught me the hard
+way. The cardinal sin here is *garbage shaped like the query* — a passage that wins retrieval by
+resembling the question without answering it. Recency bias is that exact sin wearing a friendly mask:
+lean too hard on "what I just read" and one idle tangent poisons every answer after it. I've already
+watched a plausible re-ranking trick backfire on the numbers. So this one ships only behind an
+off-switch, and only if it moves the gold passage *up* without costing recall — measured, A/B, on the
+same eval that's caught every other good-sounding idea that wasn't. The sensor is built. The nudge
+waits for the number.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*

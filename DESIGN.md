@@ -159,6 +159,7 @@ history**, or any model/quant/flag change voids it — and it's coupled to the e
 | Code structure | **codebase-memory** graph | call graphs / struct lookups that RAG-chunking C can't do |
 | Reading UI | **oracle-browser** :9765 | search → the rendered source page w/ query highlighted; `/browse` corpus tree (subsumed the old miniserve :9800) |
 | Editor | **Emacs gptel** → Ollama | quick ask-in-editor |
+| Browse-time capture | **chrome-capture** ext + `oracle-capture-receiver` :8788 | grab the live, *authenticated* tab (login/paywall/JS — what server-side `fetch_url` can't) → Markdown (+archived PDF) into `links`; right-click "explain this" (grounded, streamed); the sensor for planned associative reranking (§5.4) |
 
 ## 4. The corpus
 
@@ -612,6 +613,65 @@ callers (including *me*, on the plane) read for themselves.
 - **Reranker fallback is visible**: every answer is tagged `[reranked]` or `[embedding-order
   (reranker busy)]`, so a silent-timeout degradation is observable, not invisible.
 
+### 5.4 Associative reranking — recency-context as a capped, additive stage (design; parked, TODO H17)
+
+The reranker scores `(query, document)` pairs and nothing else (`gte-multilingual-reranker-base`,
+§3). It has no channel for *what I have been reading* — so the same query returns the same ranking
+forever, regardless of whether I've spent the morning in Postgres internals or io_uring. The idea:
+let a bounded, decaying memory of the topics I'm currently exploring **nudge** the ranking toward
+them.
+
+**Why it cannot go into the cross-encoder.** The model takes one query string, `max_length=512`.
+Concatenating recent-topic text into the query is precisely Axiom 1 (context occupation defocuses):
+the one informative query word gets outvoted by the padding — the same failure the query normaliser
+(§5.3) exists to undo. So the context signal must be a **separate, additive, capped stage** layered
+on the reranked pool, never mixed into the relevance model.
+
+**The blend** (on the already-reranked top-N):
+```
+score(d) = α · rerank_norm(d) + β · assoc(d),      β small and CAPPED
+assoc(d) = max over slots s of  w_s · cos(emb(d), centroid_s)
+```
+`β` lifts on-theme passages a few ranks and breaks ties; it must never dominate relevance. This is
+the repo's cardinal hazard — *garbage shaped like the query poisons retrieval* — wearing a recency
+mask: an unchecked context signal drags every answer toward whatever I last glanced at. Weighted-RRF
+already backfired here once (G4.1); this stage earns its seat by measurement or not at all.
+
+**The fading memory ("fixed slots").** A bounded decaying associative memory — a streaming k-means
+with exponential decay, K≈8–16 slots. Each slot = `{centroid embedding, weight, last_seen, label,
+pinned}`.
+- On a new signal: embed (bge-m3, already resident). Nearest slot by cosine — if `sim > merge_thresh`
+  fold it in (EMA on the centroid, bump weight); else open a new slot, evicting the lowest weight if
+  full.
+- Decay is lazy: `w *= exp(-Δt/τ)` on read/update, half-life `τ` ~ hours-to-a-day. Similar topics
+  *merge* rather than each burning a slot — that is the "associative" part.
+
+**Tiered signals** (his call, 2026-07-26): all browsing feeds the memory, weighted by intent —
+**capture** (I chose to save it) and **explain** (I asked about it) at full weight; **dwell** (a
+content script reports pages I lingered on) at a fraction, and always subject to the exception list.
+The memory's centre of mass is what I deliberately engaged with; passive reading only tints it.
+
+**Exception lists / control** (his ask): a denylist of domains/URLs/topics editable on the go from
+the extension popup, plus per-capture *incognito*, *forget this topic*, and *pin* (freeze a slot from
+decaying). Passive dwell is the poisoning surface, so the denylist is load-bearing, not a nicety.
+
+**Where it lives.** On the backend as **shared state** — a small `oracle-context` service (K decaying
+slots; `POST /observe {text,weight}`, `GET /slots`, `POST /exclude`, and `assoc(embs)→scores`). It
+must be shared so `ask_corpus` (MCP → local Claude/qwen, gptel, RAGFlow chat) becomes associative
+too, not just the extension's explain. The extension is the *sensor* (observe on capture/explain/
+dwell) and the *control panel*; the blend is one new stage in the `ask_corpus`/rerank funnel — the
+one place all retrieval already passes through (§8, "where the demotion lives").
+
+**Relation to the parked memory work.** This is the query/context-side sibling of **H13** (write-time
+chunk enrichment — moves the *index* toward likely queries) and **H14** (A-Mem session memory —
+remembers *interpretations*). H17 remembers *what I'm reading now* and biases *ranking*. Three
+orthogonal levers on the same "topical proximity ≠ answerability" wall the reranker alone can't climb.
+
+**The gate (why it's parked, not shipped).** It ships behind an off-switch and only if it proves
+itself on the gold-query eval: does association move the gold passage's rank **up without hurting
+recall@64 or precision**, measured A/B (association on vs off) with the §D instruments. If the number
+doesn't move, it says so and stays off. Until that eval exists, it is design, not code (TODO H17).
+
 ### 5.1b Chunk size — the `book` parser silently ignored `chunk_token_num`
 
 A retrieval system's unit of truth is the **chunk**. Ours were 47 characters.
@@ -849,6 +909,12 @@ intent-level review. The LLM chooses among *real* refactors, not imagined ones.
   source facts → `ask_code`/the code graph; an *exact* symbol type/value → `lsp_hover`; a
   refactor → `lsp_code_actions`/`suggest_refactor`. The same routing is saved as a memory so my
   *real* Claude Code (not just the local one) reaches for these tools too.
+- **Oracle Capture** (Chrome extension + `oracle-capture-receiver` :8788): captures the logged-in,
+  rendered tab as Markdown (same trafilatura as `fetch_url`) + an archived PDF into the `links` KB
+  with two-layer offline buffering (extension queues if the receiver is down; receiver writes files +
+  a `pending` job and drains to RAGFlow when it returns — so it works with the whole stack off). A
+  right-click **"Explain this with Oracle"** streams a grounded answer from the corpus into a popup
+  glued to the selection. Also the *sensor* for the planned associative memory (§5.4).
 - **gptel** (Emacs) + **miniserve** (reading) round it out.
 
 ## 7. MCP servers (the tool layer)
@@ -1037,6 +1103,10 @@ stop is not yet earned.
   `WorkspaceEdit` into a preview diff (still read-only) is the natural next step.
 - LSP cold-start: the first `code_action` after a server boots can miss while rust-analyzer
   indexes; servers are cached per repo, so it's a one-time warm-up, not per-call.
+- **Associative reranking** (recency-context memory, §5.4 / TODO H17): designed, parked behind the
+  gold-query A/B gate. The capture-time signal now exists (the capture extension); the ranking blend
+  and the `oracle-context` slot memory do not — deliberately, until the eval proves it moves gold
+  rank up without costing recall.
 
 **Resolved along the way:** Russian PDFs (DeepDoc garbles Cyrillic CID fonts, Новиков→HOBMKOB) are
 now reparsed with `pdftotext -layout` into `postgres/ru-books/*.txt`; the ingestor autodetects

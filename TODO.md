@@ -596,6 +596,32 @@ days without ever checking it.)*
   tool reporting more than the store holds — the house failure-shape, in the house tooling.
   PROPOSED (his go pending): teach ingest-status.py to count from ES per kb_id instead.
 
+### 2026-07-26 — browse-time capture extension + receiver; associative-reranking DESIGNED, not built ✅/📐
+
+Built **`chrome-capture`** (MV3) + **`oracle-capture-receiver.py`** (stdlib-only, binds 127.0.0.1:8788):
+- **Capture** the *live, authenticated* tab — what server-side `fetch_url` can't reach
+  (login/paywall/JS) — as clean Markdown via the **same trafilatura** `fetch_url` uses, plus an
+  archived print-to-PDF (DevTools `Page.printToPDF`). Lands in `corpus/inbox/captures/`, ingested into
+  the `links` KB. Markdown is the retrieval source (feeding captured PDFs back through the lossy
+  PDF→text path is the road this repo keeps fighting); the PDF is kept for visual reference only.
+- **Explain this** (right-click a selection) → grounded answer **streamed token-by-token (SSE)** into a
+  popup glued to the selection, mirroring `ask_corpus` (retrieve → gte rerank → qwen, or "corpus
+  doesn't cover this"). All receiver traffic runs from the extension's background worker, because an
+  https page can't `fetch('http://localhost')` (mixed content).
+- **Two-layer offline buffering** (works mid-flight): the extension queues captures when the receiver
+  is down; the receiver writes files + a `pending` job immediately and drains to RAGFlow when it
+  returns. **Verified** here against mock RAGFlow/synth: offline path (files written, job stays
+  `pending`, not `failed`), recovery (multipart upload → `done`, doc_id), and the explain SSE stream
+  (`sources → delta* → done`). Icons are pure-Python-generated PNGs (no PIL in this container).
+- Registered `oracle-capture` in `oracle-ctl.sh`; `corpus/` is gitignored so captures never commit.
+
+Also **spec'd — deliberately did NOT build — associative reranking** (his ask): DESIGN §5.4, parked as
+**H17**. A bounded decaying "fixed-slot" memory of what I'm currently reading, feeding a *capped,
+additive* rerank stage; capture/explain full-weight, dwell fractional. Parked behind the gold-query A/B
+gate: recency bias is this repo's cardinal poisoning failure wearing a mask, and weighted-RRF already
+backfired once (G4.1). The capture extension is the sensor it will need; the ranking blend waits for
+the number. (Protocol §5: a new idea goes to §H, not §G — the freeze is the feature.)
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy
@@ -1102,6 +1128,24 @@ SereneDB tables — so it reduces to a schema-match check (`serenedb_conn.py` wr
 # H. PARKED (good ideas, deliberately not being built)
 
 Written down so they cost nothing to leave alone. **Do not start these.**
+
+- **H17 — ASSOCIATIVE RERANKING: recency-context as a capped, additive stage (his idea, 2026-07-26;
+  DESIGN §5.4).** The reranker scores `(query, doc)` only — no channel for *what I've been reading*.
+  Add a bounded **decaying "fixed-slot" memory** (streaming k-means, K≈8–16 slots: centroid + decaying
+  weight + label; new topics merge by cosine or evict the lowest weight; `w *= exp(-Δt/τ)`), and blend
+  it into the already-reranked pool as `score = α·rerank_norm + β·assoc`, `β` small and **capped** so
+  it lifts on-theme passages a few ranks but never overrides relevance. **Tiered signals:** all
+  browsing feeds it, but **capture + explain at full weight, passive dwell at a fraction** (and behind
+  the exception list). Lives as a shared `oracle-context` service so `ask_corpus` (not just the
+  extension's explain) becomes associative; the **capture extension is already the sensor** (built
+  2026-07-26). Exception/denylist + incognito + forget + pin, managed from the popup — dwell is the
+  poisoning surface, so the denylist is load-bearing. **Sibling of H13** (index-side enrichment) **and
+  H14** (interpretation memory): H17 remembers *current reading* and biases *ranking* — the third
+  orthogonal lever on "topical proximity ≠ answerability", the wall the reranker alone can't climb.
+  **The gate (why it's parked):** recency bias IS the repo's cardinal failure (garbage shaped like the
+  query) in a new mask, and weighted-RRF already backfired (G4.1). Ships only behind an off-switch and
+  only if it moves the gold passage's rank UP without hurting recall@64 / precision, measured A/B on
+  the gold-query eval (§D). Until that number exists: design, not code.
 
 - **H16 — KV SLOT SAVE/RESTORE: warm sessions parked in RAM (promoted from a §F footnote —
   it was never in this list; DESIGN §2 describes it).** llama-server already exposes
