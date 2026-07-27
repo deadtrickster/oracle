@@ -702,7 +702,8 @@ def _summarize_for_vl(page_text: str, url: str, title: str) -> str:
     return "" if (not out or "NO USEFUL CONTEXT" in out.upper()) else out
 
 
-def _vl_context(url: str, title: str, page_text: str, summarized: bool = False) -> str:
+def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
+                crop_text: str = "") -> str:
     """Text context to put in FRONT of the screenshot.
 
     A cropped region carries almost no self-description: a Grafana panel is a line and some axis
@@ -717,6 +718,14 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False) 
         parts.append(f"Page title: {title.strip()}")
     if url:
         parts.append(f"Page URL: {url.strip()}")
+    # FIRST, and marked as authoritative: the text actually inside the dragged rectangle. On a page
+    # of twelve panels the whole-page text names twelve metrics and cannot say which one was
+    # cropped — the model then picks plausibly, which is guessing with better inputs. The text under
+    # the crop answers "which".
+    crop = " ".join((crop_text or "").split())
+    if crop:
+        parts.append("Text rendered INSIDE the cropped region (this describes the image itself, "
+                     f"prefer it over the rest of the page):\n{crop[:VL_CTX_CHARS]}")
     t = " ".join((page_text or "").split())
     if t:
         if summarized:
@@ -735,7 +744,7 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False) 
 
 
 def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: str = "",
-                  page_text: str = ""):
+                  page_text: str = "", crop_text: str = ""):
     """Stream the qwen3-vl answer for a screenshotted region. NOT grounded — a direct look at the
     pixels (read this diagram / transcribe this / what is this). Emits ('delta',…)* then ('done',{}).
 
@@ -758,7 +767,7 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
         yield ("error", {"error": f"{e}\n\n{VL_DISABLED_MSG}", "reason": "vision_unavailable"})
         return
     prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
-    ctx = _vl_context(url, title, brief or page_text, summarized)
+    ctx = _vl_context(url, title, brief or page_text, summarized, crop_text)
     # Order matters: context, then the image, then the question. The text frames what the pixels
     # are before the model looks at them; the question stays last so it is the most recent thing.
     content = ([{"type": "text", "text": ctx}] if ctx else []) + [
@@ -1074,7 +1083,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not img.startswith("data:"):
                     img = f"data:{p.get('mime', 'image/png')};base64,{img}"
                 self._send_sse(vision_stream(img, p.get("prompt", ""), p.get("url", ""),
-                                             p.get("title", ""), p.get("page_text", "")))
+                                             p.get("title", ""), p.get("page_text", ""),
+                                             p.get("crop_text", "")))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))

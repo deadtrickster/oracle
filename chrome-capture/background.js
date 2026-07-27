@@ -254,19 +254,62 @@ async function visionRegion(msg, tab) {
     // and almost opaque to a model: a Grafana panel is a line and some ticks, and without the
     // dashboard name, panel titles, legend and units the model will confabulate a plausible system.
     // That text is on the page; grab it rather than making the model guess.
-    let pageText = "";
+    let pageText = "", cropText = "";
     try {
       const [pt] = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: () => (document.body ? document.body.innerText : "").replace(/\s+/g, " ").trim().slice(0, 6000),
+        args: [rect],
+        func: (box) => {
+          // Walk TEXT NODES and place each by its own Range box.
+          //
+          // The reason is not that innerText misses SVG — measured in headless Chrome, innerText
+          // does include SVG <text>, so chart axis labels survive either way. The reason is
+          // LOCATION: innerText gives one flat string for the whole document, so on a page of
+          // twelve panels it names twelve metrics and cannot say which one you cropped. A text-node
+          // walk can ask WHERE each string is rendered and keep the ones inside the rectangle you
+          // dragged. Pure geometry — no selectors, no hostnames, nothing site-specific.
+          const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+          const walk = (test) => {
+            const out = [];
+            const seen = new Set();
+            const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            const rng = document.createRange();
+            while (w.nextNode()) {
+              const t = clean(w.currentNode.nodeValue);
+              if (t.length < 2) continue;
+              rng.selectNodeContents(w.currentNode);
+              const r = rng.getBoundingClientRect();
+              if (!r.width && !r.height) continue;      // not rendered
+              if (!test(r)) continue;
+              const k = t.toLowerCase();
+              if (seen.has(k)) continue;                 // charts repeat tick labels
+              seen.add(k);
+              out.push(t);
+              if (out.length > 400) break;
+            }
+            return out;
+          };
+          // Containment by CENTRE, not by intersection: a bare intersection test counts a one-pixel
+          // touch, which pulled the whole nav bar into a crop of the panel just below it. The
+          // centre of a label is inside the region the user meant iff the label is in that region.
+          const hit = (r) => {
+            const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+            return cx >= box.x && cx <= box.x + box.w && cy >= box.y && cy <= box.y + box.h;
+          };
+          return {
+            crop: walk(hit).join(" · ").slice(0, 3000),
+            page: walk(() => true).join(" · ").slice(0, 6000),
+          };
+        },
       });
-      pageText = pt?.result || "";
+      cropText = pt?.result?.crop || "";
+      pageText = pt?.result?.page || "";
     } catch (_) { /* some pages refuse injection; context is a bonus, not a requirement */ }
     const r = await fetch(RECEIVER + "/vision", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         image: b64, mime: "image/png", prompt,
-        url: tab.url, title: tab.title, page_text: pageText,
+        url: tab.url, title: tab.title, page_text: pageText, crop_text: cropText,
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }

@@ -13,6 +13,12 @@ footnote, and every footnote opens the corpus browser at the page the claim came
 
 *The same selection, fact-checked instead: verdict chip first, then the excerpts that support it.*
 
+![Screenshot a region → Oracle vision](../docs/screenshots/vision-grafana.png)
+
+*Drag a rectangle and a local vision model reads it. The GPU holds one big model at a time, so the
+request swaps qwen3-vl in and the text model out automatically. The page's text goes with the image —
+which is how it knows the dashboard ID and datasource, neither of which is in the pixels.*
+
 ## Features
 
 **1. Capture → corpus.** Turn the live DOM into clean Markdown (the **same trafilatura** `fetch_url`
