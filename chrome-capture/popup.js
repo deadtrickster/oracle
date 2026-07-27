@@ -173,6 +173,10 @@ $("drain").addEventListener("click", () => {
     refreshStatus();
   });
 });
+$("shot").addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "screenshotRegion" });
+  window.close();   // get the popup out of the way so you can drag on the page
+});
 $("exclude-site").addEventListener("click", excludeSite);
 $("refresh-topics").addEventListener("click", loadTopics);
 

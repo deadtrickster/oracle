@@ -15,6 +15,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: "cap-sel", title: "Capture selection to Oracle", contexts: ["selection"] });
   chrome.contextMenus.create({ id: "explain", title: "Explain this with Oracle", contexts: ["selection"] });
   chrome.contextMenus.create({ id: "factcheck", title: "Fact-check this against Oracle", contexts: ["selection"] });
+  chrome.contextMenus.create({ id: "shot", title: "Screenshot a region → Oracle vision", contexts: ["page", "image", "selection"] });
   refreshBadge();
 });
 
@@ -23,6 +24,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   else if (info.menuItemId === "cap-sel") captureSelection(tab);
   else if (info.menuItemId === "explain") ground(tab, "explain", info.selectionText || "");
   else if (info.menuItemId === "factcheck") ground(tab, "factcheck", info.selectionText || "");
+  else if (info.menuItemId === "shot") screenshotRegion(tab);
 });
 
 chrome.commands.onCommand.addListener((cmd) => {
@@ -39,6 +41,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "batchCapture") { batchCapture().then(sendResponse); return true; }
   if (msg.type === "drain") { drainQueue().then(sendResponse); return true; }
   if (msg.type === "queueCount") { getQueue().then((q) => sendResponse(q.length)); return true; }
+  if (msg.type === "screenshotRegion") {
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) screenshotRegion(tab); sendResponse({ ok: true }); });
+    return true;
+  }
+  if (msg.type === "vision:region") { if (sender.tab) visionRegion(msg, sender.tab); return false; }
   if (msg.type === "dwell") {            // from dwell.js content script — passive signal
     observe(msg.text, OBS.dwell, msg.url, msg.title);
     return false;
@@ -184,6 +191,54 @@ async function ground(tab, mode, selection) {
     await pumpSSE(r.body, send);
   } catch (_) {
     send({ event: "error", data: { error: "Oracle receiver offline — start oracle-capture-receiver.py." } });
+  }
+}
+
+// ---------------------------------------------------------------- screenshot region -> vision model
+
+async function screenshotRegion(tab) {
+  if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["regionselect.js"] });
+  } catch (e) { notify("Region select failed: " + e.message); }
+}
+
+async function blobToB64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+
+// regionselect.js -> here: screenshot the visible tab, crop to the rect, stream qwen3-vl into the card
+async function visionRegion(msg, tab) {
+  const { rect, dpr, prompt } = msg;
+  const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode: "vision", ev }).catch(() => {});
+  let thumb;
+  try {
+    const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const bmp = await createImageBitmap(await (await fetch(shot)).blob());
+    const sx = Math.round(rect.x * dpr), sy = Math.round(rect.y * dpr);
+    const sw = Math.max(1, Math.round(rect.w * dpr)), sh = Math.max(1, Math.round(rect.h * dpr));
+    const canvas = new OffscreenCanvas(sw, sh);
+    canvas.getContext("2d").drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
+    const b64 = await blobToB64(await canvas.convertToBlob({ type: "image/png" }));
+    thumb = "data:image/png;base64," + b64;
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["overlay.js"] });
+    await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
+    const r = await fetch(RECEIVER + "/vision", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: b64, mime: "image/png", prompt }),
+    });
+    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
+    await pumpSSE(r.body, send);
+  } catch (e) {
+    // make sure the card exists to show the error
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["overlay.js"] });
+      await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
+    } catch (_) {}
+    send({ event: "error", data: { error: "Vision failed: " + (e.message || e) + " (is the receiver + qwen3-vl up?)" } });
   }
 }
 

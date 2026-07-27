@@ -28,7 +28,14 @@ opens with a colored verdict — **SUPPORTED / CONTRADICTED / PARTIAL / NOT COVE
 justification, quoting the decisive excerpt. The trust thesis pointed outward: check what you're
 reading *against your corpus*.
 
-**5. Recency-memory sensor (H17).** Everything you engage with feeds a bounded, decaying **fading-slot
+**5. Screenshot a region → vision.** Right-click → *Screenshot a region → Oracle vision* (or the popup
+button). Drag a rectangle; optionally type a question. The extension screenshots the visible tab
+(`captureVisibleTab`), **crops to your rectangle** in the service worker (OffscreenCanvas), and streams
+**qwen3-vl**'s answer into a glued card with a thumbnail of what you sent — read a diagram, transcribe a
+figure, "what is this?". Works on anything rendered (canvas, video frames, PDFs). Direct look at the
+pixels, not grounded in the corpus.
+
+**6. Recency-memory sensor (H17).** Everything you engage with feeds a bounded, decaying **fading-slot
 memory** of topics — captures/explains/fact-checks at full weight, passive **dwell** (≥20s visible on
 a page) at a fraction. The popup's **Topics** panel shows the live slots (weight bars, hits), lets you
 **pin** (freeze decay), **forget**, and manage the **exclusion list** (*Exclude this site*).
@@ -64,7 +71,7 @@ python3 ~/Projects/oracle/oracle-capture-receiver.py       # binds 127.0.0.1:878
 
 Env vars (shared with the ask/ingest MCP tools): `ORACLE_RAGFLOW_URL`, `ORACLE_RAGFLOW_KEY`,
 `ORACLE_OLLAMA_URL` (synth), **`ORACLE_EMBED_URL`** (bge-m3 embeddings — Ollama `:11434`, *not* the
-synth URL), `ORACLE_SYNTH_MODEL`, `ORACLE_CORPUS`; plus `ORACLE_CAPTURE_PORT`=8788,
+synth URL), **`ORACLE_VL_URL`** (qwen3-vl, `:18081`), `ORACLE_SYNTH_MODEL`, `ORACLE_CORPUS`; plus `ORACLE_CAPTURE_PORT`=8788,
 `ORACLE_CAPTURE_DATASET`=links; memory tuning `ORACLE_CTX_SLOTS`=12, `ORACLE_CTX_TAU_HOURS`=12,
 `ORACLE_CTX_MERGE`=0.60. As a systemd user unit (`oracle-capture` is already in `oracle-ctl.sh`):
 
@@ -93,6 +100,7 @@ systemctl --user enable --now oracle-capture
 | `POST /ask` | `{question}` → SSE grounded answer |
 | `POST /explain` | `{selection,url,title}` → SSE grounded explanation |
 | `POST /factcheck` | `{claim,url,title}` → SSE verdict + justification |
+| `POST /vision` | `{image,mime,prompt}` → SSE qwen3-vl answer about a screenshot region |
 | `POST /observe` | `{text,weight,url,title}` → fold into the fading-slot memory (denylist applied) |
 | `GET /slots` · `POST /exclude` · `POST /forget` · `POST /pin` | inspect + control the memory |
 | `GET /job?stem=` | ingest confirmation (local status + RAGFlow parse state + chunk count) |

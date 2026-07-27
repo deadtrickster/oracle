@@ -112,9 +112,13 @@
   }
 
   // streaming state, reset per invocation
-  let acc = "", sources = null, reranked = true, curMode = "explain";
+  let acc = "", sources = null, reranked = true, curMode = "explain", thumb = null;
 
   function esc(s) { return String(s).replace(/</g, "&lt;"); }
+  function thumbHtml() {
+    return (curMode === "vision" && thumb)
+      ? `<img src="${thumb}" style="max-width:100%;border-radius:6px;margin-bottom:8px;display:block">` : "";
+  }
   function footer() {
     if (!sources || !sources.length) return "";
     return `<div class="src">Grounded in: ${sources.map(esc).join(", ")}` +
@@ -137,16 +141,18 @@
     return acc.replace(/^\s*\[[A-Z ]+\]\s*/, "");
   }
   function paint(streaming) {
-    setBody(md(bodyText()) + (streaming ? `<span class="caret"></span>` : "") + footer());
+    setBody(thumbHtml() + md(bodyText()) + (streaming ? `<span class="caret"></span>` : "") + footer());
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "oracle:loading") {
-      acc = ""; sources = null; reranked = true; curMode = msg.mode || "explain";
+      acc = ""; sources = null; reranked = true; curMode = msg.mode || "explain"; thumb = msg.thumb || null;
       open();
-      root.querySelector(".ttl").textContent = curMode === "factcheck" ? "Oracle · fact-check" : "Oracle";
-      setBody(`<p><span class="spin"></span> &nbsp;${curMode === "factcheck"
-        ? "Checking against the corpus…" : "Consulting the corpus…"}</p>`);
+      root.querySelector(".ttl").textContent =
+        curMode === "factcheck" ? "Oracle · fact-check" : curMode === "vision" ? "Oracle · vision" : "Oracle";
+      const loading = curMode === "vision" ? "Looking…"
+        : curMode === "factcheck" ? "Checking against the corpus…" : "Consulting the corpus…";
+      setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;${loading}</p>`);
       return;
     }
     if (msg.type !== "oracle:event") return;

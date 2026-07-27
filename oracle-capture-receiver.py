@@ -53,6 +53,9 @@ OLLAMA = os.environ.get("ORACLE_OLLAMA_URL", "http://localhost:11434").rstrip("/
 # Embeddings (bge-m3) always come from OLLAMA proper (:11434) — NOT the synth URL, which in
 # production points at the llama.cpp qwen-next server (:18080) that has no /api/embed.
 EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
+# Vision model (qwen3-vl llama-server, :18081 — same one transcribe-scans.py uses).
+VL_URL = os.environ.get("ORACLE_VL_URL", "http://localhost:18081").rstrip("/")
+VL_MODEL = os.environ.get("ORACLE_VL_MODEL", "qwen3-vl")
 SYNTH_MODEL = os.environ.get("ORACLE_SYNTH_MODEL", "qwen3-coder:30b")
 RERANK_ID = os.environ.get("ORACLE_RERANK_ID", "gte-multilingual-reranker-base@local-gte-rerank@Jina")
 HOME = Path.home()
@@ -308,13 +311,14 @@ def _diversify(query: str, chunks: list, main: int = 18, cross: int = 4) -> list
     return top + other[:cross]
 
 
-def _chat_stream(messages, timeout: int = 300):
-    """Yield synthesis text deltas as they arrive from the OpenAI-compatible /v1/chat/completions
-    (served by both Ollama and llama.cpp). Streaming so the glued popup fills token-by-token instead
-    of waiting for the whole answer."""
-    body = json.dumps({"model": SYNTH_MODEL, "stream": True, "messages": messages,
-                       "temperature": 0.1, "max_tokens": 2048}).encode()
-    req = urllib.request.Request(f"{OLLAMA}/v1/chat/completions", data=body, method="POST",
+def _chat_stream(messages, url: str = None, model: str = None, timeout: int = 300, max_tokens: int = 2048):
+    """Yield chat text deltas from an OpenAI-compatible /v1/chat/completions (Ollama, llama.cpp, or the
+    qwen3-vl server). Streaming so the glued popup fills token-by-token instead of waiting."""
+    url = url or OLLAMA
+    model = model or SYNTH_MODEL
+    body = json.dumps({"model": model, "stream": True, "messages": messages,
+                       "temperature": 0.1, "max_tokens": max_tokens}).encode()
+    req = urllib.request.Request(f"{url}/v1/chat/completions", data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         for raw in resp:  # iterates SSE lines as the socket delivers them
@@ -415,6 +419,25 @@ def factcheck_stream(claim: str, url: str = "", title: str = ""):
     where = f" (from: {title or url})" if (title or url) else ""
     return _grounded_stream(
         claim, f'Claim to check{where}:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM)
+
+
+def vision_stream(image_data_url: str, prompt: str = ""):
+    """Stream the qwen3-vl answer for a screenshotted region. NOT grounded — a direct look at the
+    pixels (read this diagram / transcribe this / what is this). Emits ('delta',…)* then ('done',{})."""
+    prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
+    msgs = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": image_data_url}},
+        {"type": "text", "text": prompt}]}]
+    try:
+        for delta in _chat_stream(msgs, url=VL_URL, model=VL_MODEL, timeout=420, max_tokens=1500):
+            yield ("delta", {"text": delta})
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        yield ("error", {"error": "Vision model (qwen3-vl) is unreachable."})
+        return
+    except Exception as e:
+        yield ("error", {"error": f"vision error: {e}"})
+        return
+    yield ("done", {})
 
 
 # ------------------------------------------------------------------ oracle-context: fading-slot memory (H17 SENSOR)
@@ -672,6 +695,14 @@ class Handler(BaseHTTPRequestHandler):
                     self._send({"error": "empty claim"}, 400)
                     return
                 self._send_sse(factcheck_stream(claim, p.get("url", ""), p.get("title", "")))
+            elif self.path.startswith("/vision"):
+                img = p.get("image") or ""
+                if not img:
+                    self._send({"error": "no image"}, 400)
+                    return
+                if not img.startswith("data:"):
+                    img = f"data:{p.get('mime', 'image/png')};base64,{img}"
+                self._send_sse(vision_stream(img, p.get("prompt", "")))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))
