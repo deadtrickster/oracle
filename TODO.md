@@ -1146,6 +1146,12 @@ Written down so they cost nothing to leave alone. **Do not start these.**
   query) in a new mask, and weighted-RRF already backfired (G4.1). Ships only behind an off-switch and
   only if it moves the gold passage's rank UP without hurting recall@64 / precision, measured A/B on
   the gold-query eval (§D). Until that number exists: design, not code.
+  **KDA connection (his pointer, 2026-07-27):** this fixed-slot memory is a coarse, inspectable
+  instance of linear/delta attention — Moonshot's **KDA (Kimi Delta Attention)** family: fixed-size
+  state + gated decay + delta-rule overwrite (softmax keeps everything and defocuses; linear-delta
+  forgets by construction). Two write rules to A/B when it graduates: **EMA-merge** (current design)
+  vs **delta-overwrite** (a colliding topic *replaces* rather than averages, so a shifted reading
+  lands at the same address). K3's exact gate awaits its technical report (DESIGN §5.4 postscript).
 
 - **H16 — KV SLOT SAVE/RESTORE: warm sessions parked in RAM (promoted from a §F footnote —
   it was never in this list; DESIGN §2 describes it).** llama-server already exposes

@@ -672,6 +672,30 @@ itself on the gold-query eval: does association move the gold passage's rank **u
 recall@64 or precision**, measured A/B (association on vs off) with the §D instruments. If the number
 doesn't move, it says so and stays off. Until that eval exists, it is design, not code (TODO H17).
 
+**Postscript — this memory has a name in the literature: linear/delta attention (his pointer,
+2026-07-27).** The fixed-slot memory is a coarse, *inspectable* instance of the family Moonshot calls
+**KDA (Kimi Delta Attention)**. The exact K3 gate awaits its technical report (unseen at time of
+writing), but the family is well understood: where softmax attention keeps a KV cache that *grows*
+with the sequence — and defocuses as it fills, Axiom 1 — linear attention keeps a **fixed-size state**
+and therefore **must forget to remember**. Schematically `S ← G⊙S + Δ(k,v)`: a data-dependent **decay
+gate** `G` fades old content, and a **delta rule** `Δ` *overwrites* the stale value at a colliding key
+instead of piling on top of it. It maps onto our slots one-for-one:
+
+| | KDA state (per token) | oracle-context slots (per page) |
+|---|---|---|
+| capacity | fixed-size matrix | fixed `K` slots |
+| forget | gated decay `G` | `exp(-Δt/τ)` |
+| write | delta (overwrite at key) | merge-nearest (EMA) |
+
+Same object, different granularity and legibility — we expose the state as named topics so it can be
+pinned / denied / forgotten; KDA hides it inside the model for speed. **The refinement it suggests:**
+our write is an EMA *average*; the delta-rule variant is an *overwrite* — a new topic that collides
+with a slot should partly replace it, so a shifted understanding lands at the same address instead of
+blurring with the old one. A/B merge-vs-overwrite when H17 graduates past the eval gate. And the
+deeper point — the whole "fighting for attention" thread — is that **forgetting is the mechanism, not
+a limitation:** a bounded budget where new information earns its place only by evicting something
+staler is *why* the signal stays meaningful, at the token scale and the topic scale alike.
+
 ### 5.1b Chunk size — the `book` parser silently ignored `chunk_token_num`
 
 A retrieval system's unit of truth is the **chunk**. Ours were 47 characters.
