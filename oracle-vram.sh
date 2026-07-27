@@ -23,7 +23,11 @@ TEXT_UNIT="oracle-qwen-next"
 VL_UNIT="oracle-qwen-vl"
 TEXT_URL="http://127.0.0.1:18080/health"
 VL_URL="http://127.0.0.1:18081/health"
-WAIT_S=180
+# Loading is DISK-bound, not GPU-bound: the text model runs with --no-mmap and MoE expert offload,
+# so starting it reads tens of GB into RAM — and right after a swap the page cache is cold because
+# the other model just evicted it. 180 s was far too short; the script reported failure while the
+# model was still loading and became healthy a minute later with nobody listening.
+WAIT_S="${ORACLE_VRAM_WAIT:-900}"
 
 usage() {
 	sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'

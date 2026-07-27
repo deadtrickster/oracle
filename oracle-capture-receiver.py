@@ -111,17 +111,18 @@ def text_available() -> bool:
 # cause ONE swap, and re-checked inside the lock so the losers of the race do not swap again.
 AUTOSWAP = os.environ.get("ORACLE_VRAM_AUTOSWAP", "1").lower() in ("1", "true", "yes", "on")
 VRAM_SH = str(Path(__file__).resolve().parent / "oracle-vram.sh")
-SWAP_TIMEOUT = int(os.environ.get("ORACLE_VRAM_SWAP_TIMEOUT", "300"))
+# Must exceed oracle-vram.sh's own WAIT_S, or this kills a swap the script would have completed.
+SWAP_TIMEOUT = int(os.environ.get("ORACLE_VRAM_SWAP_TIMEOUT", "1200"))
 _swap_lock = threading.Lock()
 
 
 def ensure_model(kind: str):
     """Make `kind` ("text"|"vl") resident, swapping if needed.
 
-    Yields human-readable progress strings (the caller forwards them as SSE) because a swap costs
-    30-60 s of weight loading: a silent spinner for a minute is indistinguishable from a hang, and
-    this project's rule is that slow-but-working must be visible. Returns via the final yield of
-    None on success; raises RuntimeError if the model could not be made resident."""
+    Yields human-readable progress strings (the caller forwards them as SSE), including a periodic
+    elapsed-time heartbeat: loading is disk-bound and can run for minutes on a cold page cache, and
+    a message followed by silence is indistinguishable from a hang — which is exactly how the first
+    version was reported. Raises RuntimeError if the model could not be made resident."""
     probe = vl_available if kind == "vl" else text_available
     if probe():
         return
@@ -131,19 +132,36 @@ def ensure_model(kind: str):
         if probe():          # another request swapped it in while we waited
             return
         other = "text model" if kind == "vl" else "vision model"
-        yield (f"swapping GPU: unloading the {other}, loading "
-               f"{'qwen3-vl' if kind == 'vl' else 'the text model'} (~30-60s)…")
-        try:
-            r = subprocess.run([VRAM_SH, kind], capture_output=True, text=True, timeout=SWAP_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(f"GPU swap to {kind} timed out after {SWAP_TIMEOUT}s")
+        want = "qwen3-vl" if kind == "vl" else "the text model"
+        yield f"swapping GPU: unloading the {other}, loading {want}…"
+
+        # Run it asynchronously and HEARTBEAT. Loading is disk-bound and can take minutes when the
+        # page cache is cold; a single message followed by silence is indistinguishable from a hang
+        # (it was reported as exactly that), and a long-idle SSE connection is also more likely to be
+        # dropped in transit. Emitting elapsed time keeps the stream warm and the user informed.
+        proc = subprocess.Popen([VRAM_SH, kind], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True)
+        started = time.time()
+        while proc.poll() is None:
+            if time.time() - started > SWAP_TIMEOUT:
+                proc.kill()
+                raise RuntimeError(f"GPU swap to {kind} timed out after {SWAP_TIMEOUT}s")
+            time.sleep(2)
+            waited = int(time.time() - started)
+            if waited and waited % 10 < 2:
+                yield f"loading {want}… {waited}s (reading weights from disk)"
+        out = (proc.stdout.read() if proc.stdout else "") or ""
+
         # invalidate both caches: the swap changed BOTH models' residency
         with _vl_lock:
             _vl_state["at"] = 0.0
         with _text_lock:
             _text_state["at"] = 0.0
-        if r.returncode != 0 or not probe():
-            raise RuntimeError(f"GPU swap to {kind} failed: {(r.stderr or r.stdout or '').strip()[:200]}")
+        # HEALTH decides, not the exit code. The script can give up waiting while the server is
+        # still loading and become healthy moments later; if the model is answering now, the swap
+        # worked, whatever the script concluded.
+        if not probe():
+            raise RuntimeError(f"GPU swap to {kind} failed: {out.strip()[:300]}")
 SYNTH_MODEL = os.environ.get("ORACLE_SYNTH_MODEL", "qwen3-coder:30b")
 RERANK_ID = os.environ.get("ORACLE_RERANK_ID", "gte-multilingual-reranker-base@local-gte-rerank@Jina")
 # Corpus browser (oracle-browser) — renders the ORIGINAL page a citation came from, so a footnote
