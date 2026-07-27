@@ -46,6 +46,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "vision:region") { if (sender.tab) visionRegion(msg, sender.tab); return false; }
+  if (msg.type === "oracle:groundVision") { if (sender.tab) groundVision(msg.text, sender.tab); return false; }
   if (msg.type === "dwell") {            // from dwell.js content script — passive signal
     observe(msg.text, OBS.dwell, msg.url, msg.title);
     return false;
@@ -239,6 +240,25 @@ async function visionRegion(msg, tab) {
       await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
     } catch (_) {}
     send({ event: "error", data: { error: "Vision failed: " + (e.message || e) + " (is the receiver + qwen3-vl up?)" } });
+  }
+}
+
+// qwen3-vl read some pixels; now ground that text in the corpus -> a cited answer (streamed as
+// mode:"ground" into the same card, below the vision answer).
+async function groundVision(text, tab) {
+  text = (text || "").trim();
+  if (!text) return;
+  observe(text, OBS.explain, tab.url, tab.title);
+  const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode: "ground", ev }).catch(() => {});
+  try {
+    const r = await fetch(RECEIVER + "/explain", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selection: text.slice(0, 1500), url: tab.url, title: tab.title }),
+    });
+    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
+    await pumpSSE(r.body, send);
+  } catch (_) {
+    send({ event: "error", data: { error: "Oracle receiver offline." } });
   }
 }
 

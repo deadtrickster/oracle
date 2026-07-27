@@ -33,7 +33,9 @@ button). Drag a rectangle; optionally type a question. The extension screenshots
 (`captureVisibleTab`), **crops to your rectangle** in the service worker (OffscreenCanvas), and streams
 **qwen3-vl**'s answer into a glued card with a thumbnail of what you sent — read a diagram, transcribe a
 figure, "what is this?". Works on anything rendered (canvas, video frames, PDFs). Direct look at the
-pixels, not grounded in the corpus.
+pixels. Then a **⚓ Ground this in the corpus** button feeds qwen3-vl's read back through the grounded
+pipeline, appending a **cited** corpus answer below the vision one — so a diagram's content becomes a
+trustworthy, sourced answer.
 
 **6. Recency-memory sensor (H17).** Everything you engage with feeds a bounded, decaying **fading-slot
 memory** of topics — captures/explains/fact-checks at full weight, passive **dwell** (≥20s visible on

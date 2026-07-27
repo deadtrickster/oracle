@@ -81,6 +81,11 @@
           border-radius:10px; color:#fff; }
         .v-sup { background:#2e7d32; } .v-con { background:#c0392b; }
         .v-par { background:#b7791f; } .v-non { background:#6b7280; }
+        .ground-btn { margin-top:10px; width:100%; padding:6px; border:0; border-radius:7px;
+          background:#128a86; color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+        .ground-btn:hover { filter:brightness(1.08); }
+        .gsec { margin-top:12px; padding-top:10px; border-top:1px dashed rgba(128,128,128,.4); }
+        .ghdr { font-size:11px; font-weight:700; opacity:.7; margin-bottom:6px; }
       </style>
       <div class="card">
         <div class="bar"><b class="ttl">Oracle</b><span class="verdict" hidden></span><button class="x" title="Close">×</button></div>
@@ -111,18 +116,21 @@
     window.addEventListener("mouseup", () => { drag = false; });
   }
 
-  // streaming state, reset per invocation
-  let acc = "", sources = null, reranked = true, curMode = "explain", thumb = null;
+  const CARET = '<span class="caret"></span>';
+
+  // primary stream state (explain / ask / factcheck / vision), reset per invocation
+  let acc = "", sources = null, reranked = true, curMode = "explain", thumb = null, primaryDone = false;
+  // grounded sub-stream (vision → "Ground this in the corpus")
+  let gStarted = false, gStreaming = false, gDone = false, gAcc = "", gSources = null, gReranked = true;
 
   function esc(s) { return String(s).replace(/</g, "&lt;"); }
   function thumbHtml() {
     return (curMode === "vision" && thumb)
       ? `<img src="${thumb}" style="max-width:100%;border-radius:6px;margin-bottom:8px;display:block">` : "";
   }
-  function footer() {
-    if (!sources || !sources.length) return "";
-    return `<div class="src">Grounded in: ${sources.map(esc).join(", ")}` +
-           `${reranked ? "" : " (reranker busy)"}</div>`;
+  function footer(src, rr) {
+    if (!src || !src.length) return "";
+    return `<div class="src">Grounded in: ${src.map(esc).join(", ")}${rr ? "" : " (reranker busy)"}</div>`;
   }
 
   const VERDICTS = {
@@ -140,13 +148,32 @@
     }
     return acc.replace(/^\s*\[[A-Z ]+\]\s*/, "");
   }
-  function paint(streaming) {
-    setBody(thumbHtml() + md(bodyText()) + (streaming ? `<span class="caret"></span>` : "") + footer());
+
+  function render() {
+    let h = thumbHtml() + md(bodyText());
+    h += primaryDone ? footer(sources, reranked) : CARET;
+    // vision answers can be grounded: turn qwen3-vl's read of the pixels into a cited corpus answer
+    if (curMode === "vision" && primaryDone && !gStarted && acc.trim())
+      h += `<button class="ground-btn">⚓ Ground this in the corpus</button>`;
+    if (gStarted) {
+      h += `<div class="gsec"><div class="ghdr">⚓ Grounded in the corpus</div>`;
+      h += gAcc ? md(gAcc) : `<p><span class="spin"></span> &nbsp;retrieving…</p>`;
+      if (gStreaming) h += CARET;
+      if (gDone) h += footer(gSources, gReranked);
+      h += `</div>`;
+    }
+    setBody(h);
+    const gb = root.querySelector(".ground-btn");
+    if (gb) gb.addEventListener("click", () => {
+      gStarted = true; gStreaming = true; gDone = false; render();
+      try { chrome.runtime.sendMessage({ type: "oracle:groundVision", text: acc }); } catch (_) {}
+    });
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "oracle:loading") {
       acc = ""; sources = null; reranked = true; curMode = msg.mode || "explain"; thumb = msg.thumb || null;
+      primaryDone = false; gStarted = false; gStreaming = false; gDone = false; gAcc = ""; gSources = null; gReranked = true;
       open();
       root.querySelector(".ttl").textContent =
         curMode === "factcheck" ? "Oracle · fact-check" : curMode === "vision" ? "Oracle · vision" : "Oracle";
@@ -157,17 +184,16 @@
     }
     if (msg.type !== "oracle:event") return;
     const { event, data } = msg.ev || {};
-    if (event === "sources") {
-      sources = data.sources || [];
-      reranked = data.reranked !== false;
-      if (acc) paint(true);
-    } else if (event === "delta") {
-      acc += data.text || "";
-      paint(true);
-    } else if (event === "done") {
-      paint(false);
-    } else if (event === "error") {
-      setBody(`<p>${esc(data && data.error || "error")}</p>`);
+    if (msg.mode === "ground") {                              // grounded sub-stream
+      if (event === "sources") { gSources = data.sources || []; gReranked = data.reranked !== false; render(); }
+      else if (event === "delta") { gAcc += data.text || ""; render(); }
+      else if (event === "done") { gStreaming = false; gDone = true; render(); }
+      else if (event === "error") { gStreaming = false; gDone = true; gAcc += "\n\n_" + (data.error || "error") + "_"; render(); }
+      return;
     }
+    if (event === "sources") { sources = data.sources || []; reranked = data.reranked !== false; if (acc) render(); }
+    else if (event === "delta") { acc += data.text || ""; render(); }
+    else if (event === "done") { primaryDone = true; render(); }
+    else if (event === "error") { primaryDone = true; acc = ""; setBody(thumbHtml() + `<p>${esc(data && data.error || "error")}</p>`); }
   });
 })();
