@@ -13,7 +13,11 @@
       "Bash(uv run serenedb-repro-planner.py:*)",
       "Bash(uv run label-fleet.py:*)",
       "Bash(uv run build-junk-features.py:*)",
-      "Bash(python3 label-db.py:*)"
+      "Bash(python3 label-db.py:*)",
+      "Bash(pdfinfo:*)",
+      "Bash(pdftotext:*)",
+      "Bash(docker stats:*)",
+      "Bash(docker port:*)"
     ]
   }
 }

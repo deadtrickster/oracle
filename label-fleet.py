@@ -212,6 +212,13 @@ def do_import():
             for b in bad[:6]:
                 print(f"      {b}")
             continue
+        missing = set(meta) - {r["chunk_id"] for r in rows}
+        if missing:
+            # Report short batches here so the operator never has to shell out an
+            # inline python one-liner (which trips a permission prompt) to find the gap.
+            print(f"  {f.name}: SHORT {len(rows)}/{len(meta)} — missing {sorted(missing)}; "
+                  f"NOT marked done, re-import after the labeler appends the gap")
+            continue
         for r in rows:
             m = meta[r["chunk_id"]]
             _db.add_label(conn, chunk_id=r["chunk_id"], label=r["label"], labeler="opus",
