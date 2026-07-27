@@ -18,6 +18,9 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: "explain", title: "Explain this with Oracle", contexts: ["selection"] });
   chrome.contextMenus.create({ id: "factcheck", title: "Fact-check this against Oracle", contexts: ["selection"] });
   chrome.contextMenus.create({ id: "shot", title: "Screenshot a region → Oracle vision", contexts: ["page", "image", "selection"] });
+  // Right-clicking an image already identifies the target, so there is nothing to select: skip the
+  // rectangle entirely and read that image.
+  chrome.contextMenus.create({ id: "img", title: "Explain this image with Oracle", contexts: ["image"] });
   refreshBadge();
 });
 
@@ -27,6 +30,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   else if (info.menuItemId === "explain") ground(tab, "explain", info.selectionText || "");
   else if (info.menuItemId === "factcheck") ground(tab, "factcheck", info.selectionText || "");
   else if (info.menuItemId === "shot") screenshotRegion(tab);
+  else if (info.menuItemId === "img") visionImage(info.srcUrl, tab);
 });
 
 chrome.commands.onCommand.addListener((cmd) => {
@@ -215,13 +219,10 @@ async function ground(tab, mode, selection) {
 
 async function screenshotRegion(tab) {
   if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
-  // Ask the receiver whether vision is actually available before making the user drag a rectangle.
-  // The GPU holds the text model OR qwen3-vl, never both, so vision ships disabled until the VRAM
-  // broker exists — say that up front rather than after the selection dance.
-  try {
-    const st = await (await fetch(RECEIVER + "/status")).json();
-    if (st && st.vision === false) { notify(st.vision_note || "Vision is disabled on this machine."); return; }
-  } catch (_) { /* receiver down — fall through; the card will report it */ }
+  // NO pre-flight check on /status here. An earlier version refused when status.vision was false
+  // and it silently broke the feature the moment auto-swap landed: `vision:false` now means only
+  // "not resident at this instant", not "unavailable", so the guard aborted before the selector was
+  // ever injected and the crosshair never appeared. The request itself swaps the model in.
   try {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["regionselect.js"] });
   } catch (e) { notify("Region select failed: " + e.message); }
@@ -296,9 +297,15 @@ async function visionRegion(msg, tab) {
             const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
             return cx >= box.x && cx <= box.x + box.w && cy >= box.y && cy <= box.y + box.h;
           };
+          // crop: the LOCATED text — that is what the walk is for.
+          // page: plain innerText, the SAME extraction the right-click-an-image route uses.
+          // It used to be walk(() => true), whose dedup + 400-node cap compress a dashboard to a
+          // fraction of its prose — often under the receiver's 2500-char summarise threshold. Same
+          // page, two entry points, one summarised and one not, for no reason a user could see. The
+          // extractor should not decide whether the page gets summarised.
           return {
             crop: walk(hit).join(" · ").slice(0, 3000),
-            page: walk(() => true).join(" · ").slice(0, 6000),
+            page: clean(document.body && document.body.innerText).slice(0, 6000),
           };
         },
       });
@@ -310,6 +317,7 @@ async function visionRegion(msg, tab) {
       body: JSON.stringify({
         image: b64, mime: "image/png", prompt,
         url: tab.url, title: tab.title, page_text: pageText, crop_text: cropText,
+        source: "region",
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
@@ -321,6 +329,91 @@ async function visionRegion(msg, tab) {
       await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
     } catch (_) {}
     send({ event: "error", data: { error: "Vision failed: " + (e.message || e) + " (is the receiver + qwen3-vl up?)" } });
+  }
+}
+
+// Right-click an image -> read THAT image, no rectangle to drag.
+//
+// The image's own markup is the best context there is: alt text, title, and a <figcaption> are
+// written precisely to say what the picture means, which is the thing pixels cannot state. A model
+// given the picture alone would re-derive (or invent) what the author already wrote down.
+async function visionImage(srcUrl, tab) {
+  if (!srcUrl) { notify("No image found under the cursor."); return; }
+  const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode: "vision", ev }).catch(() => {});
+  let thumb = null;
+  try {
+    // Ask the PAGE for the metadata and, if it can, the bytes. Doing the encode in the page reuses
+    // the already-decoded image and works for blob:/data: sources the worker cannot fetch.
+    let meta = { alt: "", title: "", caption: "", near: "", dataUrl: "" };
+    try {
+      const [r] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        args: [srcUrl],
+        func: (src) => {
+          const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+          const imgs = [...document.images];
+          const el = imgs.find((i) => i.currentSrc === src) || imgs.find((i) => i.src === src);
+          if (!el) return { alt: "", title: "", caption: "", near: "", dataUrl: "" };
+          const fig = el.closest("figure");
+          const cap = fig && fig.querySelector("figcaption");
+          // a little surrounding prose, for images whose alt is empty or decorative
+          const host = el.closest("figure, article, section, div") || el.parentElement;
+          const near = clean(host && host.innerText).slice(0, 800);
+          let dataUrl = "";
+          try {
+            const c = document.createElement("canvas");
+            c.width = el.naturalWidth || el.width;
+            c.height = el.naturalHeight || el.height;
+            if (c.width && c.height) {
+              c.getContext("2d").drawImage(el, 0, 0);
+              dataUrl = c.toDataURL("image/png");   // throws if the canvas is cross-origin tainted
+            }
+          } catch (_) { dataUrl = ""; }
+          return {
+            alt: clean(el.alt), title: clean(el.title),
+            caption: clean(cap && cap.textContent), near, dataUrl,
+            page: clean(document.body && document.body.innerText).slice(0, 6000),
+          };
+        },
+      });
+      meta = r?.result || meta;
+    } catch (_) { /* injection refused; fall back to fetching the URL */ }
+
+    let b64 = "", mime = "image/png";
+    if (meta.dataUrl) {
+      b64 = meta.dataUrl.split(",")[1];
+    } else {
+      // Cross-origin images taint the canvas, so fetch the bytes here instead — the worker has
+      // host permissions the page context does not.
+      const resp = await fetch(srcUrl);
+      const blob = await resp.blob();
+      mime = blob.type || "image/png";
+      b64 = await blobToB64(blob);
+    }
+    if (!b64) { notify("Could not read that image."); return; }
+    thumb = `data:${mime};base64,${b64}`;
+
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
+    await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
+    const r = await fetch(RECEIVER + "/vision", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image: b64, mime, prompt: "",
+        url: tab.url, title: tab.title,
+        image_alt: meta.alt, image_title: meta.title, image_caption: meta.caption,
+        // `near` is prose AROUND the image, not text inside it — `source` tells the receiver to
+        // label it as such instead of claiming it was rendered inside a cropped rectangle.
+        crop_text: meta.near, page_text: meta.page || "", source: "image",
+      }),
+    });
+    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
+    await pumpSSE(r.body, send);
+  } catch (e) {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
+      await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
+    } catch (_) {}
+    send({ event: "error", data: { error: "Image read failed: " + (e.message || e) } });
   }
 }
 

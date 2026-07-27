@@ -18,8 +18,9 @@
         color:#fff; font:12px sans-serif; padding:6px 12px; border-radius:20px; opacity:.92; }
       .bar { position:fixed; display:none; gap:6px; align-items:center; background:#1e1e1e;
         border:1px solid #444; border-radius:8px; padding:6px; box-shadow:0 8px 30px rgba(0,0,0,.4); }
-      .bar input { width:220px; border:1px solid #555; background:#111; color:#eee; border-radius:6px;
-        padding:5px 7px; font:13px sans-serif; }
+      /* max-width so the bar can never be wider than the viewport it has to be clamped inside */
+      .bar input { width:220px; max-width:45vw; border:1px solid #555; background:#111; color:#eee;
+        border-radius:6px; padding:5px 7px; font:13px sans-serif; }
       .bar button { border:0; border-radius:6px; padding:5px 9px; font:13px sans-serif; font-weight:600; }
       /* The host paints a full-screen crosshair for dragging, which the toolbar inherits — so the
          Send button looked like more canvas to drag on. Restore normal cursors over the controls. */
@@ -60,6 +61,29 @@
     sel.style.left = l + "px"; sel.style.top = t + "px"; sel.style.width = w + "px"; sel.style.height = h + "px";
   }
 
+  // Put the toolbar where the hand already is: centred under the pointer that finished the drag,
+  // not pinned to the selection's top-left corner. Anchoring to the rect meant a wide selection
+  // dropped the Send button a screen-width away from the cursor that drew it.
+  //
+  // MEASURE, don't assume. The old code clamped against a hardcoded 330px, which is not the bar's
+  // width — it renders wider — so near the right edge the buttons went off-screen: the clamp said
+  // "fits" while the user saw a cut-off toolbar. Read the real box, then keep it fully inside the
+  // viewport, flipping above the cursor when there is no room below.
+  const MARGIN = 8;
+  function placeBar(cx, cy) {
+    bar.style.visibility = "hidden";     // lay it out to measure, without a flash at 0,0
+    bar.style.display = "flex";
+    const bw = bar.offsetWidth, bh = bar.offsetHeight;
+    let left = cx - bw / 2;                                        // centred on the cursor
+    left = Math.max(MARGIN, Math.min(left, innerWidth - bw - MARGIN));
+    let top = cy + 16;                                             // just clear of the pointer
+    if (top + bh > innerHeight - MARGIN) top = cy - bh - 16;        // no room below -> above
+    top = Math.max(MARGIN, top);
+    bar.style.left = Math.round(left) + "px";
+    bar.style.top = Math.round(top) + "px";
+    bar.style.visibility = "visible";
+  }
+
   // Shadow DOM RETARGETING: this listener is on the shadow HOST, so for any event originating
   // inside the shadow root `e.target` is the host itself — never the button. The old guard
   // (`e.target.closest(".bar")`) therefore searched the light DOM, found nothing, and let a click
@@ -83,10 +107,8 @@
     if (!r || r.w < 8 || r.h < 8) { sel.style.display = "none"; dim.style.display = "block"; return; }
     rect = { x: r.x, y: r.y, w: r.w, h: r.h };
     hint.style.display = "none";
-    let top = r.y + r.h + 8; if (top > innerHeight - 46) top = r.y - 46;
-    bar.style.top = Math.max(8, top) + "px";
-    bar.style.left = Math.min(Math.max(8, r.x), innerWidth - 330) + "px";
-    bar.style.display = "flex"; input.focus();
+    placeBar(e.clientX, e.clientY);
+    input.focus();
   });
 
   $(".no").addEventListener("click", teardown);

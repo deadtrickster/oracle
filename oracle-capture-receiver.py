@@ -721,7 +721,7 @@ def _summarize_for_vl(page_text: str, url: str, title: str) -> str:
 
 
 def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
-                crop_text: str = "") -> str:
+                crop_text: str = "", img: dict | None = None, source: str = "region") -> str:
     """Text context to put in FRONT of the screenshot.
 
     A cropped region carries almost no self-description: a Grafana panel is a line and some axis
@@ -736,14 +736,31 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
         parts.append(f"Page title: {title.strip()}")
     if url:
         parts.append(f"Page URL: {url.strip()}")
-    # FIRST, and marked as authoritative: the text actually inside the dragged rectangle. On a page
-    # of twelve panels the whole-page text names twelve metrics and cannot say which one was
-    # cropped — the model then picks plausibly, which is guessing with better inputs. The text under
-    # the crop answers "which".
+    # The image's OWN markup outranks everything else on the page: alt text, title and a
+    # <figcaption> are written specifically to say what this picture is. Without them a model
+    # re-derives — or invents — what the author already stated.
+    im = img or {}
+    described = [(k, " ".join((im.get(k) or "").split()))
+                 for k in ("image_alt", "image_title", "image_caption")]
+    described = [(k.replace("image_", ""), v) for k, v in described if v]
+    if described:
+        parts.append("How the page itself describes this image (authoritative — it was written to "
+                     "describe exactly this picture):\n"
+                     + "\n".join(f"  {k}: {v[:600]}" for k, v in described))
+
+    # Then the LOCAL text. On a page of twelve panels the whole-page text names twelve metrics and
+    # cannot say which one was cropped — the model then picks plausibly, which is guessing with
+    # better inputs. Local text answers "which". What "local" means differs by entry point, and the
+    # label must say which one it is: text inside a dragged rectangle IS the image's own text, while
+    # prose around an <img> merely sits next to it. Labelling the second as the first is the same
+    # overclaim this file exists to prevent — one modality over.
     crop = " ".join((crop_text or "").split())
     if crop:
-        parts.append("Text rendered INSIDE the cropped region (this describes the image itself, "
-                     f"prefer it over the rest of the page):\n{crop[:VL_CTX_CHARS]}")
+        label = ("Text on the page immediately AROUND this image (context, not necessarily part of "
+                 "the picture)" if source == "image" else
+                 "Text rendered INSIDE the cropped region (this describes the image itself, prefer "
+                 "it over the rest of the page)")
+        parts.append(f"{label}:\n{crop[:VL_CTX_CHARS]}")
     t = " ".join((page_text or "").split())
     if t:
         if summarized:
@@ -755,14 +772,17 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
             parts.append(f"Text visible on the page (may be truncated):\n{t}")
     if not parts:
         return ""
-    return ("Context for the image below — the region was screenshotted from this page. Use it to "
-            "identify what is being shown (system, dashboard, metric names, units, time range) "
-            "instead of guessing, but describe only what the IMAGE actually shows.\n\n"
+    came_from = ("it was taken from this page" if source == "image"
+                 else "the region was screenshotted from this page")
+    return (f"Context for the image below — {came_from}. Use it to identify what is being shown "
+            "(system, dashboard, metric names, units, time range) instead of guessing, but "
+            "describe only what the IMAGE actually shows.\n\n"
             + "\n".join(parts))
 
 
 def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: str = "",
-                  page_text: str = "", crop_text: str = ""):
+                  page_text: str = "", crop_text: str = "", img: dict | None = None,
+                  source: str = "region"):
     """Stream the qwen3-vl answer for a screenshotted region. NOT grounded — a direct look at the
     pixels (read this diagram / transcribe this / what is this). Emits ('delta',…)* then ('done',{}).
 
@@ -785,7 +805,7 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
         yield ("error", {"error": f"{e}\n\n{VL_DISABLED_MSG}", "reason": "vision_unavailable"})
         return
     prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
-    ctx = _vl_context(url, title, brief or page_text, summarized, crop_text)
+    ctx = _vl_context(url, title, brief or page_text, summarized, crop_text, img, source)
     # Order matters: context, then the image, then the question. The text frames what the pixels
     # are before the model looks at them; the question stays last so it is the most recent thing.
     content = ([{"type": "text", "text": ctx}] if ctx else []) + [
@@ -1102,7 +1122,10 @@ class Handler(BaseHTTPRequestHandler):
                     img = f"data:{p.get('mime', 'image/png')};base64,{img}"
                 self._send_sse(vision_stream(img, p.get("prompt", ""), p.get("url", ""),
                                              p.get("title", ""), p.get("page_text", ""),
-                                             p.get("crop_text", "")))
+                                             p.get("crop_text", ""),
+                                             {k: p.get(k, "") for k in
+                                              ("image_alt", "image_title", "image_caption")},
+                                             p.get("source", "region")))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))
