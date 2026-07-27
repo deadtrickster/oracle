@@ -602,11 +602,26 @@ box-shadow:0 2px 14px #00000014;border-radius:2px;font:16px/1.65 Georgia,"Times 
 .doc blockquote{{margin:.8em 0;padding:.2em 1em;border-left:4px solid #ddd;color:#555}}
 .doc table{{border-collapse:collapse;margin:.8em 0}}.doc td,.doc th{{border:1px solid #ddd;padding:.3rem .7rem}}
 .doc img{{max-width:100%}}.doc hr{{border:0;border-top:1px solid #e5e5e5;margin:1.5em 0}}
-#hit{{scroll-margin-top:70px}}mark{{background:#fe9}}
+#hit{{scroll-margin-top:70px}}mark{{background:#fe9;scroll-margin-top:90px}}
+/* the match we scrolled to: stronger than the other hits, so the eye lands on it rather than
+   hunting through a page of equally-yellow terms */
+mark.lead{{background:#ffb300;box-shadow:0 0 0 3px #ffb30055;border-radius:2px}}
 :target+*,#hit+*{{animation:flash 2.5s ease-out}}@keyframes flash{{from{{background:#fff6cf}}to{{background:transparent}}}}</style>
 <div class=bar><a href="/search?q={q}">← results</a><a href="/browse">▤ browse</a><b>{name}</b></div>
 <div class=layout><nav class=tree>{tree}</nav><div class=main><div class=doc>{body}</div></div></div>
-<script>if(location.hash==='#hit'){{document.getElementById('hit')?.scrollIntoView()}}
+<script>
+// Land on the passage, not the top of the document. Priority: the #hit anchor when the caller
+// knew the exact block (search results pass ?find=), otherwise the FIRST highlighted term — which
+// is the case that matters for a citation link, where all we carry is ?q=. Previously that link
+// highlighted matches but left you at the top of a long page to find them yourself.
+// No query => nothing highlighted => no scroll, so plain browsing is unaffected.
+(function(){{
+  var lead = document.getElementById('hit') || document.querySelector('.doc mark');
+  if(!lead) return;
+  if(lead.tagName === 'MARK') lead.classList.add('lead');
+  // rAF so layout (sticky bar, sidebar) has settled before we measure the scroll position
+  requestAnimationFrame(function(){{ lead.scrollIntoView({{block:'center'}}); }});
+}})();
 document.querySelector('.tree a.cur')?.scrollIntoView({{block:'center'}});</script>"""
 
 
