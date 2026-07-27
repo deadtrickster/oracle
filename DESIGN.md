@@ -399,8 +399,24 @@ drives the action (`keep` / `delete` / `excise` / `strip`).
 - **Model:** gradient-boosted trees / MLP over those features first; if precision stalls, fine-tune a
   small multilingual encoder on CPU — *training time is explicitly not a constraint* (hours are fine);
   only scoring must stay cheap, and a forward pass over stored vectors is.
-- **Labels by bootstrap, not hand-labelling 200 K:** rules nominate candidates, the qwen judge
-  weak-labels a few thousand, a human spot-checks via the same JSONL audit trail as §4.2.
+- **Labels — an Opus gold set over 10% of the corpus (DONE 2026-07-27, supersedes the qwen-weak-label
+  plan).** The original plan was qwen-judge weak-labels; his call was to spend the *strong* model on
+  the one job only it can do and hand-grade a representative slice into the full 9-class taxonomy
+  (CLEAN + the 8 junk classes above). **24,832 chunks labeled** (target was 24,766 = 10% of 247,665);
+  88.6% CLEAN, the rest across every junk class. This is the classifier's training set — gold, not
+  weak. **Architecture (`label-fleet.py`): many readers, one writer.** The planner exports 25-chunk
+  batches (chunk text fetched from ES and stored *in* the batch file, so labelers need no network);
+  each Opus agent Reads one batch + `RUBRIC.md` and Writes one JSONL of verdicts; a single `--import`
+  is the only DB writer, which settles the SQLite-concurrency question by construction. **Resume is
+  disk-truth** — a batch is done iff its output file exists — so any agent can die and be respawned
+  with zero loss. `--import` validates every row (known class, sane certainty) and reports **SHORT**
+  (agent wrote fewer rows than the batch) and **REFUSED** (bad/missing certainty) inline, so no
+  ad-hoc script is ever needed to find a gap; short files are *not* marked done, so re-import after an
+  agent appends the missing row cannot double-count. **The label set doubles as the map of the
+  classifier's uncertain band:** the grader's own low-confidence classes — FIGURE_GARBAGE (0.58),
+  BOILERPLATE (0.60), OCR_DAMAGED_CODE (0.67) — are exactly the boundary calls (table vs shredded
+  diagram, per-page furniture vs substantive license text, prose vs damaged code) where the cheap
+  classifier should defer to the expensive judge, per §4.2's cascade.
 - **Output classes:** `clean` / `excise` (surgical token removal, then remove+reingest) / `delete`.
 - **A probe on the RAW collection KB (uncurated) validated the signals and grew the taxonomy.** The
   flagged ToC chunks were real ToC; index-ish separated at alpha-sorted 0.90 / stopwords 0.08 vs prose
@@ -1074,6 +1090,35 @@ paths** so a `file:line` feeds straight to `Read`. And the two *prompt-debias* f
 project names are gone (call `list_projects`), and the DISCIPLINE no longer frames qwen as
 coding-only (it refused biology as "out of scope" — the prompt over-narrowed the domain, same bug
 class as the hardcoded names).
+
+**A third instance, 2026-07-27 — an EXAMPLE LIST became an asserted INVENTORY.** Asked what the
+corpus had on Kubernetes, qwen answered — without calling a single tool — that the corpus covers
+Rust, C++ and so on *but has nothing on Kubernetes*. It has a great deal: the entire official k8s
+documentation tree plus O'Reilly's *Kubernetes Patterns* and *Cloud Native DevOps with Kubernetes*
+(443 chunks mention kubernetes/kubectl in the label DB alone; a `search_corpus` probe reranks
+pod-security passages at 0.73/0.62/0.59). The model had not looked. It was reading back two lists
+we wrote:
+
+- `qwen.sh`'s DISCIPLINE routed doc questions with the parenthetical *"(Rust std, io_uring
+  semantics, PostgreSQL concepts, Go, Linux, general knowledge)"* — intended as examples of the
+  *kind* of question, read as the *contents of the library*.
+- `ask_corpus`'s own docstring — the **tool description**, which every model sees on every call —
+  opened *"GROUNDED in the offline corpus (Rust, io_uring, Linux, Go, PostgreSQL/OrioleDB, Emacs,
+  git/bash/glibc docs + books + papers)"*.
+
+Neither list had been true for months; the corpus had since absorbed Kubernetes, biology, ML, and a
+few hundred books. **A stale enumeration in a prompt does not read as "for example" — it reads as
+ground truth about the world**, and a model will answer an inventory question from it rather than
+query, because the prompt looks authoritative and querying looks optional.
+
+Two things follow. First, the fix is again *subtraction*: both lists are gone, replaced by the
+statement that the corpus is large, general, unlisted and **changing**, so what it contains is
+knowable only by asking. Second, and new: **the tool description is part of the prompt.** We had
+been treating DISCIPLINE as "the prompt" and docstrings as documentation, but a description is
+injected verbatim into the model's context and carries exactly the same bias — so any factual claim
+in one needs the same scrutiny, and the same expiry date, as a claim in the system prompt. The
+durable rule: *a prompt may describe how to use a tool; it must never describe what the data
+contains.* Contents are an empirical question, and there is a tool for it.
 
 **Axiom 2, stated mechanically: prompts are SOFT limits, hooks are HARD STOPS.** (His framing,
 2026-07-22 — the right one.) A robot arm has two kinds of constraint. A *soft limit* lives in the

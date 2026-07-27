@@ -971,6 +971,101 @@ off-switch, and only if it moves the gold passage *up* without costing recall �
 same eval that's caught every other good-sounding idea that wasn't. The sensor is built. The nudge
 waits for the number.
 
+## Act 21 — I paid a genius to label ten thousand pages of junk, and the loop kept lying to me
+
+The corpus has a garbage problem I've been circling for weeks: table-of-contents lines, back-of-book
+indexes, bibliographies, OCR'd code with the digits swapped, diagrams flattened into `口□□□`. None of
+it is *wrong*, exactly — it's just apparatus, and it competes for the eight retrieval slots that
+should hold answers. I'd tried a rule (blind to anything it wasn't written for) and a GPU model as a
+judge (accurate, slow, and not even deterministic at temperature zero). The literature kept pointing
+the same way: stop judging every chunk with a big model, and train a small fast classifier that can
+score all quarter-million of them. But a classifier needs a labeled set, and a labeled set is the one
+thing you can't fake.
+
+So the plan was to spend the expensive model on the one job only it can do: hand-grade a
+representative slice — ten percent, 24,766 chunks — into nine classes, and let *that* become the
+training data. The architecture is the same shape as everything else here. Many readers, one writer:
+each labeling agent reads a 25-chunk batch and the rubric and writes one small file of verdicts; a
+single importer is the only thing that ever touches the database. Resume is by disk truth — a batch
+is done if and only if its output file exists — so an agent can die mid-run (usage limit, a stall, a
+stuck read) and be respawned with nothing lost. Roughly a thousand batches, two lanes running at
+once, and I retired each lane the moment its context crossed ~140k tokens and stood up a fresh one,
+because past that they start re-reading their own history instead of working.
+
+And then the loop spent two days teaching me the same lesson this whole project keeps teaching me:
+**the failures are silent by default.** An agent would confidently report "batch done, 25 chunks" and
+have written 24 — off by one, every field perfect except that one chunk_id simply wasn't there.
+Another would label everything correctly and quietly omit the `certainty` field on the rows it was
+*most* sure about, because a confident CLEAN felt like it didn't need a number. Early on I caught
+these by shelling out a one-line script to diff the file against the batch — which was itself the
+wrong move, because now *I* was the ad-hoc unaudited step. The fix was to make the importer say it out
+loud: `SHORT 24/25 — missing 62feaa03` and `REFUSED — bad certainty on line 3`. Once the machine
+announced the gap, the repair was mechanical: bounce the agent to append the one missing row, and —
+crucially — never mark a short file "done," so re-importing it can't double-count the 24 good rows it
+already has. It's the exact same move as making the reranker's silent timeout visible, or the parser
+that reported `DONE` on zero output. A degradation nobody can observe isn't graceful; it's a bug with
+good manners.
+
+One agent got genuinely stuck — caught on a single chunk that was one physical line thousands of
+tokens long, paging through it forever looking for a middle that the exporter had deliberately elided.
+(There's a head-plus-tail truncation for exactly this; junk signals live at the edges and in the
+texture, not in the middle of a 28,000-token listing.) I killed it and handed the batch to a fresh
+lane, which finished it in two minutes. The stuck one wasn't failing — it was *trying*, forever, which
+is worse, because trying-forever doesn't trip an alarm either.
+
+It finished: 24,832 labeled chunks, 88.6% of them clean, the other eleven percent spread across the
+full junk taxonomy. The most useful number isn't the total — it's *where the grader was unsure.* The
+three lowest-confidence classes are figure-garbage, boilerplate, and OCR-damaged code, all hovering
+around 0.6, all for the same reason: they're boundary calls. Is a box-drawing table a real rendered
+table or a shredded diagram? Is a license block per-page furniture or substantive text? Is a
+prose-heavy passage with three mangled code lines "clean" or "damaged"? Those aren't the classifier's
+job to force — they're precisely the band where a small fast model should throw up its hands and defer
+to the expensive judge. The expensive model didn't just make the training set. By recording its own
+doubt, it drew the map of where cheap judgment ends and expensive judgment has to begin.
+
+## Act 22 — "We have nothing on Kubernetes," said the model, having not looked
+
+I asked the local model what the corpus had on Kubernetes. It told me, pleasantly and immediately,
+that the corpus covers Rust and C++ and a few other things but has nothing on Kubernetes.
+
+It has the entire official Kubernetes documentation tree. It has *Kubernetes Patterns* and *Cloud
+Native DevOps with Kubernetes*. Four hundred and forty-three labelled chunks mention `kubectl`. When
+I ran the actual retrieval, pod-security passages came back reranked at 0.73.
+
+The model hadn't looked. Not "looked and missed" — hadn't issued a query at all. And when I went
+hunting for where it got its confident inventory, I found I had written it myself, twice.
+
+The first copy was in the system prompt, in a routing rule: *documentation and concept questions —
+Rust std, io_uring semantics, PostgreSQL concepts, Go, Linux, general knowledge — go to the corpus
+tool.* Those were meant as examples of the **kind** of question. They were read as the **contents of
+the library**. The second copy was worse, because I'd never thought of it as prompt at all: the
+corpus tool's own docstring, the description string the model sees on every single call, opening
+with a parenthetical list of what the corpus contains. Both lists were written months ago. Both had
+been false for months — the corpus had since eaten Kubernetes, biology, machine learning and several
+hundred books.
+
+There's a specific trap here worth naming. A list in a prompt does not read as *"for example."* It
+reads as *ground truth about the world*. The model has no way to tell a stale illustration from a
+current fact, and an inventory question — "do you have anything on X?" — is exactly the question
+that a list appears to answer directly. So the model answers from the prompt, confidently, and never
+calls the tool, because the prompt looks authoritative and the tool looks optional. This is the same
+failure this project keeps producing in new costumes: **the system did less than it claimed and said
+nothing about it.** Except this time it didn't even do less — it did *nothing*, and narrated a
+result.
+
+The fix was subtraction, which by now is the pattern. Both lists deleted. In their place: the corpus
+is large, general, unlisted and *changing*, so what it contains is knowable only by asking. Only "I
+searched and found nothing" licenses saying a topic is absent, and it has to be said that way — as
+the outcome of a query, not as a fact you happen to know.
+
+But the part I'll actually carry forward is the second copy. I'd been treating the system prompt as
+"the prompt" and tool docstrings as documentation — as if one were live wiring and the other were a
+comment. They're the same wire. A tool description is injected verbatim into the model's context and
+biases it identically; it just isn't in the file you think of as the prompt, so it never gets
+audited and never expires. Which gives a rule sharp enough to actually apply: **a prompt may
+describe how to use a tool. It must never describe what the data contains.** The data is allowed to
+change. The sentence about it never does.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
@@ -1050,7 +1145,20 @@ things actually happened — most beats are a thing I set out to do, the wall I 
     for a shelf of general/fiction/pop-science books they may not be worth 28 hours — the fast
     `pdftotext → naive` lane exists for exactly that call.
 
+20. **The label fleet — buying a training set the model can't fake.** The junk classifier needs
+    labeled data, so I spent the expensive model hand-grading 10% of the corpus (24,766 chunks) into
+    nine classes — many-readers/one-writer, disk-truth resume, two lanes retired at ~140k tokens
+    each. The loop's real content was catching its own silent failures: agents reporting "25" and
+    writing 24, or omitting `certainty` on the rows they were surest of. Fix was to make the importer
+    announce `SHORT 24/25 — missing X` and never mark a short file done. Ended at 24,832 labels, 88.6%
+    clean; the three lowest-confidence classes (figure-garbage, boilerplate, OCR-damaged code, all
+    ~0.6) *are* the map of where the cheap classifier should defer to the expensive judge.
+
 ## Assets to include
+- **`docs/screenshots/explain-with-oracle.png`** — the money shot for Act 20: select a phrase on any
+  page, get a grounded explanation glued to the selection, every `[n]` a link to the source page.
+- **`docs/screenshots/fact-check.png`** — the same selection fact-checked, verdict chip first
+  (SUPPORTED), then the excerpts that support it. Pairs with the "grounding is a primitive" thread.
 - The rank-3→rank-1 rerank A/B (real output).
 - The mislabeled-LSN screenshot vs the grounded `ask_corpus` answer.
 - The resource-split diagram.
@@ -1075,6 +1183,13 @@ things actually happened — most beats are a thing I set out to do, the wall I 
 - "BM25 returned 0.0 for every row and never once raised. A scorer that can't score should crash, not shrug."
 - "The engine wasn't broken — my dictionary was missing one flag. But 'fails silently' turned a config typo into a lost day."
 - "The connector passed its unit test and returned zero recall in production. The interface it implemented lied by omission — two methods the retriever calls were never marked abstract."
+- "The agent said 'batch done, 25' and had written 24. Every field perfect except the one that wasn't there."
+- "A stuck agent doesn't trip an alarm — it keeps trying, forever, which is worse than failing."
+- "The expensive model didn't just make the training set. By recording its own doubt, it drew the map of where cheap judgment ends."
+- "'We have nothing on Kubernetes,' it said, having not looked. I'd written that inventory myself, months earlier, as an example."
+- "A list in a prompt doesn't read as 'for example.' It reads as ground truth about the world."
+- "I'd been treating the system prompt as the prompt, and tool docstrings as documentation — as if one were live wiring and the other a comment. They're the same wire."
+- "A prompt may describe how to use a tool. It must never describe what the data contains. The data is allowed to change; the sentence about it never does."
 - "Parity isn't a number you cite once; it's a number you re-earn every time the engine, the query, or the config moves."
 - "The dedup grouped three different 'Deep Learning' books as one copy. I caught it by reading the tool's own suspect list — which is the entire reason that list exists."
 - "Same title, same 462 pages, different md5. Not a newer edition — just a second scan. 'Prefer the recent edition' has nothing to prefer."

@@ -44,7 +44,9 @@ QWEN_MODEL = "qwen3-coder-next"
 CANDIDATE_ROOTS = [
     BOOKS / "My-Books-Collections", BOOKS / "Book-Collection", BOOKS / "Books-Collection",
     BOOKS / "oreilly-books-collection-", BOOKS / "awesome-book-collection",
-    BOOKS / "ml", BOOKS / "bio", BOOKS,  # BOOKS itself = loose files (non-recursive)
+    BOOKS / "ml", BOOKS / "bio",
+    BOOKS / "LTL", BOOKS / "IR-Foundations",  # 2026-07-25 IR shelf (papers/theses/tutorials)
+    BOOKS,  # BOOKS itself = loose files (non-recursive)
 ]
 INGESTED_GLOB = "corpus/*_raw/*.pdf"
 EXTS = {".pdf", ".epub", ".djvu"}
