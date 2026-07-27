@@ -41,6 +41,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from html import unescape
@@ -54,10 +55,26 @@ OLLAMA = os.environ.get("ORACLE_OLLAMA_URL", "http://localhost:11434").rstrip("/
 # production points at the llama.cpp qwen-next server (:18080) that has no /api/embed.
 EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # Vision model (qwen3-vl llama-server, :18081 — same one transcribe-scans.py uses).
+# DISABLED BY DEFAULT — and that is a hardware fact, not a preference: the 24 GB card holds the
+# text model (~20.6 GB) OR qwen3-vl (~17 GB), never both, so starting VL under a live :18080 either
+# OOMs or silently spills to sysmem and crawls. Enabling it needs the VRAM broker that arbitrates
+# the one big slot (lease/refcount, health-gated readiness, rollback on failed swap) — designed,
+# not built. Until then /vision answers with an honest, immediate explanation instead of hanging on
+# a dead port: a feature that is off must SAY it is off (the house rule — silence read as success).
+VL_ENABLED = os.environ.get("ORACLE_VL_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 VL_URL = os.environ.get("ORACLE_VL_URL", "http://localhost:18081").rstrip("/")
 VL_MODEL = os.environ.get("ORACLE_VL_MODEL", "qwen3-vl")
+VL_DISABLED_MSG = (
+    "Vision is disabled on this machine. The GPU (24 GB) fits the text model (~20.6 GB) or "
+    "qwen3-vl (~17 GB), not both, so the vision server is not running. Enable it with the VRAM "
+    "broker (ORACLE_VL_ENABLED=1 once the broker arbitrates the swap). Text capture, ask, explain "
+    "and fact-check are unaffected."
+)
 SYNTH_MODEL = os.environ.get("ORACLE_SYNTH_MODEL", "qwen3-coder:30b")
 RERANK_ID = os.environ.get("ORACLE_RERANK_ID", "gte-multilingual-reranker-base@local-gte-rerank@Jina")
+# Corpus browser (oracle-browser) — renders the ORIGINAL page a citation came from, so a footnote
+# can be followed to the source instead of merely naming it (G3: "can I check it?").
+BROWSER = os.environ.get("ORACLE_BROWSER_URL", "http://localhost:9765").rstrip("/")
 HOME = Path.home()
 CORPUS = Path(os.environ.get("ORACLE_CORPUS", str(HOME / "Projects/oracle/corpus"))).resolve()
 CAPTURES = CORPUS / "inbox" / "captures"
@@ -67,6 +84,7 @@ HDR = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
 
 _drain_now = threading.Event()
 _ds_lock = threading.Lock()  # serialise dataset lookup/create so two captures don't double-create
+_drain_lock = threading.Lock()  # one drain at a time (loop vs POST /drain) — no double uploads
 
 
 # ------------------------------------------------------------------ http helpers (stdlib only)
@@ -183,7 +201,7 @@ def capture_job(stem: str) -> dict:
     rec = json.loads(j.read_text())
     out = {"stem": stem, "status": rec.get("status"), "doc_id": rec.get("doc_id"),
            "error": rec.get("error")}
-    if rec.get("status") == "done" and rec.get("doc_id"):
+    if rec.get("status") in ("done", "duplicate") and rec.get("doc_id"):
         try:
             dsid = _dataset_id(rec["dataset"], rec["chunk_method"])
             page = 1
@@ -218,8 +236,30 @@ def _dataset_id(name: str, chunk_method: str) -> str:
         return ds["id"]
 
 
-def _upload(md_path: Path, dsid: str) -> str | None:
-    """Multipart upload of one .md, then kick off parsing. Returns doc_id, or None on duplicate."""
+def _find_doc_by_name(dsid: str, name: str) -> str | None:
+    """Look up a document id by filename. Used to recover the id when an upload comes back empty
+    because RAGFlow already holds that name — the harness knows the answer, so it must say it
+    rather than hand back None and let the caller record a success that never happened."""
+    page = 1
+    while True:
+        docs = _ragflow("GET", f"/datasets/{dsid}/documents?page={page}&page_size=100",
+                        timeout=30)["data"]["docs"]
+        hit = next((d for d in docs if d.get("name") == name), None)
+        if hit:
+            return hit["id"]
+        if len(docs) < 100:
+            return None
+        page += 1
+
+
+def _upload(md_path: Path, dsid: str) -> tuple[str | None, bool]:
+    """Multipart upload of one .md, then kick off parsing.
+
+    Returns `(doc_id, duplicate)`. RAGFlow answers an already-known filename with an EMPTY data
+    list — indistinguishable from success unless you look. Previously that returned None and the
+    caller stored status=done/doc_id=None: the capture was never ingested and the UI said it was.
+    Now the duplicate is named as such, and we recover the existing id so /job can still report the
+    real parse state."""
     boundary = "----oracle" + md_path.stem
     fname = md_path.name
     data = md_path.read_bytes()
@@ -232,38 +272,51 @@ def _upload(md_path: Path, dsid: str) -> str | None:
                          "Content-Type": f"multipart/form-data; boundary={boundary}"}, timeout=300)
     docs = resp.get("data", [])
     if not docs:
-        return None  # duplicate name already present
+        return _find_doc_by_name(dsid, fname), True
     doc_id = docs[0]["id"]
     _ragflow("POST", f"/datasets/{dsid}/chunks", data={"document_ids": [doc_id]})
-    return doc_id
+    return doc_id, False
 
 
 def _drain_once() -> dict:
-    jobs = sorted(CAPTURES.glob("*.capture.json")) if CAPTURES.exists() else []
-    done = failed = 0
-    for j in jobs:
-        try:
-            rec = json.loads(j.read_text())
-        except Exception:
-            continue
-        if rec.get("status") != "pending":
-            continue
-        try:
-            dsid = _dataset_id(rec["dataset"], rec["chunk_method"])
-            doc_id = _upload(Path(rec["md"]), dsid)
-            rec["status"], rec["doc_id"] = "done", doc_id
-            done += 1
-        except (urllib.error.URLError, ConnectionError, TimeoutError):
-            # RAGFlow unreachable (backend off / mid-flight) — leave pending, retry next pass
-            return {"done": done, "failed": failed, "ragflow": False}
-        except Exception as e:
-            rec["attempts"] = rec.get("attempts", 0) + 1
-            rec["error"] = str(e)[:300]
-            if rec["attempts"] >= 5:
-                rec["status"] = "failed"
-                failed += 1
-        j.write_text(json.dumps(rec, indent=2))
-    return {"done": done, "failed": failed, "ragflow": True}
+    """Upload every `pending` capture. Serialised by `_drain_lock`: the background loop and an
+    explicit POST /drain would otherwise walk the same job files concurrently and upload a capture
+    twice (the second landing as a 'duplicate' — a self-inflicted version of the 28-copies-of-one-
+    man-page ratchet)."""
+    with _drain_lock:
+        jobs = sorted(CAPTURES.glob("*.capture.json")) if CAPTURES.exists() else []
+        done = dup = failed = 0
+        for j in jobs:
+            try:
+                rec = json.loads(j.read_text())
+            except Exception:
+                continue
+            if rec.get("status") != "pending":
+                continue
+            try:
+                dsid = _dataset_id(rec["dataset"], rec["chunk_method"])
+                doc_id, duplicate = _upload(Path(rec["md"]), dsid)
+                rec["doc_id"] = doc_id
+                if duplicate:
+                    # Already in the KB under this name. NOT a fresh ingest — say so, so the popup
+                    # can't show "parsed ✓" for something this run never actually ingested.
+                    rec["status"] = "duplicate"
+                    rec["error"] = None if doc_id else "duplicate name, existing doc not found"
+                    dup += 1
+                else:
+                    rec["status"] = "done"
+                    done += 1
+            except (urllib.error.URLError, ConnectionError, TimeoutError):
+                # RAGFlow unreachable (backend off / mid-flight) — leave pending, retry next pass
+                return {"done": done, "duplicate": dup, "failed": failed, "ragflow": False}
+            except Exception as e:
+                rec["attempts"] = rec.get("attempts", 0) + 1
+                rec["error"] = str(e)[:300]
+                if rec["attempts"] >= 5:
+                    rec["status"] = "failed"
+                    failed += 1
+            j.write_text(json.dumps(rec, indent=2))
+        return {"done": done, "duplicate": dup, "failed": failed, "ragflow": True}
 
 
 def _drainer_loop():
@@ -301,6 +354,104 @@ def _retrieve(query: str, kb_ids: list[str]):
 
 def _script(s: str) -> str:
     return "cyr" if re.search(r"[а-яА-ЯёЁ]{4,}", s or "") else "lat"
+
+
+def _pretty_doc(docname: str) -> str:
+    """RAGFlow doc name -> something readable in a footnote.
+
+    Names are path-encoded (`collection_raw__Databases__elasticsearch__Elasticsearch_ The
+    Definitive Guide-...pdf`), which is unreadable as a citation. Keep the last path segment and
+    drop the extension; that is the actual title in every naming scheme the corpus uses."""
+    base = (docname or "?").split("__")[-1]
+    for ext in (".pdf", ".txt", ".md", ".epub"):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+    return base.strip() or (docname or "?")
+
+
+def _chunk_page(chunk: dict) -> int | None:
+    """Page number of a chunk, from RAGFlow's `positions` ([[page, x0, x1, y0, y1], ...])."""
+    pos = chunk.get("positions") or []
+    try:
+        return int(pos[0][0])
+    except Exception:
+        return None
+
+
+_FRONTMATTER = re.compile(r"\A\s*(?:---|\+\+\+)\r?\n.*?\r?\n(?:---|\+\+\+)\r?\n", re.S)
+
+
+def _cite_lead(text: str) -> str:
+    """The line of a chunk most likely to be findable in the source markdown.
+
+    Two traps, both hit on real k8s docs. The chunk's stored text often BEGINS with the YAML
+    front-matter (`--- reviewers: … ---`), but the browser strips front-matter before searching, so
+    anchoring on it always fails silently. And Hugo shortcodes / heading markup (`{{< … >}}`, `##`)
+    are rewritten during rendering, so they are unreliable probes.
+
+    Among the remaining prose lines, take the LONGEST rather than the first. Measured over 20 real
+    markdown citations: longest 60% located vs first-line 40% — a chunk's opening line is
+    disproportionately a heading or a reformatted fragment, while its longest line is ordinary prose
+    that survives rendering unchanged, and offers the locator more words to probe with.
+    When it still misses there is no #hit and the browser falls back to scrolling to the first
+    highlighted query term, which is why this is an optimisation and not a correctness dependency."""
+    body = _FRONTMATTER.sub("", text or "")
+    best = ""
+    for line in body.splitlines():
+        s = line.strip().lstrip("#>-*| ").strip()
+        if not s or s.startswith("{{") or s.startswith("<!--") or s.startswith("|"):
+            continue
+        if len(re.findall(r"[^\W\d_]{3,}", s)) >= 3 and len(s) > len(best):
+            best = s
+    return " ".join(best.split()[:12])[:160]
+
+
+def _cite_url(docname: str, page: int | None, query: str, snippet: str = "") -> str:
+    """Deep link into the corpus browser at the exact passage a citation came from.
+
+    Two routes, because two kinds of source: PDF/txt docs render page-accurately via /view (?p=),
+    markdown docs have no pages and render via /md. ?q= highlights the query terms on arrival.
+
+    For markdown we can do better than "highlight the query somewhere on the page": we know the
+    chunk's own text, and the browser can anchor on it (`?find=` locates the block, `#hit` scrolls
+    to it). Without that, a long doc with 39 query-term matches drops you at the FIRST one, which is
+    often a heading rather than the sentence the claim came from. Passing the chunk's opening words
+    makes the footnote land on the cited passage itself — the whole point of a citation you can
+    follow."""
+    doc = urllib.parse.quote(docname or "", safe="")
+    q = urllib.parse.quote((query or "")[:200], safe="")
+    if (docname or "").lower().endswith(".md"):
+        url = f"{BROWSER}/md/{doc}?q={q}"
+        # _locate_in_md probes with the first ~6 letter-runs, so a short prose lead is enough
+        lead = _cite_lead(snippet)
+        if lead:
+            url += f"&find={urllib.parse.quote(lead, safe='')}#hit"
+        return url
+    p = page if isinstance(page, int) and page > 0 else 1
+    return f"{BROWSER}/view/{doc}?p={p}&q={q}"
+
+
+def _citations(chunks: list, query: str) -> list[dict]:
+    """One entry per excerpt, INDEX-ALIGNED with the [n] numbering the model is shown.
+
+    This is the mapping the UI needs and previously never got: the sources event emitted a sorted
+    SET of document names, so a "[2]" in the answer could not be resolved to anything — the numbers
+    were decoration. Emitting the ordered list makes each [n] a real, followable reference."""
+    out = []
+    for i, c in enumerate(chunks):
+        doc = c.get("document_keyword", "?")
+        page = _chunk_page(c)
+        text = c.get("content_with_weight") or c.get("content", "")
+        out.append({
+            "n": i + 1,
+            "doc": _pretty_doc(doc),
+            "docname": doc,
+            "page": page,
+            "chunk_id": c.get("id"),
+            "url": _cite_url(doc, page, query, text),
+        })
+    return out
 
 
 def _diversify(query: str, chunks: list, main: int = 18, cross: int = 4) -> list:
@@ -386,6 +537,7 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str):
         return
     chunks = _diversify(retrieval_query, chunks)
     yield ("sources", {"sources": sorted({c.get("document_keyword", "?") for c in chunks}),
+                       "citations": _citations(chunks, retrieval_query),
                        "reranked": reranked})
     context = "\n\n".join(
         f"[{i+1}] (source: {c.get('document_keyword','?')})\n"
@@ -423,7 +575,14 @@ def factcheck_stream(claim: str, url: str = "", title: str = ""):
 
 def vision_stream(image_data_url: str, prompt: str = ""):
     """Stream the qwen3-vl answer for a screenshotted region. NOT grounded — a direct look at the
-    pixels (read this diagram / transcribe this / what is this). Emits ('delta',…)* then ('done',{})."""
+    pixels (read this diagram / transcribe this / what is this). Emits ('delta',…)* then ('done',{}).
+
+    STUB while VL_ENABLED is false: fails fast with the reason instead of timing out on :18081.
+    The wire shape is identical either way, so the extension's card/⚓-ground flow needs no change
+    when the broker lands — only the env flag flips."""
+    if not VL_ENABLED:
+        yield ("error", {"error": VL_DISABLED_MSG, "reason": "vision_disabled"})
+        return
     prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
     msgs = [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": image_data_url}},
@@ -448,6 +607,12 @@ CTX_PATH = CORPUS / "inbox" / "context-memory.json"
 CTX_K = int(os.environ.get("ORACLE_CTX_SLOTS", "12"))            # fixed slot count (bounded memory)
 CTX_TAU = float(os.environ.get("ORACLE_CTX_TAU_HOURS", "12")) * 3600.0   # decay half-life-ish (s)
 CTX_MERGE = float(os.environ.get("ORACLE_CTX_MERGE", "0.60"))   # cosine >= this -> same slot
+# Weight ceiling. Merging accumulated w0+w1 without bound, and decay is multiplicative, so a topic
+# hit often enough became effectively immortal: it always outranked fresher slots at eviction and
+# took days to fade. That defeats the point of a *fading* memory — a bounded budget only stays
+# meaningful if new information can evict staler information (DESIGN §5.4: forgetting is the
+# mechanism, not a limitation). Saturating keeps "revisited often" strong but still mortal.
+CTX_WMAX = float(os.environ.get("ORACLE_CTX_WMAX", "8"))
 _ctx_lock = threading.Lock()
 
 
@@ -520,7 +685,7 @@ def observe(text: str, weight: float = 1.0, url: str = "", title: str = "") -> d
             w0, w1 = best["weight"], weight
             a = w1 / (w0 + w1) if (w0 + w1) else 0.5
             best["centroid"] = [(1 - a) * c + a * e for c, e in zip(best["centroid"], emb)]
-            best["weight"] = w0 + w1
+            best["weight"] = min(w0 + w1, CTX_WMAX)
             best["last_seen"] = now
             best["hits"] = best.get("hits", 1) + 1
             action = "merged"
@@ -546,7 +711,8 @@ def ctx_slots() -> dict:
         return {"slots": [{"label": s["label"], "weight": round(s["weight"], 3),
                            "hits": s.get("hits", 1), "pinned": s.get("pinned", False)} for s in slots],
                 "exclusions": mem.get("exclusions", []),
-                "params": {"K": CTX_K, "tau_hours": CTX_TAU / 3600.0, "merge": CTX_MERGE}}
+                "params": {"K": CTX_K, "tau_hours": CTX_TAU / 3600.0, "merge": CTX_MERGE,
+                           "wmax": CTX_WMAX}}
 
 
 def ctx_exclude(action: str, value: str) -> dict:
@@ -584,11 +750,12 @@ def ctx_pin(label: str, pinned: bool) -> dict:
 # ------------------------------------------------------------------ status
 
 def status() -> dict:
-    counts = {"pending": 0, "done": 0, "failed": 0}
+    counts = {"pending": 0, "done": 0, "duplicate": 0, "failed": 0}
     if CAPTURES.exists():
         for j in CAPTURES.glob("*.capture.json"):
             try:
-                counts[json.loads(j.read_text()).get("status", "pending")] += 1
+                st = json.loads(j.read_text()).get("status", "pending")
+                counts[st] = counts.get(st, 0) + 1
             except Exception:
                 pass
     ragflow_ok = synth_ok = False
@@ -607,6 +774,7 @@ def status() -> dict:
     except Exception:
         topics = 0
     return {"queue": counts, "ragflow": ragflow_ok, "synth": synth_ok,
+            "vision": VL_ENABLED, "vision_note": None if VL_ENABLED else VL_DISABLED_MSG,
             "dataset": DATASET, "captures_dir": str(CAPTURES), "port": PORT, "topics": topics}
 
 
@@ -615,8 +783,26 @@ def status() -> dict:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def _origin_ok(self) -> bool:
+        """Only the extension (or a local CLI) may drive this server.
+
+        Binding 127.0.0.1 keeps the LAN out, but it does NOT keep out a page you happen to be
+        visiting: an `http://` page can fetch `http://localhost:8788` (only `https://` is stopped by
+        mixed-content), and the old handler echoed whatever Origin it was given — so any such page
+        could POST /capture and write into the corpus, or read /slots and learn what you've been
+        reading. Captures become RAG answers, so an injection here is a corpus-poisoning vector,
+        which is the one class of bug this project exists to prevent.
+
+        Allowed: `chrome-extension://…` (the background worker) and requests with NO Origin at all
+        (curl, health checks) — a browser always sends Origin on cross-origin fetch, so permitting
+        its absence does not reopen the page vector."""
+        origin = self.headers.get("Origin")
+        return (not origin) or origin.startswith("chrome-extension://")
+
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin", "*"))
+        origin = self.headers.get("Origin")
+        if origin and origin.startswith("chrome-extension://"):
+            self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
@@ -661,6 +847,9 @@ class Handler(BaseHTTPRequestHandler):
         return parse_qs(urlparse(self.path).query).get(key, [default])[0]
 
     def do_GET(self):
+        if not self._origin_ok():
+            self._send({"error": "forbidden origin"}, 403)
+            return
         if self.path.startswith("/status"):
             self._send(status())
         elif self.path.startswith("/health"):
@@ -673,6 +862,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._origin_ok():
+            self._send({"error": "forbidden origin"}, 403)
+            return
         try:
             p = self._read_json()
             if self.path.startswith("/capture"):
