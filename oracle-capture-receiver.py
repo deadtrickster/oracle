@@ -50,6 +50,9 @@ from pathlib import Path
 RAGFLOW = os.environ.get("ORACLE_RAGFLOW_URL", "http://localhost:9380").rstrip("/")
 KEY = os.environ.get("ORACLE_RAGFLOW_KEY", "ragflow-smywlJs3drgGxfKztifTmD3iNJ2lP6Uvq2-suiLQTGM")
 OLLAMA = os.environ.get("ORACLE_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+# Embeddings (bge-m3) always come from OLLAMA proper (:11434) — NOT the synth URL, which in
+# production points at the llama.cpp qwen-next server (:18080) that has no /api/embed.
+EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 SYNTH_MODEL = os.environ.get("ORACLE_SYNTH_MODEL", "qwen3-coder:30b")
 RERANK_ID = os.environ.get("ORACLE_RERANK_ID", "gte-multilingual-reranker-base@local-gte-rerank@Jina")
 HOME = Path.home()
@@ -130,12 +133,19 @@ def save_capture(payload: dict) -> dict:
     url = (payload.get("url") or "").strip()
     title = (payload.get("title") or "").strip()
     html = payload.get("html") or ""
+    note = (payload.get("note") or "").strip()          # user's "why I kept this"
+    partial = bool(payload.get("partial"))              # selection-only capture
     captured_at = payload.get("captured_at") or datetime.now(timezone.utc).isoformat()
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     stem = f"{ts}-{_slug(title or url)}"
 
     md_body = html_to_markdown(html) if html else ""
-    header = f"# {title}\n\n> source: {url}\n> captured: {captured_at}\n\n---\n\n"
+    header = f"# {title}\n\n> source: {url}\n> captured: {captured_at}\n"
+    if partial:
+        header += "> capture: selection only\n"
+    if note:
+        header += f"> note: {note}\n"
+    header += "\n---\n\n"
     md_path = CAPTURES / f"{stem}.md"
     md_path.write_text(header + md_body, encoding="utf-8")
 
@@ -150,6 +160,7 @@ def save_capture(payload: dict) -> dict:
     record = {
         "stem": stem, "url": url, "title": title, "captured_at": captured_at,
         "md": str(md_path), "pdf": str(pdf_path) if pdf_path else None,
+        "note": note, "partial": partial,
         "dataset": DATASET, "chunk_method": "naive",
         "status": "pending", "attempts": 0, "doc_id": None, "error": None,
     }
@@ -157,6 +168,37 @@ def save_capture(payload: dict) -> dict:
     _drain_now.set()
     return {"ok": True, "stem": stem, "md": str(md_path),
             "pdf": bool(pdf_path), "md_chars": len(md_body)}
+
+
+def capture_job(stem: str) -> dict:
+    """Ingest-confirmation for one capture: the local job status, and — once uploaded — the RAGFlow
+    parse state + chunk count, so the extension can show 'parsed ✓ (N chunks)' instead of trusting
+    a fire-and-forget POST (Axiom 2: close the loop)."""
+    j = CAPTURES / f"{stem}.capture.json"
+    if not j.exists():
+        return {"error": "no such capture", "stem": stem}
+    rec = json.loads(j.read_text())
+    out = {"stem": stem, "status": rec.get("status"), "doc_id": rec.get("doc_id"),
+           "error": rec.get("error")}
+    if rec.get("status") == "done" and rec.get("doc_id"):
+        try:
+            dsid = _dataset_id(rec["dataset"], rec["chunk_method"])
+            page = 1
+            while True:
+                docs = _ragflow("GET", f"/datasets/{dsid}/documents?page={page}&page_size=100",
+                                timeout=30)["data"]["docs"]
+                hit = next((d for d in docs if d["id"] == rec["doc_id"]), None)
+                if hit:
+                    out["parse"] = hit.get("run")          # UNSTART/RUNNING/DONE/FAIL
+                    out["chunks"] = hit.get("chunk_count", 0)
+                    out["progress"] = hit.get("progress")
+                    break
+                if len(docs) < 100:
+                    break
+                page += 1
+        except Exception as e:
+            out["parse_error"] = str(e)[:200]
+    return out
 
 
 # ------------------------------------------------------------------ drainer (ingest pending -> RAGFlow)
@@ -290,23 +332,34 @@ def _chat_stream(messages, timeout: int = 300):
                 yield delta
 
 
+_GROUND_RULES = (
+    "using ONLY the provided documentation excerpts. Every specific claim (names, flags, sizes, "
+    "semantics, versions) must come from an excerpt, never your own knowledge; cite the excerpt "
+    "number/source for key claims. Write in the SAME language as the input; never switch languages "
+    "mid-answer. Tag code fences by language.")
+
 _EXPLAIN_SYSTEM = (
-    "You explain a term or passage the user selected while reading, using ONLY the provided "
-    "documentation excerpts. Protocol: (1) note which excerpts are relevant; (2) explain the "
-    "selection using ONLY facts present in them — every specific claim (names, flags, sizes, "
-    "semantics, versions) must come from an excerpt, never your own knowledge; (3) cite the "
-    "excerpt number/source for key claims; (4) if the excerpts do not explain it, reply exactly: "
-    "'The corpus doesn't cover this.' Be concise (a few sentences). Tag code fences by language. "
-    "Write your entire answer in the SAME language as the selection; never switch languages "
-    "mid-answer.")
+    "You explain a term or passage the user selected while reading, " + _GROUND_RULES +
+    " If the excerpts do not explain it, reply exactly: 'The corpus doesn't cover this.' Be concise "
+    "(a few sentences).")
+
+_ASK_SYSTEM = (
+    "You answer a documentation/API/concept question " + _GROUND_RULES +
+    " If the excerpts do not contain the answer, reply exactly: 'The corpus doesn't cover this.' "
+    "Be concise and direct.")
+
+_FACTCHECK_SYSTEM = (
+    "You fact-check a claim the user is reading against the corpus, " + _GROUND_RULES +
+    " START your reply with exactly one verdict tag on its own — [SUPPORTED], [CONTRADICTED], "
+    "[PARTIAL], or [NOT COVERED] — then a brief justification quoting the decisive excerpt. "
+    "[SUPPORTED]/[CONTRADICTED]/[PARTIAL] require excerpts that actually address the claim; if none "
+    "do, you MUST use [NOT COVERED] (the corpus is silent — never guess from your own knowledge).")
 
 
-def explain_stream(selection: str, url: str = "", title: str = ""):
-    """Grounded explain as a stream of (event, data) pairs the handler serialises to SSE:
-      ('sources', {sources, reranked})  once, after retrieval
-      ('delta',   {text})               repeatedly, as synthesis streams
-      ('done',    {})                   at the end
-      ('error',   {error})              on any failure (corpus/synth unreachable)
+def _grounded_stream(retrieval_query: str, framing: str, system: str):
+    """Shared retrieve→rerank→stream path behind /explain, /ask, /factcheck. Emits SSE (event, data)
+    pairs: ('sources',{sources,reranked}) once, then ('delta',{text})*, then ('done',{}) | ('error',…).
+    `retrieval_query` drives retrieval; `framing` is the task-specific instruction wrapping the input.
     """
     try:
         kb_ids = _kb_ids()
@@ -321,23 +374,22 @@ def explain_stream(selection: str, url: str = "", title: str = ""):
         yield ("delta", {"text": "The corpus has no parsed content yet."})
         yield ("done", {})
         return
-    chunks, reranked = _retrieve(selection, kb_ids)
+    chunks, reranked = _retrieve(retrieval_query, kb_ids)
     if not chunks:
         yield ("sources", {"sources": [], "reranked": reranked})
         yield ("delta", {"text": "The corpus doesn't cover this (no relevant passages retrieved)."})
         yield ("done", {})
         return
-    chunks = _diversify(selection, chunks)
+    chunks = _diversify(retrieval_query, chunks)
     yield ("sources", {"sources": sorted({c.get("document_keyword", "?") for c in chunks}),
                        "reranked": reranked})
     context = "\n\n".join(
         f"[{i+1}] (source: {c.get('document_keyword','?')})\n"
         f"{c.get('content_with_weight') or c.get('content','')}"
         for i, c in enumerate(chunks))
-    where = f" (seen on: {title or url})" if (title or url) else ""
-    user = f"Explain this selection{where}:\n\n\"\"\"\n{selection[:2000]}\n\"\"\"\n\nExcerpts:\n{context}"
+    user = f"{framing}\n\nExcerpts:\n{context}"
     try:
-        for delta in _chat_stream([{"role": "system", "content": _EXPLAIN_SYSTEM},
+        for delta in _chat_stream([{"role": "system", "content": system},
                                    {"role": "user", "content": user}]):
             yield ("delta", {"text": delta})
     except (urllib.error.URLError, ConnectionError, TimeoutError):
@@ -347,6 +399,163 @@ def explain_stream(selection: str, url: str = "", title: str = ""):
         yield ("error", {"error": f"synthesis error: {e}"})
         return
     yield ("done", {})
+
+
+def explain_stream(selection: str, url: str = "", title: str = ""):
+    where = f" (seen on: {title or url})" if (title or url) else ""
+    return _grounded_stream(
+        selection, f'Explain this selection{where}:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_SYSTEM)
+
+
+def ask_stream(question: str):
+    return _grounded_stream(question, f"Question: {question[:1000]}", _ASK_SYSTEM)
+
+
+def factcheck_stream(claim: str, url: str = "", title: str = ""):
+    where = f" (from: {title or url})" if (title or url) else ""
+    return _grounded_stream(
+        claim, f'Claim to check{where}:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM)
+
+
+# ------------------------------------------------------------------ oracle-context: fading-slot memory (H17 SENSOR)
+# NOTE: this is the SENSOR + inspectable memory only. It records what I'm exploring; it does NOT yet
+# feed reranking — that blend stays parked behind the gold-query eval gate (DESIGN §5.4 / TODO H17).
+
+CTX_PATH = CORPUS / "inbox" / "context-memory.json"
+CTX_K = int(os.environ.get("ORACLE_CTX_SLOTS", "12"))            # fixed slot count (bounded memory)
+CTX_TAU = float(os.environ.get("ORACLE_CTX_TAU_HOURS", "12")) * 3600.0   # decay half-life-ish (s)
+CTX_MERGE = float(os.environ.get("ORACLE_CTX_MERGE", "0.60"))   # cosine >= this -> same slot
+_ctx_lock = threading.Lock()
+
+
+def _embed(text: str):
+    j = _req("POST", f"{EMBED}/api/embed", data={"model": "bge-m3", "input": text[:2000]}, timeout=60)
+    v = j.get("embeddings") or j.get("embedding")
+    return v[0] if v and isinstance(v[0], list) else v
+
+
+def _cos(a, b) -> float:
+    s = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return s / (na * nb) if na and nb else 0.0
+
+
+def _ctx_load() -> dict:
+    if CTX_PATH.exists():
+        try:
+            return json.loads(CTX_PATH.read_text())
+        except Exception:
+            pass
+    return {"slots": [], "exclusions": []}
+
+
+def _ctx_save(mem: dict):
+    CTX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CTX_PATH.write_text(json.dumps(mem, indent=2))
+
+
+def _ctx_decay(mem: dict, now: float):
+    for s in mem["slots"]:
+        if s.get("pinned"):
+            continue
+        dt = max(0.0, now - s.get("last_seen", now))
+        s["weight"] = s.get("weight", 1.0) * (2.718281828 ** (-dt / CTX_TAU))
+
+
+def _excluded(mem: dict, url: str, title: str) -> bool:
+    hay = f"{url} {title}".lower()
+    return any(x and x.lower() in hay for x in mem.get("exclusions", []))
+
+
+def observe(text: str, weight: float = 1.0, url: str = "", title: str = "") -> dict:
+    """Fold a browsed/captured/explained topic into the fading-slot memory. Bounded (K slots),
+    decaying (exp), associative (similar topics merge instead of each burning a slot)."""
+    text = (text or "").strip()
+    if not text:
+        return {"skipped": "empty"}
+    with _ctx_lock:
+        mem = _ctx_load()
+        if _excluded(mem, url, title):
+            return {"skipped": "excluded"}
+        try:
+            emb = _embed(f"{title}\n{text}")
+        except Exception as e:
+            return {"skipped": f"embed-failed: {str(e)[:120]}"}
+        if not emb:
+            return {"skipped": "no-embedding"}
+        now = time.time()
+        _ctx_decay(mem, now)
+        label = (title.strip() or " ".join(text.split()[:6]))[:60]
+        best, best_sim = None, -1.0
+        for s in mem["slots"]:
+            sim = _cos(emb, s["centroid"])
+            if sim > best_sim:
+                best, best_sim = s, sim
+        if best is not None and best_sim >= CTX_MERGE:
+            # EMA merge (weight-blended) — the associative step
+            w0, w1 = best["weight"], weight
+            a = w1 / (w0 + w1) if (w0 + w1) else 0.5
+            best["centroid"] = [(1 - a) * c + a * e for c, e in zip(best["centroid"], emb)]
+            best["weight"] = w0 + w1
+            best["last_seen"] = now
+            best["hits"] = best.get("hits", 1) + 1
+            action = "merged"
+        else:
+            if len(mem["slots"]) >= CTX_K:
+                victim = min((s for s in mem["slots"] if not s.get("pinned")),
+                             key=lambda s: s["weight"], default=None)
+                if victim is not None:
+                    mem["slots"].remove(victim)
+            mem["slots"].append({"label": label, "centroid": emb, "weight": weight,
+                                 "last_seen": now, "hits": 1, "pinned": False})
+            action = "new"
+        _ctx_save(mem)
+        return {"action": action, "sim": round(best_sim, 3), "slots": len(mem["slots"])}
+
+
+def ctx_slots() -> dict:
+    with _ctx_lock:
+        mem = _ctx_load()
+        _ctx_decay(mem, time.time())
+        _ctx_save(mem)
+        slots = sorted(mem["slots"], key=lambda s: s["weight"], reverse=True)
+        return {"slots": [{"label": s["label"], "weight": round(s["weight"], 3),
+                           "hits": s.get("hits", 1), "pinned": s.get("pinned", False)} for s in slots],
+                "exclusions": mem.get("exclusions", []),
+                "params": {"K": CTX_K, "tau_hours": CTX_TAU / 3600.0, "merge": CTX_MERGE}}
+
+
+def ctx_exclude(action: str, value: str) -> dict:
+    with _ctx_lock:
+        mem = _ctx_load()
+        ex = mem.setdefault("exclusions", [])
+        value = (value or "").strip().lower()
+        if action == "add" and value and value not in ex:
+            ex.append(value)
+        elif action == "remove" and value in ex:
+            ex.remove(value)
+        _ctx_save(mem)
+        return {"exclusions": ex}
+
+
+def ctx_forget(label: str) -> dict:
+    with _ctx_lock:
+        mem = _ctx_load()
+        before = len(mem["slots"])
+        mem["slots"] = [s for s in mem["slots"] if s["label"] != label]
+        _ctx_save(mem)
+        return {"removed": before - len(mem["slots"])}
+
+
+def ctx_pin(label: str, pinned: bool) -> dict:
+    with _ctx_lock:
+        mem = _ctx_load()
+        for s in mem["slots"]:
+            if s["label"] == label:
+                s["pinned"] = pinned
+        _ctx_save(mem)
+        return {"ok": True}
 
 
 # ------------------------------------------------------------------ status
@@ -370,8 +579,12 @@ def status() -> dict:
         synth_ok = True
     except Exception:
         pass
+    try:
+        topics = len(_ctx_load().get("slots", []))
+    except Exception:
+        topics = 0
     return {"queue": counts, "ragflow": ragflow_ok, "synth": synth_ok,
-            "dataset": DATASET, "captures_dir": str(CAPTURES), "port": PORT}
+            "dataset": DATASET, "captures_dir": str(CAPTURES), "port": PORT, "topics": topics}
 
 
 # ------------------------------------------------------------------ http server
@@ -420,25 +633,54 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _query(self, key, default=""):
+        from urllib.parse import urlparse, parse_qs
+        return parse_qs(urlparse(self.path).query).get(key, [default])[0]
+
     def do_GET(self):
         if self.path.startswith("/status"):
             self._send(status())
         elif self.path.startswith("/health"):
             self._send({"ok": True})
+        elif self.path.startswith("/slots"):
+            self._send(ctx_slots())
+        elif self.path.startswith("/job"):
+            self._send(capture_job(self._query("stem")))
         else:
             self._send({"error": "not found"}, 404)
 
     def do_POST(self):
         try:
+            p = self._read_json()
             if self.path.startswith("/capture"):
-                self._send(save_capture(self._read_json()))
+                self._send(save_capture(p))
             elif self.path.startswith("/explain"):
-                p = self._read_json()
                 sel = (p.get("selection") or "").strip()
                 if not sel:
                     self._send({"error": "empty selection"}, 400)
                     return
                 self._send_sse(explain_stream(sel, p.get("url", ""), p.get("title", "")))
+            elif self.path.startswith("/ask"):
+                q = (p.get("question") or "").strip()
+                if not q:
+                    self._send({"error": "empty question"}, 400)
+                    return
+                self._send_sse(ask_stream(q))
+            elif self.path.startswith("/factcheck"):
+                claim = (p.get("claim") or p.get("selection") or "").strip()
+                if not claim:
+                    self._send({"error": "empty claim"}, 400)
+                    return
+                self._send_sse(factcheck_stream(claim, p.get("url", ""), p.get("title", "")))
+            elif self.path.startswith("/observe"):
+                self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
+                                   p.get("url", ""), p.get("title", "")))
+            elif self.path.startswith("/exclude"):
+                self._send(ctx_exclude(p.get("action", "add"), p.get("value", "")))
+            elif self.path.startswith("/forget"):
+                self._send(ctx_forget(p.get("label", "")))
+            elif self.path.startswith("/pin"):
+                self._send(ctx_pin(p.get("label", ""), bool(p.get("pinned", True))))
             elif self.path.startswith("/drain"):
                 _drain_now.set()
                 self._send(_drain_once())
