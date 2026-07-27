@@ -1155,6 +1155,10 @@ things actually happened — most beats are a thing I set out to do, the wall I 
     ~0.6) *are* the map of where the cheap classifier should defer to the expensive judge.
 
 ## Assets to include
+- **`docs/screenshots/explain-with-oracle.png`** — the money shot for Act 20: select a phrase on any
+  page, get a grounded explanation glued to the selection, every `[n]` a link to the source page.
+- **`docs/screenshots/fact-check.png`** — the same selection fact-checked, verdict chip first
+  (SUPPORTED), then the excerpts that support it. Pairs with the "grounding is a primitive" thread.
 - The rank-3→rank-1 rerank A/B (real output).
 - The mislabeled-LSN screenshot vs the grounded `ask_corpus` answer.
 - The resource-split diagram.

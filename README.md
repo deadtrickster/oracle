@@ -14,6 +14,18 @@ wrong answer *is the output*. Nearly every failure documented in this repo has t
 through every layer: parsers, tokenizers, retrieval, reranking, serving, prompts, and the models
 themselves.
 
+Select a phrase on any page and ask the corpus about it — offline, cited, with every `[n]` linking
+to the source page it came from:
+
+![Explain this with Oracle — a grounded, cited explanation glued to the selection](docs/screenshots/explain-with-oracle.png)
+
+The same selection can be **fact-checked** against the corpus instead, verdict first:
+
+![Fact-check this against Oracle — SUPPORTED, with the excerpts that support it](docs/screenshots/fact-check.png)
+
+Both answers are drawn *only* from the local corpus. If it doesn't cover the question, that is what
+they say — which is the entire point.
+
 ## The two axioms
 
 Everything in this repo that generalises past this machine is a corollary of these two
