@@ -61,6 +61,16 @@ Everything in this repo that generalises past this machine is a corollary of the
 - **The electricity company ran the durability test.** Power was cut mid-ingestion; the pipeline
   resumed from disk truth without losing a page. Every long-running job here is built to be
   killed.
+- **"We have nothing on Kubernetes," said the model — having not looked.** It has the whole official
+  k8s doc tree and two O'Reilly books. The confident inventory came from a list *I* had written
+  months earlier as *examples* in the system prompt — and a second copy in the corpus tool's own
+  docstring, which is prompt too, and never gets audited. A list in a prompt doesn't read as "for
+  example"; it reads as ground truth. The fix was deletion, and a rule: **a prompt may describe how
+  to use a tool; it must never describe what the data contains.**
+- **A frontier model hand-graded 10% of the corpus.** 24,832 chunks labelled across a nine-class
+  junk taxonomy — the training set for the CPU classifier that replaces the rule-and-judge
+  patchwork. The useful output wasn't the labels but the *uncertainty*: the three lowest-confidence
+  classes map exactly where a cheap classifier must defer to an expensive judge.
 
 ## Read this first
 
@@ -79,18 +89,26 @@ The code is the *result*; the documents are the *point*:
 ```
 GPU  (24 GB)   qwen3-coder:30b / Qwen3-Coder-Next (tuned llama.cpp, MoE offload)
                qwen3-vl:30b (vision: scanned-book transcription) · bge-m3 embeddings
-CPU / RAM      RAGFlow + DeepDoc parsing · Elasticsearch (243,900 chunks — counted, not believed) · GTE reranker
-               code-graph, ripgrep, LSP and ask_corpus/ask_code MCP servers
+CPU / RAM      RAGFlow + DeepDoc parsing · SereneDB doc store (Postgres-wire/DuckDB; migrated off
+               Elasticsearch, which still holds the 247,665-chunk snapshot — counted, not believed)
+               GTE reranker · code-graph, ripgrep, LSP and ask_corpus/ask_code MCP servers
 ```
 
 - **Corpus**: Rust, Go, C++, Linux/man-pages, io_uring, PostgreSQL (+ Russian Postgres Pro books),
-  DuckDB, Kubernetes, Emacs, ML textbooks, papers, and a 161-book tech-book collection — parsed,
-  curated, embedded, and page-mapped back to the original PDFs for one-click verification.
+  DuckDB, Kubernetes, Emacs, ML and biology textbooks, papers, and a large curated book shelf
+  (deduped down from ~420 candidates, then checked *again* against what was already ingested) —
+  parsed, curated, embedded, and page-mapped back to the original PDFs for one-click verification.
+  The list is illustrative and always out of date: what the corpus holds is a question you answer
+  by querying it, not by reading a list — see the Kubernetes note below.
 - **Grounding tools**: `ask_corpus` / `search_corpus` (retrieve + rerank + cite, or raw chunks),
   `ask_code` (grep-grounded source answers with a RAW SOURCE block), LSP tools ("compiler for
   truth, LLM for intent"), a corpus browser that renders the actual cited page.
 - **Local agent**: Claude Code driven by a local qwen through a translation shim that *salvages*
   malformed tool calls (closed-loop harness beats prompt exhortation — the repo's Axiom 2).
+- **Browse-time capture**: a Chrome extension + local receiver that ingests the *logged-in, rendered*
+  tab — the pages a server-side fetch can't reach — as clean Markdown, and answers "explain this" /
+  "fact-check this" from the corpus in a popup glued to the selection. Captures queue offline and
+  drain when the backend returns, so it works mid-flight with the stack off.
 - **Curation**: a rules→LLM-judge cascade that deletes retrieval poison (exercises, ToC, index,
   OCR garbage), a versioned labeling rubric with a human-in-the-loop labeling UI, and an
   in-progress trained junk classifier.

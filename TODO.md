@@ -622,6 +622,53 @@ gate: recency bias is this repo's cardinal poisoning failure wearing a mask, and
 backfired once (G4.1). The capture extension is the sensor it will need; the ranking blend waits for
 the number. (Protocol §5: a new idea goes to §H, not §G — the freeze is the feature.)
 
+### 2026-07-27 — Opus label fleet hit the 10% target: 24,832/24,766 ✅ (G3.8-LABELS)
+- **Approach:** resumed the parked fleet (13,307) and ran the single-writer loop to completion —
+  1,001 batches, two lanes concurrent, retiring each lane agent at ~130–160k tokens and
+  standing up a fresh one so no lane degraded. `--import` is the only DB writer; agents Read the
+  batch + rubric and Write one JSONL file; disk-truth resume by file presence.
+- **Result:** **24,832 opus labels** (target 24,766 = 10% of 247,665). Class mix 88.6% CLEAN; the
+  junk taxonomy is populated across all 8 non-clean classes (DEBRIS 759 … FIGURE_GARBAGE 119).
+  726 excision spans. This is now the G3.8 classifier's training set — and the low-confidence
+  classes (FIGURE_GARBAGE 0.58, BOILERPLATE 0.60, OCR_DAMAGED_CODE 0.67) map the uncertain band
+  where the classifier should defer to the judge.
+- **The harness caught every data-quality slip without a permission prompt** — the whole point of
+  the `--import` SHORT/REFUSED reporting added this run. Agents dropped `certainty` on confident
+  CLEAN rows (null) and miscounted 24-for-25; validation flagged each, I bounced the owning agent to
+  append the gap, re-imported (SHORT files aren't marked done, so no double-insert). One lane looped
+  forever on a monster single-line chunk; `TaskStop` + reassign to a fresh lane finished it in ~2 min.
+- **Lesson (the week's theme, again):** the failure modes were all *silent by default* — a missing
+  field, a short file, a stuck agent that keeps re-reading. Making `--import` say "SHORT 24/25 —
+  missing X" out loud is the same move as making the reranker's timeout visible (item 12): a
+  degradation nobody can observe is a bug with good PR.
+
+### 2026-07-27 — "the corpus has nothing on Kubernetes": a prompt EXAMPLE LIST read as INVENTORY 🔴→✅
+- **Symptom (his catch):** qwen answered a question about Kubernetes coverage *without calling a
+  tool*, asserting the corpus holds Rust/C++/etc but nothing on k8s. It holds the entire official
+  Kubernetes doc tree, *Kubernetes Patterns* (O'Reilly 2023) and *Cloud Native DevOps with
+  Kubernetes*; 443 labelled chunks mention kubernetes/kubectl, and `search_corpus` reranks
+  pod-security passages at **0.73/0.62/0.59**. The model had not looked — it recited our own text.
+- **Two stale lists, both written by us, both months out of date:**
+  1. `qwen.sh` DISCIPLINE route (A): *"(Rust std, io_uring semantics, PostgreSQL concepts, Go,
+     Linux, general knowledge)"* — meant as examples of question *kind*, read as library *contents*.
+  2. **`ask_corpus`'s docstring** — i.e. the MCP **tool description**, injected into every model's
+     context on every call: *"(Rust, io_uring, Linux, Go, PostgreSQL/OrioleDB, Emacs, git/bash/glibc
+     docs + books + papers)"*.
+- **Fix — subtraction, per A.1 ("removing prompt bias beats adding prompt rules"):** both lists
+  deleted. DISCIPLINE now states that corpus contents are an EMPIRICAL question — never claim a
+  topic is absent, query it, and only "ask_corpus returned nothing for X" licenses saying so, phrased
+  as a query result rather than a known fact. Tool description now says the corpus is large, general,
+  unlisted and *changing*. `shellcheck`/`shfmt`/`bash -n` clean; `oracle-ask-bridge` restarted so the
+  new description is actually published (descriptions are read at server start — editing the file is
+  not enough). Verified `~/bin/qwen` and `~/bin/qwen-next` both resolve to the fixed `qwen.sh`.
+- **The generalisable bit (DESIGN §9.0, third instance of this bug class):** we had been treating
+  DISCIPLINE as "the prompt" and docstrings as documentation — but **a tool description IS prompt**,
+  biases identically, and never gets audited because it doesn't live in the prompt file. Rule:
+  *a prompt may describe how to use a tool; it must never describe what the data contains.*
+- **Same rot found one layer up:** README claimed "Elasticsearch (243,900 chunks)" while production
+  is `DOC_ENGINE=serenedb` and ES holds **247,665** — a stale factual claim about our own
+  architecture, in the document that introduces it. Corrected.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy
@@ -713,22 +760,35 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       territory. **Sequencing:** assemble the labeled set anytime (read-only ES scan; judge
       calls at a quiet moment — they share the 30B with coding); train/score only after the collection
       ingest drains (CPU contention). DESIGN §4.3.
-- [ ] **G3.8-LABELS — Opus label fleet PARKED at 13,307/24,766 (53.7%) on 2026-07-24** (his call:
-      approaching weekly limit, resume later). The labeled set feeds the G3.8 classifier. State:
-      - **Resume: `cd ~/Projects/oracle` then loop `uv run label-fleet.py --import` → `--plan 1` →
-        hand the staged `corpus/labels/batches/b-<NNNN>.json` to a labeling agent → `--import`.**
-        Next batch to dispatch is **b-0541** (b-0540 imported). `python3 label-db.py fleet-stats`
-        for the live count/class histogram. Disk-truth resume: re-importing is idempotent.
+- [x] **G3.8-LABELS — Opus label fleet reached the 10% target: 24,832/24,766 on 2026-07-27** ✅
+      (parked at 13,307 on 2026-07-24 for the weekly limit; resumed and finished this session, 1,001
+      batches, incl. 2 spillover batches past the target for a round number). The labeled set is now
+      the G3.8 classifier's training corpus. Final state:
+      - **Class mix (24,832):** CLEAN **21,996 (88.6%)**, DEBRIS 759, OCR_DAMAGED_CODE 630,
+        EXERCISE 392, BIBLIOGRAPHY 374, INDEX 312, TOC 126, BOILERPLATE 124, FIGURE_GARBAGE 119.
+        726 chunks carry excision spans. `python3 label-db.py fleet-stats` for the live histogram.
+      - **Confidence:** 70% of rows ≥0.8 (10,169 at ≥0.9). Lowest-confidence classes are exactly the
+        boundary cases the agents kept flagging: **FIGURE_GARBAGE 0.58, BOILERPLATE 0.60,
+        OCR_DAMAGED_CODE 0.67** — two-column-merge, license-text, and prose-vs-damaged-code borders.
+        These are where the classifier's uncertain band (→ judge tie-break, per G3.8) should sit.
       - **Rubric lives at `./RUBRIC.md` (repo root), NOT `corpus/labels/RUBRIC.md`** — the old path
         in earlier prompts was wrong; agents only worked because they had it internalized.
-      - Agent protocol: Read+Write only, judge every chunk, ALL 25 rows or the importer refuses the
-        file; ignore the batch's `nominated` hints (unreliable — mostly wrong this run).
-      - This session hit the **200-agent spawn cap**, so the last ~90 batches ran by *resuming* two
-        agents (afa83cf09e, a71f509c) — their context balloons to ~1M tokens then the harness trims
-        it; near the ceiling they stall mid-write (recoverable: file is written atomically, re-import
-        or reassign). A fresh session resets the cap → back to fresh-agent-per-batch (cleaner).
-      - Class mix so far: ~87% CLEAN; lowest-confidence classes FIGURE_GARBAGE (0.56) and BOILERPLATE
-        (0.57) — the two-column-merge and license-text boundaries the agents keep flagging.
+      - Agent protocol: Read+Write only, judge every chunk, ALL N rows or the importer refuses; ignore
+        the batch's `nominated` hints (unreliable — mostly wrong this run).
+      - **Operational learnings from the resume run (fed back into label-fleet.py / the dispatch
+        prompt):**
+        - `--import` now reports **SHORT** batches (agent wrote 24/25, or missed chunk_ids) and
+          **REFUSED** batches (null-certainty rows) inline, so the operator never shells out an ad-hoc
+          `python3 -c` to find the gap (that tripped permission prompts). Bounce the owning agent to
+          *append* the missing row(s); SHORT files are NOT marked done, so re-import is safe (no
+          double-insert of the good rows).
+        - Two recurring agent failure modes: **dropping `certainty` on confident CLEAN rows** (reads
+          as null) and **miscounting 24-for-25**. Both are caught by import validation; the dispatch
+          prompt now says "explicit numeric certainty on EVERY row incl. confident CLEAN" and "count
+          the chunks, output exactly N — verify before finishing."
+        - Retire a lane agent at ~130–160k tokens and spawn a fresh one; past that they stall/re-read.
+          One lane looped forever on a single multi-K-token line (the `clip()` head+tail export exists
+          for exactly this) — `TaskStop` it and reassign the batch to a fresh lane.
 - [ ] **G3.9 — RE-OCR REPAIR for OCR_DAMAGED_CODE (his call 2026-07-22: "reocr is the way").**
       Damaged code (dropped glyphs `GridPa e`, digit swaps `R0UND`/`Fib(n-l)`, fullwidth `，`,
       column-interleaving) is the one junk class that is wrong IN THE PAYLOAD — and often the only
@@ -1037,6 +1097,19 @@ resolves it (DESIGN §4.5) — a **cheap→expensive cascade**, split into two p
       naive KB (chunk_method is per-dataset, can't mix book+naive in one KB).
 - [ ] **Verify the 67 MERGE groups** (`dedup-report.txt`) for within-KEEP dup filenames — deferred,
       not blocking; low risk (idempotent by filename within a KB; cross-KB overlap already handled).
+- [ ] **G5.2 — course-slides ingest strategy (2026-07-25, his call: pulled the 6 LTL course decks
+      back out of keep-books before they parsed, added this).** Slides are a **poor RAG modality** and
+      we need a general policy before ingesting any more. The reasoning (cite): (1) slides are sparse
+      bullet fragments + heavy figures + little connective prose → the `book` parser manufactures
+      exactly the **FIGURE_GARBAGE and fragmented-chunk** classes the G3.8 junk fleet exists to fight;
+      (2) they **lose to real books at retrieval** — a bullet reading "BM25" ranks on the term but
+      explains nothing, while Manning has the derivation → the "garbage shaped like the query" failure
+      (BLOG); worst on the very topics where we now have the best sources; (3) several were **French**
+      in a mostly-English/Russian corpus. Options to evaluate: (a) fast `naive`/pdftotext lane (skip
+      the figure-OCR that generates the garbage); (b) **hold slides until G3.8 demote-by-default** is
+      live so they enter score-demoted; (c) a slide-aware extraction (title + bullet-dedup + drop
+      figure boxes); (d) keep slides as on-disk reference only, never in RAG. Files kept at
+      `~/Documents/Books/LTL/Course-Material/` (6 merged per-course PDFs).
 - [ ] **Fix the 3 scripts hardcoding the TRUNCATED key** (`oracle-ingest-mcp.py`, `ingest-status.py`,
       `scratch-membership.py` → append `-suiLQTGM`); they currently 401. [[ragflow-api-key]]
 - [ ] **Rename KBs + on-disk organization — DEFERRED (his call 2026-07-24: "keep the rubrics for
