@@ -77,9 +77,13 @@
         .caret { display:inline-block; width:6px; height:1.05em; vertical-align:text-bottom;
           background:currentColor; opacity:.55; animation:bl 1s steps(2) infinite; margin-left:1px; }
         @keyframes bl { 50% { opacity:0; } }
+        .verdict { font-size:10px; font-weight:700; letter-spacing:.04em; padding:2px 6px;
+          border-radius:10px; color:#fff; }
+        .v-sup { background:#2e7d32; } .v-con { background:#c0392b; }
+        .v-par { background:#b7791f; } .v-non { background:#6b7280; }
       </style>
       <div class="card">
-        <div class="bar"><b>Oracle</b><button class="x" title="Close">×</button></div>
+        <div class="bar"><b class="ttl">Oracle</b><span class="verdict" hidden></span><button class="x" title="Close">×</button></div>
         <div class="body"></div>
       </div>`;
     bodyEl = root.querySelector(".body");
@@ -107,8 +111,8 @@
     window.addEventListener("mouseup", () => { drag = false; });
   }
 
-  // streaming state, reset each time a new explain starts
-  let acc = "", sources = null, reranked = true;
+  // streaming state, reset per invocation
+  let acc = "", sources = null, reranked = true, curMode = "explain";
 
   function esc(s) { return String(s).replace(/</g, "&lt;"); }
   function footer() {
@@ -116,18 +120,36 @@
     return `<div class="src">Grounded in: ${sources.map(esc).join(", ")}` +
            `${reranked ? "" : " (reranker busy)"}</div>`;
   }
+
+  const VERDICTS = {
+    "SUPPORTED": ["v-sup", "SUPPORTED"], "CONTRADICTED": ["v-con", "CONTRADICTED"],
+    "PARTIAL": ["v-par", "PARTIAL"], "NOT COVERED": ["v-non", "NOT COVERED"],
+  };
+  // fact-check answers start with a [VERDICT] tag — lift it into a colored chip, strip from body
+  function bodyText() {
+    if (curMode !== "factcheck") return acc;
+    const m = acc.match(/^\s*\[([A-Z ]+)\]/);
+    const chip = root && root.querySelector(".verdict");
+    if (m && chip) {
+      const v = VERDICTS[m[1].trim()];
+      if (v) { chip.className = "verdict " + v[0]; chip.textContent = v[1]; chip.hidden = false; }
+    }
+    return acc.replace(/^\s*\[[A-Z ]+\]\s*/, "");
+  }
   function paint(streaming) {
-    setBody(md(acc) + (streaming ? `<span class="caret"></span>` : "") + footer());
+    setBody(md(bodyText()) + (streaming ? `<span class="caret"></span>` : "") + footer());
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === "oracle:explain:loading") {
-      acc = ""; sources = null; reranked = true;
+    if (msg.type === "oracle:loading") {
+      acc = ""; sources = null; reranked = true; curMode = msg.mode || "explain";
       open();
-      setBody(`<p><span class="spin"></span> &nbsp;Consulting the corpus…</p>`);
+      root.querySelector(".ttl").textContent = curMode === "factcheck" ? "Oracle · fact-check" : "Oracle";
+      setBody(`<p><span class="spin"></span> &nbsp;${curMode === "factcheck"
+        ? "Checking against the corpus…" : "Consulting the corpus…"}</p>`);
       return;
     }
-    if (msg.type !== "oracle:explain:event") return;
+    if (msg.type !== "oracle:event") return;
     const { event, data } = msg.ev || {};
     if (event === "sources") {
       sources = data.sources || [];

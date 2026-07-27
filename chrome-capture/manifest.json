@@ -5,6 +5,7 @@
   "description": "Capture the live page (clean Markdown + PDF) into your offline Oracle corpus, and 'Explain this' from the corpus in a glued popup.",
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting",
     "debugger",
     "contextMenus",
@@ -13,12 +14,19 @@
     "alarms"
   ],
   "host_permissions": [
-    "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["dwell.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
