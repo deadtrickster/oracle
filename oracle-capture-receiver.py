@@ -656,9 +656,53 @@ def factcheck_stream(claim: str, url: str = "", title: str = ""):
 
 
 VL_CTX_CHARS = int(os.environ.get("ORACLE_VL_CTX_CHARS", "4000"))
+# Above this many characters, a raw page dump is worth compressing before it is handed to the
+# vision model — a long dashboard page is mostly nav, filters and repeated legends.
+VL_SUMMARIZE_OVER = int(os.environ.get("ORACLE_VL_SUMMARIZE_OVER", "2500"))
+
+# Deliberately describes the JOB, not a list of things to find. An earlier version enumerated
+# dashboard nouns (panel titles, metric names, units, time range) because the first use case was
+# Grafana — and an enumeration in a prompt does not read as "for example", it reads as the whole
+# task, so the model would have gone hunting for axes on a page that holds a code diff or a figure.
+# Same bug as the hardcoded project names and the stale corpus inventory: the fix is to state the
+# goal and let the model decide what satisfies it, for any kind of page.
+_VL_BRIEF_SYSTEM = (
+    "You prepare a short briefing that will be given to a VISION model along with a screenshot "
+    "cropped from this page. Ask yourself: what would a person need to have read on this page in "
+    "order to correctly interpret that image — to know what it depicts, what its labels and numbers "
+    "mean, and what it is part of? Write down exactly that, and nothing else. Keep proper nouns, "
+    "identifiers, units and figures verbatim; they are the parts an image cannot supply. Leave out "
+    "navigation, controls, boilerplate, and anything that describes nothing visible. No preamble, "
+    "no conclusion. If the page offers nothing that would help interpret an image from it, reply "
+    "exactly: NO USEFUL CONTEXT."
+)
 
 
-def _vl_context(url: str, title: str, page_text: str) -> str:
+def _summarize_for_vl(page_text: str, url: str, title: str) -> str:
+    """Compress the page into a briefing for the vision model — using the TEXT model.
+
+    Ordering is the point: this runs BEFORE the swap to vision, while the text model is still
+    resident, so it is free. Doing it the obvious way (swap to VL, discover the context is huge,
+    swap back to summarise, swap forward again) would cost two extra ~40 s swaps to save tokens.
+
+    If the text model is NOT currently resident we skip it rather than swapping in to summarise:
+    that would trade a cheap truncation for a minute of loading. Truncation is the fallback, so
+    this is an optimisation that can always decline."""
+    t = " ".join((page_text or "").split())
+    if len(t) < VL_SUMMARIZE_OVER or not text_available():
+        return ""
+    user = (f"Page title: {title}\nPage URL: {url}\n\nPage text:\n{t[:12000]}")
+    try:
+        out = "".join(_chat_stream(
+            [{"role": "system", "content": _VL_BRIEF_SYSTEM}, {"role": "user", "content": user}],
+            timeout=120, max_tokens=400))
+    except Exception:
+        return ""
+    out = out.strip()
+    return "" if (not out or "NO USEFUL CONTEXT" in out.upper()) else out
+
+
+def _vl_context(url: str, title: str, page_text: str, summarized: bool = False) -> str:
     """Text context to put in FRONT of the screenshot.
 
     A cropped region carries almost no self-description: a Grafana panel is a line and some axis
@@ -675,10 +719,13 @@ def _vl_context(url: str, title: str, page_text: str) -> str:
         parts.append(f"Page URL: {url.strip()}")
     t = " ".join((page_text or "").split())
     if t:
-        if len(t) > VL_CTX_CHARS:
-            head, tail = VL_CTX_CHARS * 2 // 3, VL_CTX_CHARS // 3
-            t = t[:head] + " …[middle elided]… " + t[-tail:]
-        parts.append(f"Text visible on the page (may be truncated):\n{t}")
+        if summarized:
+            parts.append(f"What this page describes (summarised from the page):\n{t}")
+        else:
+            if len(t) > VL_CTX_CHARS:
+                head, tail = VL_CTX_CHARS * 2 // 3, VL_CTX_CHARS // 3
+                t = t[:head] + " …[middle elided]… " + t[-tail:]
+            parts.append(f"Text visible on the page (may be truncated):\n{t}")
     if not parts:
         return ""
     return ("Context for the image below — the region was screenshotted from this page. Use it to "
@@ -695,6 +742,15 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
     STUB while VL_ENABLED is false: fails fast with the reason instead of timing out on :18081.
     The wire shape is identical either way, so the extension's card/⚓-ground flow needs no change
     when the broker lands — only the env flag flips."""
+    # STEP 1, before any swap: if the page is long and the text model is still resident, have it
+    # write the briefing now. This is the only moment it is free.
+    brief, summarized = "", False
+    if page_text and len(page_text) >= VL_SUMMARIZE_OVER and text_available():
+        yield ("status", {"text": "summarising the page with the text model…"})
+        brief = _summarize_for_vl(page_text, url, title)
+        summarized = bool(brief)
+
+    # STEP 2: now swap to vision.
     try:
         for note in ensure_model("vl"):
             yield ("status", {"text": note})
@@ -702,7 +758,7 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
         yield ("error", {"error": f"{e}\n\n{VL_DISABLED_MSG}", "reason": "vision_unavailable"})
         return
     prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
-    ctx = _vl_context(url, title, page_text)
+    ctx = _vl_context(url, title, brief or page_text, summarized)
     # Order matters: context, then the image, then the question. The text frames what the pixels
     # are before the model looks at them; the question stays last so it is the most recent thing.
     content = ([{"type": "text", "text": ctx}] if ctx else []) + [
