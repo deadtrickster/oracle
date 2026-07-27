@@ -4,6 +4,15 @@ A Chrome (MV3) extension that feeds Oracle from the one place server-side `fetch
 **your logged-in, already-rendered browser tab** — and answers questions **from your corpus only**.
 One tiny local receiver (`../oracle-capture-receiver.py`, stdlib, binds `127.0.0.1:8788`) backs it.
 
+![Explain this with Oracle](../docs/screenshots/explain-with-oracle.png)
+
+*Select a phrase, get a grounded explanation glued to the selection. Every `[n]` is a link to a
+footnote, and every footnote opens the corpus browser at the page the claim came from.*
+
+![Fact-check this against Oracle](../docs/screenshots/fact-check.png)
+
+*The same selection, fact-checked instead: verdict chip first, then the excerpts that support it.*
+
 ## Features
 
 **1. Capture → corpus.** Turn the live DOM into clean Markdown (the **same trafilatura** `fetch_url`
