@@ -11,7 +11,7 @@ set -uo pipefail
 DOCKER_DIR="$HOME/Projects/oracle/ragflow/docker"
 SERVICES=(oracle-ask-bridge oracle-lsp-bridge oracle-claude-shim oracle-ingest-bridge oracle-browser
           oracle-reranker codebase-memory-bridge source-grep-bridge emacs-bridge git-bridge
-          oracle-docs)
+          oracle-docs oracle-capture)
 MODELS=(qwen3-coder:30b bge-m3 codestral)
 
 free_vram() {

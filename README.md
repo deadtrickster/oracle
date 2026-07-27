@@ -26,6 +26,16 @@ The same selection can be **fact-checked** against the corpus instead, verdict f
 Both answers are drawn *only* from the local corpus. If it doesn't cover the question, that is what
 they say — which is the entire point.
 
+Drag a rectangle over anything on screen and a local **vision** model reads it — a Grafana panel, a
+diagram, a scanned page. The GPU holds one big model at a time, so the request swaps qwen3-vl in and
+the text model out automatically, then swaps back:
+
+![Screenshot a region → Oracle vision, reading a Grafana dashboard](docs/screenshots/vision-grafana.png)
+
+Note what it knows: the dashboard's **ID 24298** and `pg_exporter` appear nowhere in those pixels —
+they come from the page's own text, which is sent with the image. The instance values (17.6.0,
+4.19 GB, 40.9 MB) it reads off the crop.
+
 ## The two axioms
 
 Everything in this repo that generalises past this machine is a corollary of these two

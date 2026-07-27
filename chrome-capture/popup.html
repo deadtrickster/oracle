@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body { width: 320px; margin: 0; font: 13px/1.45 -apple-system, Segoe UI, Roboto, sans-serif;
+    color: #1a1a1a; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #e6e6e6; } }
+  header { padding: 9px 12px; font-weight: 600; border-bottom: 1px solid rgba(128,128,128,.25);
+    display: flex; align-items: center; gap: 8px; }
+  header .dots { margin-left: auto; display: flex; gap: 5px; }
+  section { padding: 10px 12px; border-bottom: 1px solid rgba(128,128,128,.18); }
+  h2 { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; opacity: .55;
+    margin: 0 0 7px; font-weight: 700; }
+  button { border: 0; border-radius: 7px; font: inherit; font-weight: 600; cursor: pointer; padding: 7px 9px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .primary { background: #128a86; color: #fff; }
+  .ghost { background: rgba(128,128,128,.15); color: inherit; }
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+  input[type=text], textarea { width: 100%; box-sizing: border-box; border: 1px solid rgba(128,128,128,.4);
+    border-radius: 7px; padding: 6px 8px; font: inherit; background: transparent; color: inherit; resize: vertical; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #bbb; }
+  .dot.ok { background: #2e7d32; } .dot.bad { background: #c0392b; }
+  #answer { margin-top: 8px; font-size: 12.5px; max-height: 220px; overflow: auto; }
+  #answer:empty { display: none; }
+  #answer pre { background: rgba(128,128,128,.15); padding: 6px; border-radius: 6px; overflow: auto; }
+  #answer code { background: rgba(128,128,128,.15); padding: 1px 4px; border-radius: 4px; font-family: ui-monospace, monospace; }
+  #answer .src { margin-top: 6px; font-size: 11px; opacity: .65; }
+  /* citation styles come from cite.js (OracleCite.CSS), injected once at startup so the popup and
+     the in-page overlay render footnotes identically from one definition. */
+  .msg { font-size: 12px; opacity: .8; min-height: 15px; margin-top: 6px; }
+  label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 8px; cursor: pointer; }
+  .topic { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-size: 12px; }
+  .topic .bar { height: 6px; background: #128a86; border-radius: 3px; min-width: 2px; }
+  .topic .lbl { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topic button, .excl button { padding: 1px 6px; font-size: 11px; }
+  .excl { display: flex; align-items: center; gap: 6px; font-size: 11px; margin: 3px 0; }
+  .excl .v { flex: 1; opacity: .8; font-family: ui-monospace, monospace; }
+  .caret { display:inline-block; width:6px; height:1em; background:currentColor; opacity:.55;
+    animation: bl 1s steps(2) infinite; vertical-align: text-bottom; }
+  @keyframes bl { 50% { opacity: 0; } }
+  .spin { display:inline-block; width:11px; height:11px; border:2px solid rgba(128,128,128,.4);
+    border-top-color:#888; border-radius:50%; animation: sp .8s linear infinite; vertical-align: -1px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .empty { font-size: 11px; opacity: .5; }
+</style>
+</head>
+<body>
+  <header>
+    Oracle Capture
+    <span class="dots">
+      <span class="dot" id="d-recv" title="receiver"></span>
+      <span class="dot" id="d-rag" title="RAGFlow (ingest)"></span>
+      <span class="dot" id="d-syn" title="synth (ask/explain)"></span>
+      <span class="dot" id="d-vl" title="vision"></span>
+    </span>
+  </header>
+
+  <section>
+    <h2>Ask the corpus</h2>
+    <div class="row">
+      <input type="text" id="q" placeholder="Ask a grounded question…">
+      <button class="primary" id="ask" style="flex:0 0 auto">Ask</button>
+    </div>
+    <div id="answer"></div>
+  </section>
+
+  <section>
+    <h2>Capture</h2>
+    <input type="text" id="note" placeholder="Optional note (why you're keeping this)…">
+    <div class="row" style="margin-top:6px">
+      <button class="primary" id="capture">Capture this page</button>
+      <button class="ghost" id="batch" style="flex:0 0 auto">All tabs</button>
+    </div>
+    <button class="ghost" id="shot" style="width:100%;margin-top:6px">Screenshot a region → vision</button>
+    <div class="msg" id="cap-msg"></div>
+    <label class="chk"><input type="checkbox" id="pdf" checked> attach PDF (shows a debug banner)</label>
+  </section>
+
+  <section>
+    <h2>Topics in memory <span id="topic-params" style="opacity:.5;font-weight:400"></span></h2>
+    <div id="topics"><span class="empty">none yet</span></div>
+    <div class="row" style="margin-top:8px">
+      <button class="ghost" id="exclude-site">Exclude this site</button>
+      <button class="ghost" id="refresh-topics" style="flex:0 0 auto">↻</button>
+    </div>
+    <div id="exclusions" style="margin-top:8px"></div>
+  </section>
+
+  <section>
+    <button class="ghost" id="drain" style="width:100%">Retry queued captures (<span id="qn">0</span>)</button>
+  </section>
+
+  <!-- classic first: defines globalThis.OracleCite, which the module below consumes.
+       Shared verbatim with the injected in-page overlay, which cannot use ES imports. -->
+  <script src="cite.js"></script>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
