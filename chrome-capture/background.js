@@ -2,6 +2,8 @@
 // ALL network to the receiver happens here (extension origin) — never in the page, because an
 // https page cannot fetch http://localhost (mixed-content block). The page only ever gets DOM.
 
+import { pumpSSE } from "./sse.js";
+
 const RECEIVER = "http://127.0.0.1:8788";
 const QUEUE_KEY = "oracleQueue";      // captures that never reached the receiver (laptop app off)
 const PDF_KEY = "oracleCapturePdf";   // user toggle: attach a print-to-PDF (default on)
@@ -53,7 +55,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-chrome.alarms.create("drain", { periodInMinutes: 1 });
+// The offline queue drains on a periodic alarm. Creating it at top level looked right but is an
+// MV3 trap: this worker is torn down and restarted on EVERY event (a dwell message, a menu click,
+// the alarm itself), and `alarms.create` with an existing name REPLACES it — restarting the
+// countdown. While browsing, the worker wakes far more often than once a minute, so the alarm
+// could be reset forever and never fire: queued captures would sit there until a manual drain,
+// silently breaking the "it all lands when the backend comes back" promise. Create it only if it
+// isn't already scheduled, and (re)assert it on the two lifecycle events that actually matter.
+async function ensureDrainAlarm() {
+  if (!(await chrome.alarms.get("drain"))) {
+    chrome.alarms.create("drain", { periodInMinutes: 1 });
+  }
+}
+chrome.runtime.onInstalled.addListener(ensureDrainAlarm);
+chrome.runtime.onStartup.addListener(ensureDrainAlarm);
+ensureDrainAlarm();
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === "drain") drainQueue(); });
 
 // ---------------------------------------------------------------- capture
@@ -175,7 +191,7 @@ async function ground(tab, mode, selection) {
   selection = (selection || "").trim();
   if (!scriptableTab(tab) || !selection) return;
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["overlay.js"] });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
     await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode, selection });
   } catch (_) { return; }
   observe(selection, OBS[mode] || 0.8, tab.url, tab.title);
@@ -199,6 +215,13 @@ async function ground(tab, mode, selection) {
 
 async function screenshotRegion(tab) {
   if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
+  // Ask the receiver whether vision is actually available before making the user drag a rectangle.
+  // The GPU holds the text model OR qwen3-vl, never both, so vision ships disabled until the VRAM
+  // broker exists — say that up front rather than after the selection dance.
+  try {
+    const st = await (await fetch(RECEIVER + "/status")).json();
+    if (st && st.vision === false) { notify(st.vision_note || "Vision is disabled on this machine."); return; }
+  } catch (_) { /* receiver down — fall through; the card will report it */ }
   try {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["regionselect.js"] });
   } catch (e) { notify("Region select failed: " + e.message); }
@@ -225,7 +248,7 @@ async function visionRegion(msg, tab) {
     canvas.getContext("2d").drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
     const b64 = await blobToB64(await canvas.convertToBlob({ type: "image/png" }));
     thumb = "data:image/png;base64," + b64;
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["overlay.js"] });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
     await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
     const r = await fetch(RECEIVER + "/vision", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -236,7 +259,7 @@ async function visionRegion(msg, tab) {
   } catch (e) {
     // make sure the card exists to show the error
     try {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["overlay.js"] });
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
       await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
     } catch (_) {}
     send({ event: "error", data: { error: "Vision failed: " + (e.message || e) + " (is the receiver + qwen3-vl up?)" } });
@@ -273,32 +296,6 @@ function observe(text, weight, url, title) {
 }
 
 // ---------------------------------------------------------------- SSE + badge + notify
-
-async function pumpSSE(stream, send) {
-  const reader = stream.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf("\n\n")) >= 0) {
-      const ev = parseSSE(buf.slice(0, i));
-      buf = buf.slice(i + 2);
-      if (ev) send(ev);
-    }
-  }
-}
-function parseSSE(chunk) {
-  let event = "message", data = "";
-  for (const line of chunk.split("\n")) {
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) data += line.slice(5).trim();
-  }
-  if (!data) return null;
-  try { return { event, data: JSON.parse(data) }; } catch (_) { return null; }
-}
 
 async function refreshBadge() {
   const n = (await getQueue()).length;

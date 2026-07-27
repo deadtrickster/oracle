@@ -28,6 +28,8 @@
   #answer pre { background: rgba(128,128,128,.15); padding: 6px; border-radius: 6px; overflow: auto; }
   #answer code { background: rgba(128,128,128,.15); padding: 1px 4px; border-radius: 4px; font-family: ui-monospace, monospace; }
   #answer .src { margin-top: 6px; font-size: 11px; opacity: .65; }
+  /* citation styles come from cite.js (OracleCite.CSS), injected once at startup so the popup and
+     the in-page overlay render footnotes identically from one definition. */
   .msg { font-size: 12px; opacity: .8; min-height: 15px; margin-top: 6px; }
   label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 8px; cursor: pointer; }
   .topic { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-size: 12px; }
@@ -52,6 +54,7 @@
       <span class="dot" id="d-recv" title="receiver"></span>
       <span class="dot" id="d-rag" title="RAGFlow (ingest)"></span>
       <span class="dot" id="d-syn" title="synth (ask/explain)"></span>
+      <span class="dot" id="d-vl" title="vision"></span>
     </span>
   </header>
 
@@ -90,6 +93,9 @@
     <button class="ghost" id="drain" style="width:100%">Retry queued captures (<span id="qn">0</span>)</button>
   </section>
 
-  <script src="popup.js"></script>
+  <!-- classic first: defines globalThis.OracleCite, which the module below consumes.
+       Shared verbatim with the injected in-page overlay, which cannot use ES imports. -->
+  <script src="cite.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

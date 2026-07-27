@@ -1,3 +1,5 @@
+import { pumpSSE } from "./sse.js";
+
 const RECEIVER = "http://127.0.0.1:8788";
 const PDF_KEY = "oracleCapturePdf";
 const $ = (id) => document.getElementById(id);
@@ -13,16 +15,6 @@ function md(t) {
   return "<p>" + s + "</p>";
 }
 
-function parseSSE(chunk) {
-  let event = "message", data = "";
-  for (const line of chunk.split("\n")) {
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) data += line.slice(5).trim();
-  }
-  if (!data) return null;
-  try { return { event, data: JSON.parse(data) }; } catch (_) { return null; }
-}
-
 async function activeTab() {
   const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
   return t;
@@ -35,11 +27,23 @@ async function ask() {
   if (!q) return;
   $("ask").disabled = true;
   const out = $("answer");
-  let acc = "", sources = null;
+  let acc = "", sources = null, citations = null, errored = false;
   const paint = (streaming) => {
-    const src = sources && sources.length
+    // [n] markers become superscript links to a footnote list; each footnote links into the corpus
+    // browser at the page the claim came from. linkify runs on the RENDERED html (md() has already
+    // escaped the text), so the anchors it inserts are the only markup added.
+    let body = md(acc);
+    let notes = "";
+    if (citations && citations.length) {
+      const pl = OracleCite.plan(acc, citations);   // excerpt -> sequential display number
+      body = OracleCite.linkify(body, pl, "ask");
+      if (!streaming) notes = OracleCite.footnotes(pl, "ask");
+    }
+    // While streaming, a half-written answer has no stable footnote set, so show the plain source
+    // line and swap in the numbered list once the answer is complete.
+    const src = streaming && sources && sources.length
       ? `<div class="src">Grounded in: ${sources.map(esc).join(", ")}</div>` : "";
-    out.innerHTML = md(acc) + (streaming ? '<span class="caret"></span>' : "") + src;
+    out.innerHTML = body + (streaming ? '<span class="caret"></span>' : "") + src + notes;
   };
   out.innerHTML = '<p><span class="spin"></span> &nbsp;Consulting the corpus…</p>';
   try {
@@ -47,22 +51,15 @@ async function ask() {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q }),
     });
     if (!r.ok || !r.body) { out.innerHTML = "<p>receiver error " + r.status + "</p>"; $("ask").disabled = false; return; }
-    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf("\n\n")) >= 0) {
-        const ev = parseSSE(buf.slice(0, i)); buf = buf.slice(i + 2);
-        if (!ev) continue;
-        if (ev.event === "sources") sources = ev.data.sources || [];
-        else if (ev.event === "delta") { acc += ev.data.text || ""; paint(true); }
-        else if (ev.event === "done") paint(false);
-        else if (ev.event === "error") out.innerHTML = "<p>" + esc(ev.data.error) + "</p>";
-      }
-    }
-    paint(false);
+    await pumpSSE(r.body, (ev) => {
+      if (ev.event === "sources") { sources = ev.data.sources || []; citations = ev.data.citations || []; }
+      else if (ev.event === "delta") { acc += ev.data.text || ""; paint(true); }
+      else if (ev.event === "done") paint(false);
+      else if (ev.event === "error") { errored = true; out.innerHTML = "<p>" + esc(ev.data.error) + "</p>"; }
+    });
+    // Only repaint if no error was shown: the final paint() would otherwise overwrite the error
+    // with an empty answer, turning "the corpus backend is unreachable" into a blank box.
+    if (!errored) paint(false);
   } catch (_) {
     out.innerHTML = "<p>Oracle receiver offline — start oracle-capture-receiver.py.</p>";
   }
@@ -72,10 +69,20 @@ async function ask() {
 // ---------------------------------------------------------------- capture + ingest confirmation
 
 async function pollJob(stem, tries = 12) {
+  // Every terminal state must be REPORTED, not spun on: a duplicate name (already in the KB) and a
+  // parse FAIL both used to sit on "queued for ingest…" and then claim "still running" — a capture
+  // that never landed, shown as one that did.
   for (let i = 0; i < tries; i++) {
     try {
       const j = await (await fetch(RECEIVER + "/job?stem=" + encodeURIComponent(stem))).json();
       if (j.status === "failed") { $("cap-msg").textContent = "ingest failed: " + (j.error || "?"); return; }
+      if (j.parse === "FAIL") { $("cap-msg").textContent = "parse FAILED in RAGFlow — not retrievable"; return; }
+      if (j.status === "duplicate") {
+        $("cap-msg").textContent = j.parse === "DONE"
+          ? `already in the corpus (${j.chunks} chunks) — not re-ingested`
+          : "already in the corpus — not re-ingested";
+        return;
+      }
       if (j.parse === "DONE") { $("cap-msg").textContent = `parsed ✓ (${j.chunks} chunks) — retrievable`; return; }
       if (j.status === "done") $("cap-msg").innerHTML = '<span class="spin"></span> parsing…';
       else $("cap-msg").innerHTML = '<span class="spin"></span> queued for ingest…';
@@ -150,8 +157,12 @@ async function refreshStatus() {
     $("d-recv").className = "dot ok";
     $("d-rag").className = "dot " + (s.ragflow ? "ok" : "bad");
     $("d-syn").className = "dot " + (s.synth ? "ok" : "bad");
+    // Vision is deliberately off (VRAM is exclusive), so it stays grey-with-a-reason rather than
+    // red: "off on purpose" and "broken" must not look the same.
+    $("d-vl").className = "dot" + (s.vision ? " ok" : "");
+    $("d-vl").title = s.vision ? "vision (qwen3-vl)" : (s.vision_note || "vision disabled");
   } catch (_) {
-    ["d-recv", "d-rag", "d-syn"].forEach((id) => $(id).className = "dot bad");
+    ["d-recv", "d-rag", "d-syn", "d-vl"].forEach((id) => $(id).className = "dot bad");
   }
 }
 
@@ -182,6 +193,9 @@ $("refresh-topics").addEventListener("click", loadTopics);
 
 chrome.storage.local.get(PDF_KEY).then((v) => { $("pdf").checked = v[PDF_KEY] !== false; });
 $("pdf").addEventListener("change", (e) => chrome.storage.local.set({ [PDF_KEY]: e.target.checked }));
+
+// One definition of the citation styling, shared with the overlay (see cite.js).
+document.head.appendChild(Object.assign(document.createElement("style"), { textContent: OracleCite.CSS }));
 
 refreshStatus();
 loadTopics();

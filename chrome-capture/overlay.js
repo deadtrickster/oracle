@@ -51,6 +51,9 @@
     place();
     root.innerHTML = `
       <style>
+        ${OracleCite.CSS}
+        /* :target does not fire inside a shadow root, so the jump highlight is class-driven */
+        .oc-fn.oc-hit { background: rgba(255,220,80,.35); border-radius: 3px; }
         .card { width:400px; max-width:92vw; max-height:60vh; overflow:auto;
           font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
           background:#fff; color:#1a1a1a; border:1px solid #d0d0d0; border-radius:10px;
@@ -97,7 +100,22 @@
   }
 
   function setBody(html) {
-    if (bodyEl) bodyEl.innerHTML = html;
+    if (!bodyEl) return;
+    bodyEl.innerHTML = html;
+    // A [n] link cannot use href="#fn" here: this card lives in a Shadow DOM, where fragment
+    // navigation is a no-op (the browser would look for the id in the HOST document and, failing
+    // that, jump the page). Scroll to the footnote inside the shadow root ourselves, and highlight
+    // it briefly so the eye lands on the right line.
+    bodyEl.querySelectorAll("a[data-oc-fn]").forEach((a) => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        const t = bodyEl.querySelector(`#${CSS.escape(a.getAttribute("href").slice(1))}`);
+        if (!t) return;
+        t.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        t.classList.add("oc-hit");
+        setTimeout(() => t.classList.remove("oc-hit"), 1400);
+      });
+    });
   }
 
   function makeDraggable(handle) {
@@ -122,6 +140,8 @@
   let acc = "", sources = null, reranked = true, curMode = "explain", thumb = null, primaryDone = false;
   // grounded sub-stream (vision → "Ground this in the corpus")
   let gStarted = false, gStreaming = false, gDone = false, gAcc = "", gSources = null, gReranked = true;
+  // index-aligned [n] -> {doc,page,url} for the primary answer and the grounded sub-answer
+  let cites = null, gCites = null;
 
   function esc(s) { return String(s).replace(/</g, "&lt;"); }
   function thumbHtml() {
@@ -149,17 +169,29 @@
     return acc.replace(/^\s*\[[A-Z ]+\]\s*/, "");
   }
 
+  // Wikipedia-style: [n] in the prose becomes a superscript link to a footnote, and the footnote
+  // links into the corpus browser at the page the claim came from. Footnotes are rendered only when
+  // the answer is COMPLETE — a half-streamed answer has no stable set of cited numbers.
+  function withCites(text, citeList, prefix, done) {
+    let body = md(text);
+    if (!citeList || !citeList.length) return body;
+    const pl = OracleCite.plan(text, citeList);   // excerpt -> sequential display number
+    body = OracleCite.linkify(body, pl, prefix);
+    return done ? body + OracleCite.footnotes(pl, prefix) : body;
+  }
+
   function render() {
-    let h = thumbHtml() + md(bodyText());
-    h += primaryDone ? footer(sources, reranked) : CARET;
+    let h = thumbHtml() + withCites(bodyText(), cites, "oc", primaryDone);
+    // the plain "Grounded in:" line is redundant once numbered footnotes are shown
+    h += primaryDone ? ((cites && cites.length) ? "" : footer(sources, reranked)) : CARET;
     // vision answers can be grounded: turn qwen3-vl's read of the pixels into a cited corpus answer
     if (curMode === "vision" && primaryDone && !gStarted && acc.trim())
       h += `<button class="ground-btn">⚓ Ground this in the corpus</button>`;
     if (gStarted) {
       h += `<div class="gsec"><div class="ghdr">⚓ Grounded in the corpus</div>`;
-      h += gAcc ? md(gAcc) : `<p><span class="spin"></span> &nbsp;retrieving…</p>`;
+      h += gAcc ? withCites(gAcc, gCites, "ocg", gDone) : `<p><span class="spin"></span> &nbsp;retrieving…</p>`;
       if (gStreaming) h += CARET;
-      if (gDone) h += footer(gSources, gReranked);
+      if (gDone && !(gCites && gCites.length)) h += footer(gSources, gReranked);
       h += `</div>`;
     }
     setBody(h);
@@ -174,6 +206,7 @@
     if (msg.type === "oracle:loading") {
       acc = ""; sources = null; reranked = true; curMode = msg.mode || "explain"; thumb = msg.thumb || null;
       primaryDone = false; gStarted = false; gStreaming = false; gDone = false; gAcc = ""; gSources = null; gReranked = true;
+      cites = null; gCites = null;
       open();
       root.querySelector(".ttl").textContent =
         curMode === "factcheck" ? "Oracle · fact-check" : curMode === "vision" ? "Oracle · vision" : "Oracle";
@@ -185,13 +218,13 @@
     if (msg.type !== "oracle:event") return;
     const { event, data } = msg.ev || {};
     if (msg.mode === "ground") {                              // grounded sub-stream
-      if (event === "sources") { gSources = data.sources || []; gReranked = data.reranked !== false; render(); }
+      if (event === "sources") { gSources = data.sources || []; gCites = data.citations || []; gReranked = data.reranked !== false; render(); }
       else if (event === "delta") { gAcc += data.text || ""; render(); }
       else if (event === "done") { gStreaming = false; gDone = true; render(); }
       else if (event === "error") { gStreaming = false; gDone = true; gAcc += "\n\n_" + (data.error || "error") + "_"; render(); }
       return;
     }
-    if (event === "sources") { sources = data.sources || []; reranked = data.reranked !== false; if (acc) render(); }
+    if (event === "sources") { sources = data.sources || []; cites = data.citations || []; reranked = data.reranked !== false; if (acc) render(); }
     else if (event === "delta") { acc += data.text || ""; render(); }
     else if (event === "done") { primaryDone = true; render(); }
     else if (event === "error") { primaryDone = true; acc = ""; setBody(thumbHtml() + `<p>${esc(data && data.error || "error")}</p>`); }
