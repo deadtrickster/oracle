@@ -250,9 +250,24 @@ async function visionRegion(msg, tab) {
     thumb = "data:image/png;base64," + b64;
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
     await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
+    // Send the page's text WITH the pixels. A cropped region is nearly self-describing to a human
+    // and almost opaque to a model: a Grafana panel is a line and some ticks, and without the
+    // dashboard name, panel titles, legend and units the model will confabulate a plausible system.
+    // That text is on the page; grab it rather than making the model guess.
+    let pageText = "";
+    try {
+      const [pt] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => (document.body ? document.body.innerText : "").replace(/\s+/g, " ").trim().slice(0, 6000),
+      });
+      pageText = pt?.result || "";
+    } catch (_) { /* some pages refuse injection; context is a bonus, not a requirement */ }
     const r = await fetch(RECEIVER + "/vision", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: b64, mime: "image/png", prompt }),
+      body: JSON.stringify({
+        image: b64, mime: "image/png", prompt,
+        url: tab.url, title: tab.title, page_text: pageText,
+      }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
     await pumpSSE(r.body, send);

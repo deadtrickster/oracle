@@ -52,7 +52,8 @@ async function ask() {
     });
     if (!r.ok || !r.body) { out.innerHTML = "<p>receiver error " + r.status + "</p>"; $("ask").disabled = false; return; }
     await pumpSSE(r.body, (ev) => {
-      if (ev.event === "sources") { sources = ev.data.sources || []; citations = ev.data.citations || []; }
+      if (ev.event === "status") { out.innerHTML = `<p><span class="spin"></span> &nbsp;${esc(ev.data.text||"")}</p>`; }
+      else if (ev.event === "sources") { sources = ev.data.sources || []; citations = ev.data.citations || []; }
       else if (ev.event === "delta") { acc += ev.data.text || ""; paint(true); }
       else if (ev.event === "done") paint(false);
       else if (ev.event === "error") { errored = true; out.innerHTML = "<p>" + esc(ev.data.error) + "</p>"; }

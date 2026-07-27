@@ -218,12 +218,15 @@
     if (msg.type !== "oracle:event") return;
     const { event, data } = msg.ev || {};
     if (msg.mode === "ground") {                              // grounded sub-stream
-      if (event === "sources") { gSources = data.sources || []; gCites = data.citations || []; gReranked = data.reranked !== false; render(); }
+      if (event === "status") { setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;${esc(data.text||"")}</p>`); return; }
+    if (event === "sources") { gSources = data.sources || []; gCites = data.citations || []; gReranked = data.reranked !== false; render(); }
       else if (event === "delta") { gAcc += data.text || ""; render(); }
       else if (event === "done") { gStreaming = false; gDone = true; render(); }
       else if (event === "error") { gStreaming = false; gDone = true; gAcc += "\n\n_" + (data.error || "error") + "_"; render(); }
       return;
     }
+    // a GPU swap takes 30-60s; say so, or it is indistinguishable from a hang
+    if (event === "status") { setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;${esc(data.text||"")}</p>`); return; }
     if (event === "sources") { sources = data.sources || []; cites = data.citations || []; reranked = data.reranked !== false; if (acc) render(); }
     else if (event === "delta") { acc += data.text || ""; render(); }
     else if (event === "done") { primaryDone = true; render(); }

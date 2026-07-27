@@ -55,21 +55,95 @@ OLLAMA = os.environ.get("ORACLE_OLLAMA_URL", "http://localhost:11434").rstrip("/
 # production points at the llama.cpp qwen-next server (:18080) that has no /api/embed.
 EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # Vision model (qwen3-vl llama-server, :18081 — same one transcribe-scans.py uses).
-# DISABLED BY DEFAULT — and that is a hardware fact, not a preference: the 24 GB card holds the
-# text model (~20.6 GB) OR qwen3-vl (~17 GB), never both, so starting VL under a live :18080 either
-# OOMs or silently spills to sysmem and crawls. Enabling it needs the VRAM broker that arbitrates
-# the one big slot (lease/refcount, health-gated readiness, rollback on failed swap) — designed,
-# not built. Until then /vision answers with an honest, immediate explanation instead of hanging on
-# a dead port: a feature that is off must SAY it is off (the house rule — silence read as success).
-VL_ENABLED = os.environ.get("ORACLE_VL_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+# Only ONE big model is resident at a time: the 24 GB card holds the text model (~20.6 GB) OR
+# qwen3-vl (~17 GB), never both, so `oracle-vram.sh` swaps them.
+# Availability is therefore PROBED, not configured. A static flag would have to be flipped (and this
+# service restarted) in lockstep with every swap, and would lie whenever the two drifted — claiming
+# vision while :18081 is down, or refusing it while it is up. Ask the server instead; cache the
+# answer briefly so /status and a burst of requests don't each pay a socket. A feature that is off
+# must SAY it is off, and must notice by itself when it comes back.
+VL_PROBE_TTL = 5.0
+_vl_state = {"ok": False, "at": 0.0}
+_vl_lock = threading.Lock()
+_text_state = {"ok": False, "at": 0.0}
+_text_lock = threading.Lock()
 VL_URL = os.environ.get("ORACLE_VL_URL", "http://localhost:18081").rstrip("/")
 VL_MODEL = os.environ.get("ORACLE_VL_MODEL", "qwen3-vl")
 VL_DISABLED_MSG = (
-    "Vision is disabled on this machine. The GPU (24 GB) fits the text model (~20.6 GB) or "
-    "qwen3-vl (~17 GB), not both, so the vision server is not running. Enable it with the VRAM "
-    "broker (ORACLE_VL_ENABLED=1 once the broker arbitrates the swap). Text capture, ask, explain "
-    "and fact-check are unaffected."
+    "Vision is not loaded. The GPU (24 GB) fits the text model (~20.6 GB) or qwen3-vl (~17 GB), "
+    "not both, so only one is resident at a time. Switch with:  ./oracle-vram.sh vl   "
+    "(and back with  ./oracle-vram.sh text). Capture still works; ask/explain/fact-check need the "
+    "text model."
 )
+
+
+def _probe(url: str, state: dict, lock: threading.Lock) -> bool:
+    now = time.time()
+    with lock:
+        if now - state["at"] < VL_PROBE_TTL:
+            return state["ok"]
+    ok = False
+    try:
+        with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
+            ok = r.status == 200
+    except Exception:
+        ok = False
+    with lock:
+        state.update(ok=ok, at=now)
+    return ok
+
+
+def vl_available() -> bool:
+    """Is the vision server up right now? Cached for VL_PROBE_TTL seconds."""
+    return _probe(VL_URL, _vl_state, _vl_lock)
+
+
+def text_available() -> bool:
+    """Is the synthesis server up right now? (llama.cpp exposes /health; Ollama does not, and
+    answers 404 — which this treats as 'not up', so autoswap is only used with the llama.cpp
+    backend, where the swap is meaningful in the first place.)"""
+    return _probe(OLLAMA, _text_state, _text_lock)
+
+
+# ---- automatic VRAM switching -------------------------------------------------------------------
+# One big model fits. Rather than making the user run oracle-vram.sh before each request, the
+# endpoint that needs a model makes it resident. Serialised by _swap_lock so N concurrent requests
+# cause ONE swap, and re-checked inside the lock so the losers of the race do not swap again.
+AUTOSWAP = os.environ.get("ORACLE_VRAM_AUTOSWAP", "1").lower() in ("1", "true", "yes", "on")
+VRAM_SH = str(Path(__file__).resolve().parent / "oracle-vram.sh")
+SWAP_TIMEOUT = int(os.environ.get("ORACLE_VRAM_SWAP_TIMEOUT", "300"))
+_swap_lock = threading.Lock()
+
+
+def ensure_model(kind: str):
+    """Make `kind` ("text"|"vl") resident, swapping if needed.
+
+    Yields human-readable progress strings (the caller forwards them as SSE) because a swap costs
+    30-60 s of weight loading: a silent spinner for a minute is indistinguishable from a hang, and
+    this project's rule is that slow-but-working must be visible. Returns via the final yield of
+    None on success; raises RuntimeError if the model could not be made resident."""
+    probe = vl_available if kind == "vl" else text_available
+    if probe():
+        return
+    if not AUTOSWAP:
+        raise RuntimeError(f"{kind} model is not loaded and autoswap is off — run ./oracle-vram.sh {kind}")
+    with _swap_lock:
+        if probe():          # another request swapped it in while we waited
+            return
+        other = "text model" if kind == "vl" else "vision model"
+        yield (f"swapping GPU: unloading the {other}, loading "
+               f"{'qwen3-vl' if kind == 'vl' else 'the text model'} (~30-60s)…")
+        try:
+            r = subprocess.run([VRAM_SH, kind], capture_output=True, text=True, timeout=SWAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"GPU swap to {kind} timed out after {SWAP_TIMEOUT}s")
+        # invalidate both caches: the swap changed BOTH models' residency
+        with _vl_lock:
+            _vl_state["at"] = 0.0
+        with _text_lock:
+            _text_state["at"] = 0.0
+        if r.returncode != 0 or not probe():
+            raise RuntimeError(f"GPU swap to {kind} failed: {(r.stderr or r.stdout or '').strip()[:200]}")
 SYNTH_MODEL = os.environ.get("ORACLE_SYNTH_MODEL", "qwen3-coder:30b")
 RERANK_ID = os.environ.get("ORACLE_RERANK_ID", "gte-multilingual-reranker-base@local-gte-rerank@Jina")
 # Corpus browser (oracle-browser) — renders the ORIGINAL page a citation came from, so a footnote
@@ -544,6 +618,14 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str):
         f"{c.get('content_with_weight') or c.get('content','')}"
         for i, c in enumerate(chunks))
     user = f"{framing}\n\nExcerpts:\n{context}"
+    # Retrieval is done (CPU + embeddings); only NOW is the text model needed, so a swap — if the
+    # vision model is currently resident — is paid for as late as possible.
+    try:
+        for note in ensure_model("text"):
+            yield ("status", {"text": note})
+    except RuntimeError as e:
+        yield ("error", {"error": str(e)})
+        return
     try:
         for delta in _chat_stream([{"role": "system", "content": system},
                                    {"role": "user", "content": user}]):
@@ -573,20 +655,60 @@ def factcheck_stream(claim: str, url: str = "", title: str = ""):
         claim, f'Claim to check{where}:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM)
 
 
-def vision_stream(image_data_url: str, prompt: str = ""):
+VL_CTX_CHARS = int(os.environ.get("ORACLE_VL_CTX_CHARS", "4000"))
+
+
+def _vl_context(url: str, title: str, page_text: str) -> str:
+    """Text context to put in FRONT of the screenshot.
+
+    A cropped region carries almost no self-description: a Grafana panel is a line and some axis
+    ticks, and a model given only pixels will invent a plausible system, metric and time range —
+    the failure this project exists to prevent, in a new modality. The page it came from usually
+    states all three (dashboard name, panel titles, legend, units), so send that first.
+
+    Truncation is head+tail rather than head-only: the page's identity is at the top, but the
+    numbers, legends and panel labels a dashboard renders often sit lower down."""
+    parts = []
+    if title:
+        parts.append(f"Page title: {title.strip()}")
+    if url:
+        parts.append(f"Page URL: {url.strip()}")
+    t = " ".join((page_text or "").split())
+    if t:
+        if len(t) > VL_CTX_CHARS:
+            head, tail = VL_CTX_CHARS * 2 // 3, VL_CTX_CHARS // 3
+            t = t[:head] + " …[middle elided]… " + t[-tail:]
+        parts.append(f"Text visible on the page (may be truncated):\n{t}")
+    if not parts:
+        return ""
+    return ("Context for the image below — the region was screenshotted from this page. Use it to "
+            "identify what is being shown (system, dashboard, metric names, units, time range) "
+            "instead of guessing, but describe only what the IMAGE actually shows.\n\n"
+            + "\n".join(parts))
+
+
+def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: str = "",
+                  page_text: str = ""):
     """Stream the qwen3-vl answer for a screenshotted region. NOT grounded — a direct look at the
     pixels (read this diagram / transcribe this / what is this). Emits ('delta',…)* then ('done',{}).
 
     STUB while VL_ENABLED is false: fails fast with the reason instead of timing out on :18081.
     The wire shape is identical either way, so the extension's card/⚓-ground flow needs no change
     when the broker lands — only the env flag flips."""
-    if not VL_ENABLED:
-        yield ("error", {"error": VL_DISABLED_MSG, "reason": "vision_disabled"})
+    try:
+        for note in ensure_model("vl"):
+            yield ("status", {"text": note})
+    except RuntimeError as e:
+        yield ("error", {"error": f"{e}\n\n{VL_DISABLED_MSG}", "reason": "vision_unavailable"})
         return
     prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
-    msgs = [{"role": "user", "content": [
+    ctx = _vl_context(url, title, page_text)
+    # Order matters: context, then the image, then the question. The text frames what the pixels
+    # are before the model looks at them; the question stays last so it is the most recent thing.
+    content = ([{"type": "text", "text": ctx}] if ctx else []) + [
         {"type": "image_url", "image_url": {"url": image_data_url}},
-        {"type": "text", "text": prompt}]}]
+        {"type": "text", "text": prompt}]
+    msgs = [{"role": "user", "content": content}]
     try:
         for delta in _chat_stream(msgs, url=VL_URL, model=VL_MODEL, timeout=420, max_tokens=1500):
             yield ("delta", {"text": delta})
@@ -769,12 +891,13 @@ def status() -> dict:
         synth_ok = True
     except Exception:
         pass
+    _vis = vl_available()
     try:
         topics = len(_ctx_load().get("slots", []))
     except Exception:
         topics = 0
     return {"queue": counts, "ragflow": ragflow_ok, "synth": synth_ok,
-            "vision": VL_ENABLED, "vision_note": None if VL_ENABLED else VL_DISABLED_MSG,
+            "vision": _vis, "vision_note": None if _vis else VL_DISABLED_MSG,
             "dataset": DATASET, "captures_dir": str(CAPTURES), "port": PORT, "topics": topics}
 
 
@@ -894,7 +1017,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if not img.startswith("data:"):
                     img = f"data:{p.get('mime', 'image/png')};base64,{img}"
-                self._send_sse(vision_stream(img, p.get("prompt", "")))
+                self._send_sse(vision_stream(img, p.get("prompt", ""), p.get("url", ""),
+                                             p.get("title", ""), p.get("page_text", "")))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))
