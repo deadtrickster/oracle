@@ -151,12 +151,14 @@ def _synthesize(question: str, chunks: list) -> str:
 
 @mcp.tool()
 def ask_corpus(question: str) -> str:
-    """Answer a documentation/API/concept question GROUNDED in the offline corpus
-    (Rust, io_uring, Linux, Go, PostgreSQL/OrioleDB, Emacs, git/bash/glibc docs +
-    books + papers). Use this for ANY factual/how-does-X-work question instead of
-    answering from your own knowledge — it retrieves, reranks, and synthesizes an
-    answer strictly from the corpus, with citations, or says the corpus doesn't
-    cover it. Returns the grounded answer plus the sources it used."""
+    """Answer a documentation/API/concept question GROUNDED in the offline corpus —
+    a large, general, multilingual library of docs, books and papers spanning many
+    subjects (technical and not). Its contents are NOT listed here and change as
+    material is ingested, so never assume a topic is absent: the only way to know
+    whether the corpus covers something is to ASK. Use this for ANY factual or
+    how-does-X-work question instead of answering from your own knowledge — it
+    retrieves, reranks, and synthesizes strictly from the corpus, with citations,
+    or tells you it doesn't cover the question. Returns the answer plus its sources."""
     try:
         kb_ids = _doc_kb_ids()
     except Exception as e:
