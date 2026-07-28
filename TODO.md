@@ -669,6 +669,44 @@ the number. (Protocol §5: a new idea goes to §H, not §G — the freeze is the
   is `DOC_ENGINE=serenedb` and ES holds **247,665** — a stale factual claim about our own
   architecture, in the document that introduces it. Corrected.
 
+### 2026-07-28 — the text-only chat can see: one GPU slot, one owner, one cache ✅ (DESIGN §6.1)
+- **PR #1 merged** (`48a4da7`): the capture extension + receiver land on `main` — capture, ask,
+  explain, fact-check with linked citations, region vision, the H17 recency sensor.
+- **Two extension bugs, both mine, both user-caught.** (1) The region crosshair stopped appearing:
+  `screenshotRegion()` pre-flighted `/status` and refused when `vision:false`. Correct until
+  auto-swap landed — after it, `vision:false` means "not resident *at this instant*", so the guard
+  aborted before injecting the selector and refused the very request that would have swapped the
+  model in. (2) The prompt toolbar clamped against a hardcoded `330px` that is not its width, so
+  near the right edge the arithmetic said "fits" while Send was off-screen. It now appears centred
+  under the cursor, measured, flipping above when there is no room below.
+- **Three new ways in for vision:** right-click an **image** (its `alt`/`title`/`<figcaption>` go in
+  first, marked authoritative — they say what the picture *means*, which pixels cannot), **explain
+  this page** (whole viewport: text summarised first, then the screenshot), and an image pasted into
+  a **local Claude Code chat**.
+- **His catch: the region route never summarised while the image route did.** Same page, different
+  behaviour, no visible reason. Cause: the region route derived `page_text` from the located-text
+  walk, whose dedup and 400-node cap compress a dashboard below the receiver's 2500-char summarise
+  threshold. The walk's job is *location* (which panel did you crop); whole-page context is
+  `innerText`. One extractor now, so the extractor no longer decides whether the page gets
+  summarised.
+- **The shim's `[image omitted — model is text-only]` was the real hole.** Every pasted screenshot
+  and every `Read` of a `.png` was discarded there, and the model answered anyway from the filename.
+  The box is not text-only — it just cannot be both at once. `oracle-claude-shim.py` now swaps to
+  qwen3-vl, reads the image, swaps back, and injects the reading. **Measured live:** 296 s
+  end-to-end on the Grafana screenshot; the text model quoted 17.6.0 / 4.19 GB / 40.9 MB — values
+  present only in the pixels — *and* volunteered that it had not seen the image, because the
+  injected block is labelled as another model's reading rather than as the image itself.
+- **`oracle_vram.py` — one owner for the 24 GB slot,** shared by the receiver and the shim, with an
+  `flock` across processes. Two services each holding a private in-process lock is not a lock: one
+  stops the unit the other just started, the swap reports success, and the box ends up with no model
+  — this repo's signature failure shape in a new place. `oracle_vision.py` holds the read cache,
+  content-addressed by `sha256(bytes)`: **not an optimisation** — Claude Code re-sends the whole
+  transcript every turn, so uncached this would swap the GPU twice per turn forever to re-read an
+  unchanged picture. Only the newest turn may trigger a swap; older images say they were not read.
+- `test-shim-vision.py` covers the plan (what triggers a read, what comes from cache, what is left
+  alone, what the model finally sees) with the GPU stubbed — the expensive part is exactly the part
+  you cannot iterate on.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy

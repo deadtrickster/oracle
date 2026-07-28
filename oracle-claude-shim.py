@@ -16,14 +16,27 @@ OpenAI SSE stream back into Anthropic SSE events on the fly. All localhost/offli
 
 Point Claude Code at it:  ANTHROPIC_BASE_URL=http://localhost:11435
 """
+import asyncio
+import base64
 import json
 import os
 import re
+import threading
 import uuid
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+
+# Vision detour. Optional on purpose: the shim's job is translating tool calls, and it must keep
+# doing that on a machine where these modules or the vision unit are absent.
+try:
+    import oracle_vision
+    import oracle_vram
+    VISION = os.environ.get("ORACLE_SHIM_VISION", "1").lower() in ("1", "true", "yes", "on")
+except Exception:                                    # pragma: no cover - degraded but functional
+    oracle_vision = oracle_vram = None
+    VISION = False
 
 OLLAMA = os.environ.get("ORACLE_OLLAMA_URL", "http://localhost:11434").rstrip("/")
 OAI_URL = f"{OLLAMA}/v1/chat/completions"
@@ -101,6 +114,192 @@ def _text_of(content) -> str:
     return "\n".join(out)
 
 
+# ---- shared context: give the text model the pixels it cannot see -------------------------------
+#
+# Claude Code sends images as content blocks — pasted screenshots, and whatever `Read` returns for
+# a .png. This shim used to replace every one of them with "[image omitted — model is text-only]",
+# which is true of the text model and useless to the user: the picture they were asking about was
+# dropped on the floor and the model answered anyway, from the filename and the surrounding chat.
+#
+# It is not text-only, though. The same GPU runs qwen3-vl; it just cannot run both at once. So the
+# shim takes the detour: swap to vision, have it READ the image, swap back, and put the reading in
+# the prompt. The conversation continues with the image described in context — which is what the
+# text model reprocessing its whole transcript amounts to anyway.
+#
+# Two things keep this affordable and honest:
+#   * only images in the LAST user turn can trigger a swap. Older ones come from the cache or stay
+#     stubs. Otherwise a long session would re-read its whole history on every turn.
+#   * the reading is content-addressed and cached (oracle_vision), because Claude Code re-sends the
+#     entire transcript every turn — an uncached read would swap the GPU twice per turn, forever,
+#     for an image that has not changed.
+IMG_STUB = "[image omitted — model is text-only]"
+IMG_UNREAD = ("[image not read — the vision model was not run for this one (only the most recent "
+              "message's images are read). Ask again referring to it if you need it.]")
+
+
+def _blocks(msg) -> list:
+    c = msg.get("content")
+    return c if isinstance(c, list) else []
+
+
+def _image_slots(body: dict):
+    """Yield (msg_index, container_list, position, block, tool_use_id) for every image block,
+    including images nested inside a tool_result (which is how `Read` hands a .png back). The
+    tool_use_id travels with the slot so naming it later is a dict lookup, not a scan comparing
+    multi-megabyte base64 blocks for equality."""
+    for mi, m in enumerate(body.get("messages") or []):
+        for i, b in enumerate(_blocks(m)):
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "image":
+                yield mi, _blocks(m), i, b, None
+            elif b.get("type") == "tool_result" and isinstance(b.get("content"), list):
+                for j, ib in enumerate(b["content"]):
+                    if isinstance(ib, dict) and ib.get("type") == "image":
+                        yield mi, b["content"], j, ib, b.get("tool_use_id")
+
+
+def _image_bytes(block: dict):
+    """(data_url, sha) for a base64 image block, or (None, None). URL sources are skipped: this box
+    is offline by design, and silently fetching one would be both a network call and a lie."""
+    src = block.get("source") or {}
+    if src.get("type") != "base64" or not src.get("data"):
+        return None, None
+    mime = src.get("media_type") or "image/png"
+    try:
+        raw = base64.b64decode(src["data"], validate=False)
+    except Exception:
+        return None, None
+    if not raw:
+        return None, None
+    return f"data:{mime};base64,{src['data']}", oracle_vision.sha(raw)
+
+
+def _tool_labels(body: dict) -> dict:
+    """tool_use_id -> file path, so an image that came back from `Read` can be named in context.
+    A description headed "screenshot.png" is worth more to the next turn than an unlabelled one."""
+    out = {}
+    for m in body.get("messages") or []:
+        for b in _blocks(m):
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                inp = b.get("input") or {}
+                p = inp.get("file_path") or inp.get("path") or inp.get("notebook_path")
+                if p and b.get("id"):
+                    out[b["id"]] = str(p)
+    return out
+
+
+def last_user_text(body: dict) -> str:
+    msgs = body.get("messages") or []
+    for m in reversed(msgs):
+        if m.get("role") == "user":
+            t = _text_of(m.get("content")).strip()
+            return t
+    return ""
+
+
+def plan_vision(body: dict) -> list:
+    """Rewrite image blocks in place: cached readings become text, and everything in the last user
+    turn that has no reading yet is returned as work to do. Mutates `body`."""
+    if not VISION or oracle_vision is None:
+        return []
+    msgs = body.get("messages") or []
+    last_user = max((i for i, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
+    labels = _tool_labels(body)
+    pending = []
+    for mi, container, pos, b, tuid in list(_image_slots(body)):
+        data_url, key = _image_bytes(b)
+        if not key:
+            container[pos] = {"type": "text", "text": IMG_STUB}
+            continue
+        label = labels.get(tuid, "") if tuid else ""    # name it after the file `Read` opened
+        hit = oracle_vision.cached(key)
+        if hit:
+            container[pos] = {"type": "text", "text": oracle_vision.block(hit, label)}
+        elif mi == last_user:
+            pending.append({"container": container, "pos": pos, "key": key,
+                            "data_url": data_url, "label": label})
+        else:
+            container[pos] = {"type": "text", "text": IMG_UNREAD}
+    return pending
+
+
+def _describe_sync(job: dict, question: str) -> str:
+    text = oracle_vision.describe(job["data_url"], question=question, label=job["label"])
+    oracle_vision.remember(job["key"], text, question=question, label=job["label"])
+    return text
+
+
+async def _athread(make_gen):
+    """Run a BLOCKING generator on a worker thread and yield its items into the event loop.
+
+    oracle_vram.ensure() is deliberately synchronous — it is shared with the stdlib-only capture
+    receiver, which has no event loop. Rather than write a second async copy of swap logic (two
+    implementations of "who owns the GPU" is how they drift), bridge it here."""
+    q: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def run():
+        try:
+            for item in make_gen():
+                loop.call_soon_threadsafe(q.put_nowait, ("item", item))
+        except BaseException as e:                       # noqa: BLE001 - forwarded to the caller
+            loop.call_soon_threadsafe(q.put_nowait, ("error", e))
+            return
+        loop.call_soon_threadsafe(q.put_nowait, ("done", None))
+
+    threading.Thread(target=run, daemon=True).start()
+    while True:
+        kind, v = await q.get()
+        if kind == "item":
+            yield v
+        elif kind == "error":
+            raise v
+        else:
+            return
+
+
+async def vision_detour(pending: list, question: str):
+    """Swap to vision, read every pending image, swap back. Yields progress lines.
+
+    The swap back is in a `finally`: leaving the box with vision resident would silently break
+    every subsequent chat turn, and a failure in the middle of reading three images is exactly
+    when that is most likely to happen."""
+    n = len(pending)
+    yield f"{n} image{'s' if n > 1 else ''} in this message — reading with qwen3-vl."
+    try:
+        async for note in _athread(lambda: oracle_vram.ensure("vl")):
+            yield note
+        loop = asyncio.get_running_loop()
+        for i, job in enumerate(pending, 1):
+            name = job["label"] or f"image {i}"
+            yield f"reading {name}…"
+            try:
+                text = await loop.run_in_executor(None, _describe_sync, job, question)
+            except Exception as e:                        # one bad image must not sink the turn
+                job["container"][job["pos"]] = {
+                    "type": "text", "text": f"[image could not be read by the vision model: {e}]"}
+                yield f"failed to read {name}: {e}"
+                continue
+            job["container"][job["pos"]] = {
+                "type": "text", "text": oracle_vision.block(text, job["label"])}
+    finally:
+        async for note in _athread(lambda: oracle_vram.ensure("text")):
+            yield note
+
+
+async def ensure_text_backend():
+    """Bring the text model back if VISION took the card — e.g. the browser extension ran a vision
+    request in another window. Gated on the vision server actually being up, so a plain-Ollama
+    backend (no /health, reads as "down") never triggers a pointless swap."""
+    if not VISION or oracle_vram is None:
+        return
+    if oracle_vram.text_available() or not oracle_vram.vl_available():
+        return
+    async for note in _athread(lambda: oracle_vram.ensure("text")):
+        yield note
+
+
 def anthropic_to_openai(body: dict) -> dict:
     """Translate an Anthropic Messages request into an OpenAI chat-completions one."""
     msgs = []
@@ -130,7 +329,9 @@ def anthropic_to_openai(body: dict) -> dict:
                     "role": "tool", "tool_call_id": b.get("tool_use_id"),
                     "content": _text_of(b.get("content", ""))})
             elif t == "image":
-                text_parts.append("[image omitted — model is text-only]")
+                # plan_vision() normally replaced this with the vision model's reading already;
+                # reaching here means the detour is off or the source was not inline base64.
+                text_parts.append(IMG_STUB)
         if role == "assistant":
             am = {"role": "assistant", "content": "\n".join(text_parts)}
             if tool_calls:
@@ -203,9 +404,13 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-async def stream_translate(oai_req: dict, model: str):
+async def stream_translate(body: dict, model: str, pending: list | None = None):
     """Call Ollama's OpenAI streaming endpoint and yield Anthropic SSE events, holding
-    back ambiguous text so a leaked `<function=...>` can be salvaged into a tool_use."""
+    back ambiguous text so a leaked `<function=...>` can be salvaged into a tool_use.
+
+    Takes the Anthropic `body` rather than a translated request because the vision prelude REWRITES
+    that body (images become the vision model's reading of them) and translation has to happen
+    after, not before."""
     yield _sse("message_start", {"type": "message_start", "message": {
         "id": "msg_" + uuid.uuid4().hex[:24], "type": "message", "role": "assistant",
         "model": model, "content": [], "stop_reason": None, "stop_sequence": None,
@@ -269,6 +474,33 @@ async def stream_translate(oai_req: dict, model: str):
                                           "usage": {"output_tokens": 0}}))
         evs.append(_sse("message_stop", {"type": "message_stop"}))
         return evs
+
+    # ---- prelude: put the right model on the card, and turn any images into text, BEFORE calling
+    # the backend. Progress is emitted as VISIBLE assistant text. There is no status channel in the
+    # Anthropic stream, and a swap can run for minutes: silence for that long is indistinguishable
+    # from a hang — which is exactly how the first version of this was reported.
+    emitted = False
+
+    async def notes(agen):
+        nonlocal emitted
+        async for note in agen:
+            emitted = True
+            for s in emit_text(f"⟪oracle⟫ {note}\n"):
+                yield s
+
+    try:
+        async for s in notes(vision_detour(pending, last_user_text(body)) if pending
+                             else ensure_text_backend()):
+            yield s
+    except Exception as e:                              # noqa: BLE001 - reported, not swallowed
+        for s in fail_events(None, f"vision detour failed: {e!r}"):
+            yield s
+        return
+    if emitted:
+        for s in close_cur():
+            yield s
+
+    oai_req = anthropic_to_openai(body)
 
     async with httpx.AsyncClient(timeout=None) as client:
         try:
@@ -399,10 +631,22 @@ def openai_to_anthropic_full(oai: dict, model: str) -> dict:
 async def messages(request: Request):
     body = await request.json()
     model = body.get("model", "qwen3-coder:30b")
-    oai_req = anthropic_to_openai(body)
+    # Rewrites cached image readings into the body and reports what still needs the vision model.
+    pending = plan_vision(body)
     if body.get("stream"):
-        return StreamingResponse(stream_translate(oai_req, model),
+        return StreamingResponse(stream_translate(body, model, pending),
                                  media_type="text/event-stream")
+    # Non-streaming: same detour, minus the progress nobody is watching.
+    try:
+        if pending:
+            async for _ in vision_detour(pending, last_user_text(body)):
+                pass
+        else:
+            async for _ in ensure_text_backend():
+                pass
+    except Exception as e:                              # noqa: BLE001 - surfaced to the caller
+        return JSONResponse(error_message(model, f"vision detour failed: {e!r}"))
+    oai_req = anthropic_to_openai(body)
     oai_req["stream"] = False
     oai_req.pop("stream_options", None)
     async with httpx.AsyncClient(timeout=None) as client:

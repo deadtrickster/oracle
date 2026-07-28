@@ -954,8 +954,71 @@ intent-level review. The LLM chooses among *real* refactors, not imagined ones.
   with two-layer offline buffering (extension queues if the receiver is down; receiver writes files +
   a `pending` job and drains to RAGFlow when it returns — so it works with the whole stack off). A
   right-click **"Explain this with Oracle"** streams a grounded answer from the corpus into a popup
-  glued to the selection. Also the *sensor* for the planned associative memory (§5.4).
+  glued to the selection, with every `[n]` linking to the corpus browser at the cited page. Four
+  ways to hand it pixels — a dragged **region**, a right-clicked **image** (its `alt`/`title`/
+  `<figcaption>` go in as authoritative context), the whole **viewport**, or an image pasted into a
+  local Claude Code chat (§6.1) — each of which carries the page's text alongside the picture, since
+  a cropped panel is nearly self-describing to a human and almost opaque to a model. Also the
+  *sensor* for the planned associative memory (§5.4).
 - **gptel** (Emacs) + **miniserve** (reading) round it out.
+
+### 6.1 One GPU slot — and how a text-only chat came to see
+
+The card is 24 GB. The text model sits at ~20.6 GB, qwen3-vl at ~17 GB. They are mutually
+exclusive by **arithmetic**, not by policy, so exactly one is resident and `oracle-vram.sh` swaps
+them. Everything below follows from that one number.
+
+**Availability is probed, never configured.** A `VISION_ENABLED` flag would have to be flipped in
+lockstep with every swap and would lie whenever the two drifted — claiming vision while `:18081`
+is down, or refusing it while it is up. Every consumer asks the port instead (`/health`, cached
+5 s). A feature that is off must *say* it is off and must notice by itself when it returns.
+
+**The swap is health-gated, not exit-code-gated.** `llama-server` accepts the socket long before
+the weights are loaded, so `systemctl start` returning 0 proves nothing. Two failures paid for
+this rule: a 180 s timeout that declared failure while the model became healthy a minute later
+with nobody listening (loading is *disk*-bound — `--no-mmap` plus MoE expert offload reads tens of
+GB, and after a swap the page cache is cold), and a swap that was reported as "stuck" when it had
+actually succeeded. Now: 900 s of patience, a progress heartbeat every 10 s, and the port — not
+the script's exit status — decides. A failed VL load **restores the text model**, because one bad
+vision request must never leave the box with nothing resident.
+
+**Ownership is one module** (`oracle_vram.py`), shared by the capture receiver and the Claude-Code
+shim, with an `flock` across processes. Two services each holding a private in-process lock is not
+a lock: one would stop the unit the other had just started, and the swap would report success
+while the box ended up with no model — the repo's signature failure shape (§9.0) in a new place.
+
+**The detour: an image in a text-only chat.** The shim used to translate every image block into
+`[image omitted — model is text-only]`. True of the text model, useless to the user: the picture
+they were asking about was dropped and the model answered anyway, from the filename and the
+surrounding chat. But the machine is not text-only — it just cannot be both at once. So the shim
+takes the detour: swap to vision, have qwen3-vl **read** the image, swap back, and put the reading
+in the prompt. The conversation resumes with the image described in context.
+
+Three constraints make it affordable and honest:
+
+1. **The cache is not an optimisation.** Claude Code re-sends the entire transcript every turn, so
+   an image pasted once is present in every later request. Uncached, each turn would swap the GPU
+   twice to re-read a picture that has not changed. Readings are content-addressed by
+   `sha256(bytes)`, so the same image in another session, under another filename, is one read.
+2. **Only the newest turn can trigger a swap.** Older images come from the cache or stay stubs
+   that say they were not read. Otherwise a long session re-reads its own history forever.
+3. **The vision model reports; the text model reasons.** The prompt asks qwen3-vl to transcribe and
+   describe and explicitly *withholds* the question's answer, and the injected block is labelled as
+   one model's reading rather than as the image itself. Letting the weaker model answer, then
+   passing its conclusion off as "what the image says", would smuggle an unverified claim into the
+   context wearing the clothes of an observation. Measured on a Grafana screenshot: the text model
+   quoted 17.6.0, 4.19 GB, 40.9 MB — values present only in the pixels — and volunteered that it
+   had not seen the image and these came from the vision model's report.
+
+The same swap logic runs the other way for the browser: a vision request from the extension swaps
+VL in, and the next chat turn swaps the text model back, because the shim checks residency before
+every generation (gated on the vision server actually being up, so a plain-Ollama backend never
+triggers a pointless swap).
+
+**Cost, stated plainly:** a cold swap is minutes, not seconds, and the restarted server loses its
+KV cache, so the conversation is reprocessed. That is the price of 24 GB and it is not hidden —
+progress is streamed as visible text, because silence for four minutes is indistinguishable from a
+hang, which is exactly how the first version was reported.
 
 ## 7. MCP servers (the tool layer)
 

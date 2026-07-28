@@ -36,6 +36,11 @@ Note what it knows: the dashboard's **ID 24298** and `pg_exporter` appear nowher
 they come from the page's own text, which is sent with the image. The instance values (17.6.0,
 4.19 GB, 40.9 MB) it reads off the crop.
 
+The same detour runs inside a **local Claude Code chat**. Paste a screenshot, or `Read` a `.png`,
+and the shim swaps the vision model in, has it read the picture, swaps the text model back, and
+continues with the reading in context — the text model answers about an image it cannot see, and
+says so rather than pretending otherwise.
+
 ## The two axioms
 
 Everything in this repo that generalises past this machine is a corollary of these two
@@ -89,6 +94,12 @@ Everything in this repo that generalises past this machine is a corollary of the
   docstring, which is prompt too, and never gets audited. A list in a prompt doesn't read as "for
   example"; it reads as ground truth. The fix was deletion, and a rule: **a prompt may describe how
   to use a tool; it must never describe what the data contains.**
+- **The GPU holds one big model; the chat pretends otherwise.** 20.6 GB of text model and 17 GB of
+  vision model do not fit in 24 GB, so the shim used to translate every pasted screenshot into
+  "[image omitted — model is text-only]" and let the model answer from the filename. It isn't
+  text-only — it just can't be both at once. Now an image triggers a swap, a read, and a swap back,
+  with the reading injected as a *labelled report by another model* rather than as the image
+  itself. The text model quotes the numbers and volunteers that it never saw the picture.
 - **A frontier model hand-graded 10% of the corpus.** 24,832 chunks labelled across a nine-class
   junk taxonomy — the training set for the CPU classifier that replaces the rule-and-judge
   patchwork. The useful output wasn't the labels but the *uncertainty*: the three lowest-confidence
@@ -131,6 +142,10 @@ CPU / RAM      RAGFlow + DeepDoc parsing · SereneDB doc store (Postgres-wire/Du
   tab — the pages a server-side fetch can't reach — as clean Markdown, and answers "explain this" /
   "fact-check this" from the corpus in a popup glued to the selection. Captures queue offline and
   drain when the backend returns, so it works mid-flight with the stack off.
+- **Vision, four ways in**: drag a region, right-click an image, explain the whole viewport, or
+  paste a screenshot into a local Claude Code chat. All of them send the page's *text* with the
+  pixels and swap the GPU automatically — one 24 GB slot, arbitrated by a single shared module
+  ([DESIGN.md](DESIGN.md) §6.1).
 - **Curation**: a rules→LLM-judge cascade that deletes retrieval poison (exercises, ToC, index,
   OCR garbage), a versioned labeling rubric with a human-in-the-loop labeling UI, and an
   in-progress trained junk classifier.

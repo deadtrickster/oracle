@@ -52,6 +52,25 @@ pixels. Then a **⚓ Ground this in the corpus** button feeds qwen3-vl's read ba
 pipeline, appending a **cited** corpus answer below the vision one — so a diagram's content becomes a
 trustworthy, sourced answer.
 
+**5b. Right-click an image → vision.** *Explain this image with Oracle* — no rectangle to drag. The
+image's own markup goes in first and is marked **authoritative**: `alt`, `title`, and a
+`<figcaption>` were written to say what the picture *means*, which is the one thing the pixels
+cannot state. Bytes are re-encoded from the already-decoded `<img>` (so `blob:`/`data:` sources
+work), falling back to a worker-side fetch when a cross-origin image taints the canvas.
+
+**5c. Explain this page (text + vision).** The region flow with the rectangle already drawn around
+the whole viewport: the page's text is summarised by the text model *first* — while it is still the
+resident one, and therefore free — then the GPU swaps and qwen3-vl reads a screenshot of the visible
+area. Neither half is sufficient on a real dashboard: the text knows the datasource and the
+dashboard ID, the pixels know which line went vertical at 14:20.
+
+> **Context, always.** Every vision route sends text with the image, because a cropped panel is
+> nearly self-describing to a human and almost opaque to a model — given only pixels it will invent
+> a plausible system, metric and time range. What "local text" *means* differs per route (inside the
+> rectangle / around the image / the whole viewport), so the payload carries a `source` field and the
+> receiver labels the block accordingly. Calling text that merely sits next to an image "text
+> rendered inside it" would be the same overclaim this project exists to prevent, one modality over.
+
 **6. Recency-memory sensor (H17).** Everything you engage with feeds a bounded, decaying **fading-slot
 memory** of topics — captures/explains/fact-checks at full weight, passive **dwell** (≥20s visible on
 a page) at a fraction. The popup's **Topics** panel shows the live slots (weight bars, hits), lets you
@@ -117,7 +136,7 @@ systemctl --user enable --now oracle-capture
 | `POST /ask` | `{question}` → SSE grounded answer |
 | `POST /explain` | `{selection,url,title}` → SSE grounded explanation |
 | `POST /factcheck` | `{claim,url,title}` → SSE verdict + justification |
-| `POST /vision` | `{image,mime,prompt}` → SSE qwen3-vl answer about a screenshot region |
+| `POST /vision` | `{image,mime,prompt,url,title,page_text,crop_text,source,image_alt,image_title,image_caption}` → SSE qwen3-vl answer; swaps the GPU to vision and back automatically |
 | `POST /observe` | `{text,weight,url,title}` → fold into the fading-slot memory (denylist applied) |
 | `GET /slots` · `POST /exclude` · `POST /forget` · `POST /pin` | inspect + control the memory |
 | `GET /job?stem=` | ingest confirmation (local status + RAGFlow parse state + chunk count) |

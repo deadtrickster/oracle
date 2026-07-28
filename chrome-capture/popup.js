@@ -189,6 +189,10 @@ $("shot").addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "screenshotRegion" });
   window.close();   // get the popup out of the way so you can drag on the page
 });
+$("page-vl").addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "visionPage" });
+  window.close();   // the popup would otherwise be in the screenshot of the viewport
+});
 $("exclude-site").addEventListener("click", excludeSite);
 $("refresh-topics").addEventListener("click", loadTopics);
 

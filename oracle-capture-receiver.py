@@ -54,114 +54,20 @@ OLLAMA = os.environ.get("ORACLE_OLLAMA_URL", "http://localhost:11434").rstrip("/
 # Embeddings (bge-m3) always come from OLLAMA proper (:11434) — NOT the synth URL, which in
 # production points at the llama.cpp qwen-next server (:18080) that has no /api/embed.
 EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
-# Vision model (qwen3-vl llama-server, :18081 — same one transcribe-scans.py uses).
-# Only ONE big model is resident at a time: the 24 GB card holds the text model (~20.6 GB) OR
-# qwen3-vl (~17 GB), never both, so `oracle-vram.sh` swaps them.
-# Availability is therefore PROBED, not configured. A static flag would have to be flipped (and this
-# service restarted) in lockstep with every swap, and would lie whenever the two drifted — claiming
-# vision while :18081 is down, or refusing it while it is up. Ask the server instead; cache the
-# answer briefly so /status and a burst of requests don't each pay a socket. A feature that is off
-# must SAY it is off, and must notice by itself when it comes back.
-VL_PROBE_TTL = 5.0
-_vl_state = {"ok": False, "at": 0.0}
-_vl_lock = threading.Lock()
-_text_state = {"ok": False, "at": 0.0}
-_text_lock = threading.Lock()
-VL_URL = os.environ.get("ORACLE_VL_URL", "http://localhost:18081").rstrip("/")
+# Vision model + the ONE big GPU slot. Ownership lives in oracle_vram, shared with the Claude-Code
+# shim, which now runs the same swap when a chat references an image. Two processes each holding
+# their own private swap lock is not a lock: one would stop the unit the other had just started.
+# oracle_vram serialises across processes and keeps availability PROBED rather than configured — a
+# flag would have to be flipped in lockstep with every swap and would lie whenever the two drifted.
+import oracle_vram
+
+VL_URL = oracle_vram.VL_URL
 VL_MODEL = os.environ.get("ORACLE_VL_MODEL", "qwen3-vl")
-VL_DISABLED_MSG = (
-    "Vision is not loaded. The GPU (24 GB) fits the text model (~20.6 GB) or qwen3-vl (~17 GB), "
-    "not both, so only one is resident at a time. Switch with:  ./oracle-vram.sh vl   "
-    "(and back with  ./oracle-vram.sh text). Capture still works; ask/explain/fact-check need the "
-    "text model."
-)
-
-
-def _probe(url: str, state: dict, lock: threading.Lock) -> bool:
-    now = time.time()
-    with lock:
-        if now - state["at"] < VL_PROBE_TTL:
-            return state["ok"]
-    ok = False
-    try:
-        with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
-            ok = r.status == 200
-    except Exception:
-        ok = False
-    with lock:
-        state.update(ok=ok, at=now)
-    return ok
-
-
-def vl_available() -> bool:
-    """Is the vision server up right now? Cached for VL_PROBE_TTL seconds."""
-    return _probe(VL_URL, _vl_state, _vl_lock)
-
-
-def text_available() -> bool:
-    """Is the synthesis server up right now? (llama.cpp exposes /health; Ollama does not, and
-    answers 404 — which this treats as 'not up', so autoswap is only used with the llama.cpp
-    backend, where the swap is meaningful in the first place.)"""
-    return _probe(OLLAMA, _text_state, _text_lock)
-
-
-# ---- automatic VRAM switching -------------------------------------------------------------------
-# One big model fits. Rather than making the user run oracle-vram.sh before each request, the
-# endpoint that needs a model makes it resident. Serialised by _swap_lock so N concurrent requests
-# cause ONE swap, and re-checked inside the lock so the losers of the race do not swap again.
-AUTOSWAP = os.environ.get("ORACLE_VRAM_AUTOSWAP", "1").lower() in ("1", "true", "yes", "on")
-VRAM_SH = str(Path(__file__).resolve().parent / "oracle-vram.sh")
-# Must exceed oracle-vram.sh's own WAIT_S, or this kills a swap the script would have completed.
-SWAP_TIMEOUT = int(os.environ.get("ORACLE_VRAM_SWAP_TIMEOUT", "1200"))
-_swap_lock = threading.Lock()
-
-
-def ensure_model(kind: str):
-    """Make `kind` ("text"|"vl") resident, swapping if needed.
-
-    Yields human-readable progress strings (the caller forwards them as SSE), including a periodic
-    elapsed-time heartbeat: loading is disk-bound and can run for minutes on a cold page cache, and
-    a message followed by silence is indistinguishable from a hang — which is exactly how the first
-    version was reported. Raises RuntimeError if the model could not be made resident."""
-    probe = vl_available if kind == "vl" else text_available
-    if probe():
-        return
-    if not AUTOSWAP:
-        raise RuntimeError(f"{kind} model is not loaded and autoswap is off — run ./oracle-vram.sh {kind}")
-    with _swap_lock:
-        if probe():          # another request swapped it in while we waited
-            return
-        other = "text model" if kind == "vl" else "vision model"
-        want = "qwen3-vl" if kind == "vl" else "the text model"
-        yield f"swapping GPU: unloading the {other}, loading {want}…"
-
-        # Run it asynchronously and HEARTBEAT. Loading is disk-bound and can take minutes when the
-        # page cache is cold; a single message followed by silence is indistinguishable from a hang
-        # (it was reported as exactly that), and a long-idle SSE connection is also more likely to be
-        # dropped in transit. Emitting elapsed time keeps the stream warm and the user informed.
-        proc = subprocess.Popen([VRAM_SH, kind], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True)
-        started = time.time()
-        while proc.poll() is None:
-            if time.time() - started > SWAP_TIMEOUT:
-                proc.kill()
-                raise RuntimeError(f"GPU swap to {kind} timed out after {SWAP_TIMEOUT}s")
-            time.sleep(2)
-            waited = int(time.time() - started)
-            if waited and waited % 10 < 2:
-                yield f"loading {want}… {waited}s (reading weights from disk)"
-        out = (proc.stdout.read() if proc.stdout else "") or ""
-
-        # invalidate both caches: the swap changed BOTH models' residency
-        with _vl_lock:
-            _vl_state["at"] = 0.0
-        with _text_lock:
-            _text_state["at"] = 0.0
-        # HEALTH decides, not the exit code. The script can give up waiting while the server is
-        # still loading and become healthy moments later; if the model is answering now, the swap
-        # worked, whatever the script concluded.
-        if not probe():
-            raise RuntimeError(f"GPU swap to {kind} failed: {out.strip()[:300]}")
+VL_DISABLED_MSG = oracle_vram.VL_DISABLED_MSG
+vl_available = oracle_vram.vl_available
+text_available = oracle_vram.text_available
+ensure_model = oracle_vram.ensure
+AUTOSWAP = oracle_vram.AUTOSWAP
 SYNTH_MODEL = os.environ.get("ORACLE_SYNTH_MODEL", "qwen3-coder:30b")
 RERANK_ID = os.environ.get("ORACLE_RERANK_ID", "gte-multilingual-reranker-base@local-gte-rerank@Jina")
 # Corpus browser (oracle-browser) — renders the ORIGINAL page a citation came from, so a footnote
@@ -772,8 +678,9 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
             parts.append(f"Text visible on the page (may be truncated):\n{t}")
     if not parts:
         return ""
-    came_from = ("it was taken from this page" if source == "image"
-                 else "the region was screenshotted from this page")
+    came_from = {"image": "it was taken from this page",
+                 "page": "it is a screenshot of this page's entire visible area",
+                 }.get(source, "the region was screenshotted from this page")
     return (f"Context for the image below — {came_from}. Use it to identify what is being shown "
             "(system, dashboard, metric names, units, time range) instead of guessing, but "
             "describe only what the IMAGE actually shows.\n\n"

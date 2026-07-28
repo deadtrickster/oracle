@@ -21,6 +21,8 @@ chrome.runtime.onInstalled.addListener(() => {
   // Right-clicking an image already identifies the target, so there is nothing to select: skip the
   // rectangle entirely and read that image.
   chrome.contextMenus.create({ id: "img", title: "Explain this image with Oracle", contexts: ["image"] });
+  // The whole viewport, both models: page text (summarised) + a screenshot read by qwen3-vl.
+  chrome.contextMenus.create({ id: "page-vl", title: "Explain this page with Oracle (vision)", contexts: ["page"] });
   refreshBadge();
 });
 
@@ -31,6 +33,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   else if (info.menuItemId === "factcheck") ground(tab, "factcheck", info.selectionText || "");
   else if (info.menuItemId === "shot") screenshotRegion(tab);
   else if (info.menuItemId === "img") visionImage(info.srcUrl, tab);
+  else if (info.menuItemId === "page-vl") visionPage(tab);
 });
 
 chrome.commands.onCommand.addListener((cmd) => {
@@ -52,6 +55,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "vision:region") { if (sender.tab) visionRegion(msg, sender.tab); return false; }
+  if (msg.type === "visionPage") {
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) visionPage(tab); sendResponse({ ok: true }); });
+    return true;
+  }
   if (msg.type === "oracle:groundVision") { if (sender.tab) groundVision(msg.text, sender.tab); return false; }
   if (msg.type === "dwell") {            // from dwell.js content script — passive signal
     observe(msg.text, OBS.dwell, msg.url, msg.title);
@@ -324,6 +331,51 @@ async function visionRegion(msg, tab) {
     await pumpSSE(r.body, send);
   } catch (e) {
     // make sure the card exists to show the error
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
+      await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
+    } catch (_) {}
+    send({ event: "error", data: { error: "Vision failed: " + (e.message || e) + " (is the receiver + qwen3-vl up?)" } });
+  }
+}
+
+// "Explain this page" — the region flow with the rectangle already drawn around the whole viewport.
+//
+// Both halves of the machine, on whatever is on screen: the page's own text (summarised by the text
+// model first, while it is still the resident one and therefore free) and a screenshot of the
+// visible area read by qwen3-vl. Neither half is sufficient on a real dashboard — the text knows
+// the datasource and dashboard ID, the pixels know which line went vertical at 14:20.
+//
+// Capture BEFORE injecting the card, or the overlay ends up inside the screenshot it is about.
+async function visionPage(tab) {
+  if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
+  const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode: "vision", ev }).catch(() => {});
+  let thumb = null;
+  try {
+    let pageText = "";
+    try {
+      const [pt] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => (document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 6000),
+      });
+      pageText = pt?.result || "";
+    } catch (_) { /* some pages refuse injection; the pixels still work */ }
+
+    const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    thumb = shot;
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
+    await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
+    const r = await fetch(RECEIVER + "/vision", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image: shot.split(",")[1], mime: "image/png",
+        prompt: "Explain this page: what is it, what is it showing, and what should I notice?",
+        url: tab.url, title: tab.title, page_text: pageText, crop_text: "", source: "page",
+      }),
+    });
+    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
+    await pumpSSE(r.body, send);
+  } catch (e) {
     try {
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
       await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
