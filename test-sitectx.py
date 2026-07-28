@@ -118,7 +118,7 @@ rcv._retrieve = lambda q, kb, top_n=64: ([{"document_keyword": "d.pdf",
                                            "content_with_weight": "a corpus excerpt"}], True)
 rcv._diversify = lambda q, c, main=18, cross=4: c
 rcv._citations = lambda c, q: []
-rcv.ensure_model = lambda kind: iter(())
+rcv.ensure_model = lambda kind, host="": iter(())
 
 
 def _fake_chat(messages, **kw):

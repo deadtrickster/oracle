@@ -958,9 +958,41 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
     yield from _chat_loop(host, url, title, agents_md, where, debug, session)
 
 
-def _run_local_tool(name: str, args: dict, debug: bool):
+def _site_operations(helpers: dict, match: str = "") -> str:
+    """The site's read-only operations, rendered for the model.
+
+    Deliberately generated from the allowlist file rather than written into the pack prose: the
+    allowlist is regenerated from the API's own spec, so this cannot describe an operation that no
+    longer exists, and cannot omit one that was just added. Hand-written API documentation in a
+    prompt is documentation that drifts silently and is believed anyway."""
+    gate = (helpers.get("allowlists") or {}).get("api") or {}
+    ops = gate.get("detail") or {}
+    m = (match or "").lower()
+    rows = [(p, d) for p, d in sorted(ops.items())
+            if not m or m in p.lower() or m in (d.get("summary", "").lower())]
+    if not rows:
+        return (f"No operation matches {match!r}. Call list_operations with no filter to see all "
+                f"{len(ops)}.")
+    out = [f"{len(rows)} read-only operations"
+           + (f" matching {match!r}" if m else "") + " (procedure — what it does — request fields):"]
+    for p, d in rows:
+        fields = ", ".join(f"{k}: {v}" for k, v in (d.get("request") or {}).items()) or "(none)"
+        out.append(f"\n{p}\n  {d.get('summary', '')}\n  request: {fields}")
+    return "\n".join(out)
+
+
+def _run_local_tool(name: str, args: dict, debug: bool, helpers: dict | None = None):
     """Execute a tool the receiver owns. Yields SSE events, returns the result text via `out`."""
     out = {"text": ""}
+    if name == "site_call":
+        helpers = helpers or {}
+        fn = (args or {}).get("fn")
+        inner = (args or {}).get("args") or {}
+        if fn == "list_operations":
+            out["text"] = _site_operations(helpers, inner.get("match", ""))
+        else:
+            out["text"] = f"error: {fn} is not a site function this side can run"
+        return out
     if name != "search_corpus":
         out["text"] = f"error: {name} is not a tool this side can run"
         return out
@@ -984,6 +1016,55 @@ def _run_local_tool(name: str, args: dict, debug: bool):
         for i, c in enumerate(chunks))
         or "No relevant passages. The corpus does not cover this; say so rather than guessing.")
     return out
+
+
+def _call_signatures(turns) -> list:
+    """(tool, arguments) for every call already made in this exchange — i.e. since the last user
+    message. Earlier topics do not count: asking about a page, then asking again after navigating
+    somewhere else, is a legitimate repeat and must not be blocked."""
+    sigs = []
+    for t in reversed(turns):
+        if t.get("role") == "user":
+            break
+        for c in (t.get("tool_calls") or []):
+            sigs.append((c["function"]["name"], (c["function"].get("arguments") or "").strip()))
+    return sigs
+
+
+def _acting_note(can_act, act_mode: str = "") -> str:
+    """Tell the model what it CANNOT do here, and what the user can do about it.
+
+    Removing the acting tools is the right enforcement and it is not enough on its own. Observed on
+    a real Gmail session: asked to open an email on a host where acting is off, the model spent six
+    steps announcing clicks it could not perform — "I need to click", "let me try a CSS selector",
+    "I'll click now" — each time reaching for the only tools it had (look_at_page, wait) and
+    re-screenshotting the same inbox. It never told the user why, because it did not know: an absent
+    tool is indistinguishable from a tool that never existed, so it read its own inability as a
+    failure to find the right approach and kept trying approaches.
+
+    Saying so is not a prompt workaround for a missing guard (Axiom 2) — the guard is already there
+    and still absolutely enforced. This supplies the one thing removal cannot: the REASON, and the
+    remedy, so a refusal becomes an answer the user can act on instead of a loop they have to watch.
+    """
+    if act_mode == oracle_chat.CONFIRM:
+        return ("\n\nEVERY ACTION ON THIS SITE IS CONFIRMED BY THE USER. When you call click, "
+                "type_text or navigate, the target is highlighted on the page and the user presses "
+                "Enter to allow it or Esc to skip it. So: act ONE step at a time and read the "
+                "result before the next — a queue of five clicks is five interruptions, and later "
+                "ones may be meaningless once an earlier one is skipped. Say what you are about to "
+                "do and why, briefly, BEFORE the call, because that sentence is what the user is "
+                "deciding on. If an action is skipped, that is an answer, not an error: do not "
+                "retry it, do not work around it — continue without it or ask what they would "
+                "prefer.")
+    if can_act:
+        return ""
+    return ("\n\nYOU CANNOT ACT ON THIS SITE. Clicking, typing and navigating are switched OFF for "
+            "this host — that is a setting, not a limitation of yours, and no amount of trying will "
+            "work around it. Do NOT attempt to click by taking another screenshot, waiting, or "
+            "describing a click as though you performed one. If the user asks you to click, open, "
+            "type or navigate, say plainly that acting is disabled for this site and that they can "
+            "enable it per-host in the extension, then answer as much of the question as you can "
+            "from what is already on screen.")
 
 
 CHAT_MAX_STEPS = int(os.environ.get("ORACLE_CHAT_MAX_STEPS", "8"))
@@ -1010,8 +1091,10 @@ def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool,
     site = oracle_sitectx.block(url, agents_md)
     page = _page_context(url, title, where)
     system = _system_for(site, host)
-    can_act = oracle_chat.actions_allowed(host)
-    tools = oracle_tools.for_host(can_act)
+    act_mode = oracle_chat.mode(host)
+    can_act = act_mode != oracle_chat.OFF
+    helpers = oracle_sitectx.helpers_for(host)
+    tools = oracle_tools.for_host(can_act, helpers)
 
     # The lease covers the whole loop, so a multi-step turn is not interrupted between steps by
     # someone else's swap. It is released while a BROWSER tool runs, because that work happens in
@@ -1020,15 +1103,30 @@ def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool,
         if waited:
             yield ("status", {"text": waited})
         try:
-            for note in ensure_model("text"):
+            for note in ensure_model("text", host):
                 yield ("status", {"text": note})
         except RuntimeError as e:
             yield ("error", {"error": str(e)})
             return
-        yield from _chat_steps(host, session, system, page, tools, can_act, debug)
+        yield from _chat_steps(host, session, system, page, tools, can_act, debug, helpers,
+                               act_mode)
 
 
-def _chat_steps(host, session, system, page, tools, can_act, debug):
+def _site_call_is_browser(name: str, args: dict, helpers: dict) -> bool:
+    """Does this call need the page? Routing is PER CALL, not per tool name.
+
+    `site_call` covers both a site function that must run in the page (it talks to the site's API
+    with the page's own credentials) and one the receiver can answer from the generated allowlist
+    with no network at all. Sending "what operations exist?" on a round trip through the browser
+    would be a wasted hand-off and a wasted second."""
+    if name != "site_call":
+        return oracle_tools.is_browser(name)
+    spec = (helpers.get("functions") or {}).get((args or {}).get("fn")) or {}
+    return not spec.get("local")
+
+
+def _chat_steps(host, session, system, page, tools, can_act, debug, helpers=None, act_mode=""):
+    helpers = helpers or {}
     for step in range(CHAT_MAX_STEPS):
         turns = oracle_chat.history(host, session)
         # Count model calls across the whole EXCHANGE, not this invocation of the loop. A browser
@@ -1036,7 +1134,8 @@ def _chat_steps(host, session, system, page, tools, can_act, debug):
         # which printed "model call (step 1)" twice in a row and read as the same work repeating.
         call_no = sum(1 for t in turns if t["role"] == "assistant") + 1
         msgs = ([{"role": "system", "content": system}]
-                + ([{"role": "user", "content": _CHAT_TASK + ("\n\n" + page if page else "")}]
+                + ([{"role": "user", "content": _CHAT_TASK + _acting_note(can_act, act_mode)
+                                                + ("\n\n" + page if page else "")}]
                    if step == 0 else [])
                 + oracle_chat.to_messages(turns))
         yield from _dbg(debug, f"model call #{call_no}", host=host, turns=len(turns),
@@ -1066,7 +1165,60 @@ def _chat_steps(host, session, system, page, tools, can_act, debug):
 
         oracle_chat.append(host, "assistant", text, tool_calls=calls, session=session)
 
-        browser = [c for c in calls if oracle_tools.is_browser(c["function"]["name"])]
+        # Repetition means stuck, and the harness can see it when the model cannot.
+        #
+        # A model that has run out of viable moves does not sit still: it re-runs the move it
+        # already made, because from inside the conversation the previous result looks like it might
+        # have been a fluke. Nothing in the transcript says "you already did this and it changed
+        # nothing" — so the same look_at_page against the same unchanged page ran three times in one
+        # exchange while the user watched a spinner.
+        #
+        # Answer the repeat locally instead of executing it: same cost as noticing, and it converts
+        # a silent loop into a fact the model can act on. Same shape as the bad-selector recovery
+        # that already works — refuse the call, explain, and hand back something usable.
+        prior = _call_signatures(turns)
+        for c in list(calls):
+            sig = (c["function"]["name"], (c["function"].get("arguments") or "").strip())
+            if prior.count(sig) < 2:
+                continue
+            yield from _dbg(debug, "repeated call intercepted", tool=sig[0], times=prior.count(sig))
+            oracle_chat.append(
+                host, "tool",
+                f"NOT RUN — you have already called {sig[0]} with these exact arguments "
+                f"{prior.count(sig)} times in this exchange and the result did not change. "
+                f"Repeating it will not change it again. Either do something DIFFERENT (different "
+                f"arguments, a different tool), or stop and tell the user what you found and what "
+                f"is blocking you. If you have been trying to perform an action you do not have a "
+                f"tool for, say that plainly rather than trying to achieve it another way.",
+                tool_call_id=c["id"], name=sig[0], session=session)
+            calls.remove(c)
+        if not calls:
+            continue
+
+        # A site_call the manifest does not permit is answered HERE, with the reason, and never
+        # leaves the receiver. Rejecting it in the page would mean the code enforcing the rule is
+        # the code being asked to break it; rejecting it in the prompt would mean asking nicely.
+        # The model gets a usable error instead of a refusal, so the turn continues.
+        rejected = []
+        for c in calls:
+            if c["function"]["name"] != "site_call":
+                continue
+            why = oracle_tools.check_site_call(helpers, _try_json(c["function"].get("arguments")))
+            if why:
+                rejected.append((c, why))
+        if rejected:
+            for c, why in rejected:
+                yield from _dbg(debug, "site_call refused", why=why,
+                                args=_try_json(c["function"].get("arguments")))
+                oracle_chat.append(host, "tool", f"refused: {why}", tool_call_id=c["id"],
+                                   name="site_call", session=session)
+            calls = [c for c in calls if c not in [r[0] for r in rejected]]
+            if not calls:
+                continue
+
+        browser = [c for c in calls
+                   if _site_call_is_browser(c["function"]["name"],
+                                            _try_json(c["function"].get("arguments")), helpers)]
         if browser:
             # Hand off. The extension executes these and posts the results back, which re-enters
             # this loop with the transcript one step further along.
@@ -1076,9 +1228,19 @@ def _chat_steps(host, session, system, page, tools, can_act, debug):
                     args = json.loads(c["function"].get("arguments") or "{}")
                 except Exception:
                     args = {}
-                asks.append({"id": c["id"], "name": c["function"]["name"], "args": args,
-                             "acting": oracle_tools.is_acting(c["function"]["name"]),
-                             "says": oracle_tools.describe(c["function"]["name"], args)})
+                ask = {"id": c["id"], "name": c["function"]["name"], "args": args,
+                       "acting": oracle_tools.is_acting(c["function"]["name"]),
+                       "confirm": (act_mode == oracle_chat.CONFIRM
+                                   and oracle_tools.is_acting(c["function"]["name"])),
+                       "says": oracle_tools.describe(c["function"]["name"], args)}
+                if ask["name"] == "site_call":
+                    # The helper source rides along with the request rather than being installed in
+                    # the extension. Editing `site-packs/<domain>.js` then takes effect on the next
+                    # call — no extension reload, no version skew between the manifest the model was
+                    # shown and the code that runs.
+                    ask["code"] = helpers.get("code", "")
+                    ask["ns"] = helpers.get("namespace", "__oracle_stroppy")
+                asks.append(ask)
             yield ("tool_request", {"calls": asks})
             yield ("done", {"epoch": oracle_chat.epoch(host, session), "pending_tools": True})
             return
@@ -1090,7 +1252,7 @@ def _chat_steps(host, session, system, page, tools, can_act, debug):
             except Exception:
                 args = {}
             yield ("status", {"text": oracle_tools.describe(name, args) + "…"})
-            res = _run_local_tool(name, args, debug)
+            res = _run_local_tool(name, args, debug, helpers)
             if res.get("citations") is not None:
                 yield ("sources", {"sources": res.get("sources", []),
                                    "citations": res.get("citations", []),
@@ -1704,7 +1866,9 @@ class Handler(BaseHTTPRequestHandler):
                             "sessions": oracle_chat.sessions()})
             elif self.path.startswith("/chat/allow"):
                 h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
-                self._send({"host": h, "actions": oracle_chat.set_actions(h, bool(p.get("allow")))})
+                # `allow` is now a MODE ("off"/"confirm"/"allow"); bools still arrive from
+                # older panels and set_actions maps them.
+                self._send({"host": h, "actions": oracle_chat.set_actions(h, p.get("allow"))})
             elif self.path.startswith("/chat/reset"):
                 h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
                 s = (p.get("session") or oracle_chat.MAIN).strip()

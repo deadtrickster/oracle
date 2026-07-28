@@ -53,6 +53,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       ([tab]) => capture(tab, { note: msg.note }).then(sendResponse));
     return true;
   }
+  if (msg.type === "chatConfirm") {
+    const finish = pendingConfirms.get(msg.id);
+    if (finish) finish(Boolean(msg.ok));
+    sendResponse({ ok: Boolean(finish) });
+    return true;
+  }
   if (msg.type === "batchCapture") { batchCapture().then(sendResponse); return true; }
   if (msg.type === "drain") { drainQueue().then(sendResponse); return true; }
   if (msg.type === "queueCount") { getQueue().then((q) => sendResponse(q.length)); return true; }
@@ -539,6 +545,145 @@ function toolType(arg) {
   return `typed into ${arg.selector}; its value is now ${JSON.stringify((el.value || "").slice(0, 200))}`;
 }
 
+// ---------------------------------------------------------------- confirmed actions
+//
+// "Safe click": the model picks the target, the human presses the key.
+//
+// The split is along the natural seam. Choosing WHICH element is what the model is good at — it
+// has just read the page and knows what the user asked for. Deciding WHETHER to press it is what
+// carries the consequence, and in a mail client Archive, Delete and Send sit a few pixels apart.
+// The old binary made you choose between a model that could see the button but not press it, and
+// one that could press anything at all.
+//
+// It also changes WHEN you find out. With allow-all, the record of an action is a line of text
+// after the fact. Here the actual element lights up on the actual page, before anything happens,
+// and doing nothing is the safe default: no keypress, no click.
+const pendingConfirms = new Map();
+
+// injected: find what a click WOULD hit, outline it, and report it — without clicking.
+function toolPreview(arg) {
+  const want = (arg.text || "").trim().toLowerCase();
+  let el = null;
+  if (arg.selector) el = document.querySelector(arg.selector);
+  if (!el && want) {
+    const cand = [...document.querySelectorAll(
+      "button, a, [role=tab], [role=button], input[type=submit], summary, li, div, span")];
+    const vis = (n) => n.getClientRects().length > 0;
+    const exact = cand.filter((n) => vis(n) && (n.innerText || n.value || "").trim().toLowerCase() === want);
+    const part = cand.filter((n) => vis(n) && (n.innerText || "").trim().toLowerCase().includes(want));
+    el = (exact.length ? exact : part).sort(
+      (a, b) => (a.innerText || "").length - (b.innerText || "").length)[0] || null;
+  }
+  document.querySelectorAll("[data-oracle-target]").forEach((n) => {
+    n.removeAttribute("data-oracle-target");
+    n.style.outline = n.dataset.oraclePrevOutline || "";
+    delete n.dataset.oraclePrevOutline;
+  });
+  if (!el) return { found: false };
+  el.dataset.oraclePrevOutline = el.style.outline;
+  el.setAttribute("data-oracle-target", "1");
+  el.style.outline = "3px solid #f5a623";
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  const r = el.getBoundingClientRect();
+  return {
+    found: true,
+    label: (el.innerText || el.value || el.tagName).replace(/\s+/g, " ").trim().slice(0, 90),
+    tag: el.tagName.toLowerCase(),
+    href: el.getAttribute("href") || "",
+    rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+  };
+}
+
+// injected: drop the highlight again, whatever the user decided.
+function toolPreviewClear() {
+  document.querySelectorAll("[data-oracle-target]").forEach((n) => {
+    n.removeAttribute("data-oracle-target");
+    n.style.outline = n.dataset.oraclePrevOutline || "";
+    delete n.dataset.oraclePrevOutline;
+  });
+}
+
+// Ask the panel, and wait. Resolves true (do it), false (skip it).
+//
+// A timeout is required, not optional: this runs inside a tool loop that is holding a model lease,
+// and a user who walks away must not wedge the queue for everyone. Timing out counts as NOT
+// confirmed, because the whole design rests on inaction being the safe outcome.
+function askConfirm(call, preview, send) {
+  return new Promise((resolve) => {
+    const id = call.id;
+    const finish = (ok) => {
+      if (!pendingConfirms.has(id)) return;
+      clearTimeout(timer);
+      pendingConfirms.delete(id);
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), CONFIRM_TIMEOUT_MS);
+    pendingConfirms.set(id, finish);
+    send({ event: "confirm_request",
+           data: { id, says: call.says, name: call.name, args: call.args, preview } });
+  });
+}
+
+const CONFIRM_TIMEOUT_MS = 120000;
+
+// A site's own helper functions, run in the page's world.
+//
+// MAIN world, not the extension's isolated one, and that is the entire reason this exists: the
+// thing a site helper needs — the app's live credentials, its client, its router — is in the page's
+// module scope, and an isolated content script is isolated from precisely that. The DOM is shared;
+// the JavaScript state is not.
+//
+// The source is NOT bundled into the extension. It arrives with each tool request from the
+// receiver, which reads it from `site-packs/<domain>.js`. So the code that runs is always the code
+// whose manifest the model was shown, and editing a helper does not need an extension reload.
+//
+// What the model supplies is a function NAME and arguments — never source. The page-side entry
+// point looks up the name in a fixed table and returns `no such site function` for anything else,
+// which is what keeps this from being `eval` with extra steps.
+async function runSiteCall(call, tab) {
+  const a = call.args || {};
+  const ns = call.ns || "__oracle_site";
+  if (!call.code) return "no helper code was provided for this site";
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    args: [call.code, ns, a.fn || "", a.args || {}],
+    func: async (code, key, fn, args) => {
+      try {
+        if (!window[key]) {
+          // Indirect eval so the helper evaluates at global scope. It is idempotent and guards on
+          // its own namespace, so re-injection on every call is cheap and keeps a page that
+          // navigated (losing the previous injection) working without special-casing it.
+          (0, eval)(code);
+        }
+        if (!window[key]) return { error: "helper did not install" };
+        return await window[key].call(fn, args);
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        // The helper is evaluated under the PAGE's Content-Security-Policy, not the extension's.
+        // The panel sends no CSP today, so this works; the day it sends one with a script-src that
+        // omits 'unsafe-eval', this is the line that breaks, and a bare "EvalError" would send
+        // whoever debugs it looking in the wrong repo entirely.
+        if (/eval|unsafe-eval|Content Security Policy/i.test(msg)) {
+          return { error: `the page's Content-Security-Policy blocked the site helper (${msg}). ` +
+                          `The other tools still work — fall back to read_page/look_at_page.` };
+        }
+        return { error: msg };
+      }
+    },
+  });
+  const out = res?.result;
+  if (out && out.error) return `site_call ${a.fn} failed: ${out.error}`;
+  // Returned as JSON text, because that is the point of the whole exercise: the model reads exact
+  // values rather than transcribing them off a rendering of the same values.
+  const text = JSON.stringify(out, null, 1);
+  const LIMIT = 24000;
+  return text.length > LIMIT
+    ? text.slice(0, LIMIT) + `\n…[truncated at ${LIMIT} chars of ${text.length}. Narrow the ` +
+      `request — most list operations take a page size and a filter.]`
+    : text;
+}
+
 async function runBrowserTool(call, tab, notify = () => {}) {
   const a = call.args || {};
   const exec = (func, args) => chrome.scripting
@@ -570,6 +715,7 @@ async function runBrowserTool(call, tab, notify = () => {}) {
       return `${out}\nAFTER: ${after?.url} — ${after?.title}\n${after?.text || ""}`;
     }
     if (call.name === "type_text") return String(await exec(toolType, [a]));
+    if (call.name === "site_call") return await runSiteCall(call, tab);
     if (call.name === "navigate") {
       // Same-origin only. A site's URL grammar is a tool for using THAT site; letting a page's own
       // reference material send the tab anywhere would make "context from the site" into "control
@@ -637,6 +783,26 @@ async function chatHandleTools(calls, tab, send, depth) {
   const results = [];
   try {
     for (const c of calls) {
+      // Confirmed actions: show the user what is about to happen, on the page, and wait.
+      if (c.confirm) {
+        const [pv] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id }, func: toolPreview, args: [c.args || {}] });
+        const preview = pv?.result || { found: false };
+        const ok = await askConfirm(c, preview, send);
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: toolPreviewClear })
+          .catch(() => {});
+        if (!ok) {
+          // Report the decision as a RESULT, not an error. The model is told elsewhere that a skip
+          // is an answer; here it gets the fact in the same channel as every other outcome, so it
+          // continues the conversation rather than treating it as a failed attempt to retry.
+          const content = `NOT DONE — the user declined this action (${c.says}). This is their ` +
+            `decision, not a failure. Do not retry it and do not try to achieve it another way. ` +
+            `Carry on without it, or ask them what they would prefer.`;
+          send({ event: "tool_done", data: { id: c.id, failed: false, detail: "declined" } });
+          results.push({ id: c.id, name: c.name, content, image: "" });
+          continue;
+        }
+      }
       send({ event: "status", data: { text: c.says + "…" } });
       const content = await runBrowserTool(c, tab, (image) =>
         send({ event: "tool_image", data: { id: c.id, image, says: c.says } }));
@@ -727,7 +893,7 @@ async function chatAllow(tab, allow) {
   try {
     await fetch(RECEIVER + "/chat/allow", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host, allow: !!allow }),
+      body: JSON.stringify({ host, allow }),   // "off" | "confirm" | "allow"
     });
   } catch (_) {}
 }

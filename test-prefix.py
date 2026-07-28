@@ -45,7 +45,7 @@ def check(name, cond, detail=""):
 
 
 captured = []
-rcv.ensure_model = lambda kind: iter(())
+rcv.ensure_model = lambda kind, host="": iter(())
 rcv._kb_ids = lambda: ["kb"]
 rcv._retrieve = lambda q, kb, top_n=64: ([{"document_keyword": "d.pdf",
                                            "content_with_weight": "an excerpt"}], True)

@@ -47,7 +47,7 @@ def dbg(evs, stage):
 
 
 # --- stubs: nothing here may touch the GPU or the corpus -----------------------------------------
-rcv.ensure_model = lambda kind: iter(())
+rcv.ensure_model = lambda kind, host="": iter(())
 rcv.text_available = lambda force=False: True
 rcv._chat_stream = lambda msgs, **kw: iter(["answer"])
 rcv._kb_ids = lambda: ["kb"]

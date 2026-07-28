@@ -1,0 +1,547 @@
+{
+ "source": "/home/dead/Projects/stroppy-io/stroppy-cloud/internal/openapidoc/stroppy-cloud.openapi.yaml",
+ "generated_from": "x-idempotency-level: NO_SIDE_EFFECTS ∩ GET ∩ exists-in-code",
+ "operations": {
+  "/cloud.v1.api.CompareService/CompareRuns": {
+   "rest_path": "/api/v1/compare/compare-runs",
+   "summary": "CompareRuns returns each run's config column plus the per-metric diff",
+   "request": {
+    "runIds": "array of string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.DatabasePresetService/GetDatabasePreset": {
+   "rest_path": "/api/v1/database-preset/get-database-preset",
+   "summary": "GetDatabasePreset fetches one database preset by id. Read-only.",
+   "request": {
+    "id": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.DatabasePresetService/ListDatabasePresets": {
+   "rest_path": "/api/v1/database-preset/list-database-presets",
+   "summary": "ListDatabasePresets lists a tenant's database presets. Read-only.",
+   "request": {
+    "dbKinds": "array of integer",
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "isSystem": "boolean",
+    "page": "Page {size, token}",
+    "sort": "Sort {desc, entity, kind}",
+    "sources": "array of integer",
+    "tags": "object",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.FavoriteService/ListFavorites": {
+   "rest_path": "/api/v1/favorite/list-favorites",
+   "summary": "ListFavorites returns the caller's favorite join rows, optionally narrowed",
+   "request": {
+    "kind": "integer",
+    "page": "Page {size, token}",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/GetAccount": {
+   "rest_path": "/api/v1/iam/get-account",
+   "summary": "GetAccount fetches one account by id. The handler allows platform admins,",
+   "request": {
+    "id": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/GetIdentityProvider": {
+   "rest_path": "/api/v1/iam/get-identity-provider",
+   "summary": "GetIdentityProvider fetches one provider by id. Admin-only, read-only.",
+   "request": {
+    "id": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/GetMembership": {
+   "rest_path": "/api/v1/iam/get-membership",
+   "summary": "GetMembership fetches one membership by id. Read-only.",
+   "request": {
+    "id": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/GetMyAccount": {
+   "rest_path": "/api/v1/iam/get-my-account",
+   "summary": "GetMyAccount returns the caller's own profile — authenticated, no",
+   "request": {}
+  },
+  "/cloud.v1.api.IamService/GetMyPermissions": {
+   "rest_path": "/api/v1/iam/get-my-permissions",
+   "summary": "GetMyPermissions resolves the caller's own permissions — authenticated, no permission.",
+   "request": {
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/GetRole": {
+   "rest_path": "/api/v1/iam/get-role",
+   "summary": "GetRole fetches one role by id. Read-only.",
+   "request": {
+    "id": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/GetTenant": {
+   "rest_path": "/api/v1/iam/get-tenant",
+   "summary": "GetTenant fetches by id or slug; slug is the routing-resolve path. The",
+   "request": {
+    "id": "string",
+    "slug": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/ListAccounts": {
+   "rest_path": "/api/v1/iam/list-accounts",
+   "summary": "ListAccounts lists accounts platform-wide. Read-only.",
+   "request": {
+    "pageSize": "integer",
+    "pageToken": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/ListApiTokens": {
+   "rest_path": "/api/v1/iam/list-api-tokens",
+   "summary": "ListApiTokens lists an account's tokens (metadata only). Authenticated;",
+   "request": {
+    "accountId": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/ListExternalIdentities": {
+   "rest_path": "/api/v1/iam/list-external-identities",
+   "summary": "ListExternalIdentities is authenticated; the service enforces",
+   "request": {
+    "accountId": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/ListIdentityProviders": {
+   "rest_path": "/api/v1/iam/list-identity-providers",
+   "summary": "ListIdentityProviders returns the login-page buttons. Public, read-only.",
+   "request": {}
+  },
+  "/cloud.v1.api.IamService/ListMemberships": {
+   "rest_path": "/api/v1/iam/list-memberships",
+   "summary": "ListMemberships lists one tenant's members. Read-only.",
+   "request": {
+    "pageSize": "integer",
+    "pageToken": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/ListMyTenants": {
+   "rest_path": "/api/v1/iam/list-my-tenants",
+   "summary": "ListMyTenants returns the caller's tenants — authenticated, no permission.",
+   "request": {}
+  },
+  "/cloud.v1.api.IamService/ListPermissions": {
+   "rest_path": "/api/v1/iam/list-permissions",
+   "summary": "ListPermissions returns the grantable-permission catalog — authenticated, no permission.",
+   "request": {}
+  },
+  "/cloud.v1.api.IamService/ListRegistrationRequests": {
+   "rest_path": "/api/v1/iam/list-registration-requests",
+   "summary": "ListRegistrationRequests returns the access requests for admin triage.",
+   "request": {
+    "status": "integer"
+   }
+  },
+  "/cloud.v1.api.IamService/ListRoles": {
+   "rest_path": "/api/v1/iam/list-roles",
+   "summary": "ListRoles lists roles visible to the caller (tenant or platform scope).",
+   "request": {
+    "pageSize": "integer",
+    "pageToken": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.IamService/LookupAccountByEmail": {
+   "rest_path": "/api/v1/iam/lookup-account-by-email",
+   "summary": "LookupAccountByEmail resolves an exact email to its account — the",
+   "request": {
+    "email": "string"
+   }
+  },
+  "/cloud.v1.api.PackageService/GetPackage": {
+   "rest_path": "/api/v1/package/get-package",
+   "summary": "GetPackage fetches one package by id. Read-only.",
+   "request": {
+    "id": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.PackageService/ListPackages": {
+   "rest_path": "/api/v1/package/list-packages",
+   "summary": "ListPackages lists a tenant's packages. Read-only.",
+   "request": {
+    "dbKinds": "array of integer",
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "formats": "array of integer",
+    "page": "Page {size, token}",
+    "sort": "EntitySort {desc, field}",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.PublicRatingService/GetPublicRating": {
+   "rest_path": "/api/v1/public-rating/get-public-rating",
+   "summary": "GetPublicRating resolves the public leaderboard. PUBLIC: no bearer token.",
+   "request": {
+    "filter": "RatingFilter {dbKinds, metricKey, providers, startedAfter, startedBefore, stroppyVersions}",
+    "limit": "integer",
+    "pageToken": "string"
+   }
+  },
+  "/cloud.v1.api.PublicShareService/GetSharedRun": {
+   "rest_path": "/api/v1/public-share/get-shared-run",
+   "summary": "GetSharedRun resolves a share token to its limited snapshot. PUBLIC: no",
+   "request": {
+    "token": "string"
+   }
+  },
+  "/cloud.v1.api.QuotaService/GetRunQuotaUsage": {
+   "rest_path": "/api/v1/quota/get-run-quota-usage",
+   "summary": "",
+   "request": {
+    "runId": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.QuotaService/ListQuotas": {
+   "rest_path": "/api/v1/quota/list-quotas",
+   "summary": "",
+   "request": {
+    "provider": "integer",
+    "refreshPolicy": "integer",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.RatingService/GetSystemRating": {
+   "rest_path": "/api/v1/rating/get-system-rating",
+   "summary": "GetSystemRating: cross-system private board over in_global_rating runs. Any",
+   "request": {
+    "filter": "RatingFilter {dbKinds, metricKey, providers, startedAfter, startedBefore, stroppyVersions}",
+    "limit": "integer",
+    "pageToken": "string"
+   }
+  },
+  "/cloud.v1.api.RatingService/GetTenantRating": {
+   "rest_path": "/api/v1/rating/get-tenant-rating",
+   "summary": "GetTenantRating: this tenant's board over in_tenant_rating runs.",
+   "request": {
+    "filter": "RatingFilter {dbKinds, metricKey, providers, startedAfter, startedBefore, stroppyVersions}",
+    "limit": "integer",
+    "pageToken": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.ShareService/GetShare": {
+   "rest_path": "/api/v1/share/get-share",
+   "summary": "GetShare fetches one share by id. Read-only.",
+   "request": {
+    "id": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.ShareService/ListShares": {
+   "rest_path": "/api/v1/share/list-shares",
+   "summary": "ListShares lists a tenant's shares. Read-only.",
+   "request": {
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "page": "Page {size, token}",
+    "sort": "EntitySort {desc, field}",
+    "targetId": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.StroppyService/ListStroppyVersions": {
+   "rest_path": "/api/v1/stroppy/list-stroppy-versions",
+   "summary": "ListStroppyVersions returns suggested release versions. Read-only.",
+   "request": {
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.SuiteRunService/GetSuiteRun": {
+   "rest_path": "/api/v1/suite-run/get-suite-run",
+   "summary": "GetSuiteRun fetches a single suite run by id. Read-only.",
+   "request": {
+    "id": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.SuiteRunService/ListSuiteRuns": {
+   "rest_path": "/api/v1/suite-run/list-suite-runs",
+   "summary": "ListSuiteRuns lists suite runs with filtering and pagination. Read-only.",
+   "request": {
+    "dbKinds": "array of integer",
+    "durationMax": "string",
+    "durationMin": "string",
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "finishedAfter": "string",
+    "finishedBefore": "string",
+    "page": "Page {size, token}",
+    "progressMax": "integer",
+    "progressMin": "integer",
+    "providers": "array of integer",
+    "sort": "Sort5 {desc, entity, kind}",
+    "startedAfter": "string",
+    "startedBefore": "string",
+    "statuses": "array of integer",
+    "suiteId": "string",
+    "tenantId": "string",
+    "triggers": "array of integer"
+   }
+  },
+  "/cloud.v1.api.SuiteService/GetSuite": {
+   "rest_path": "/api/v1/suite/get-suite",
+   "summary": "GetSuite fetches a single suite definition by id. Read-only.",
+   "request": {
+    "id": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.SuiteService/ListSuiteFacets": {
+   "rest_path": "/api/v1/suite/list-suite-facets",
+   "summary": "ListSuiteFacets lists distinct values for suite-list facet controls.",
+   "request": {
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.SuiteService/ListSuites": {
+   "rest_path": "/api/v1/suite/list-suites",
+   "summary": "ListSuites lists suite definitions with filtering and pagination. Read-only.",
+   "request": {
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "page": "Page {size, token}",
+    "providers": "array of integer",
+    "scheduleEnabled": "boolean",
+    "sort": "Sort4 {desc, entity, kind}",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.SuiteWizardService/GetSuiteWizardDraft": {
+   "rest_path": "/api/v1/suite-wizard/get-suite-wizard-draft",
+   "summary": "GetSuiteWizardDraft fetches a single draft by id. Read-only.",
+   "request": {
+    "draftId": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.SuiteWizardService/ListSuiteWizardDrafts": {
+   "rest_path": "/api/v1/suite-wizard/list-suite-wizard-drafts",
+   "summary": "ListSuiteWizardDrafts lists drafts with filtering and pagination. Read-only.",
+   "request": {
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "page": "Page {size, token}",
+    "sort": "EntitySort {desc, field}",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.SystemSettingsService/GetPublicConfig": {
+   "rest_path": "/api/v1/public-config",
+   "summary": "GetPublicConfig reads the public-safe flags with no auth, for the",
+   "request": {}
+  },
+  "/cloud.v1.api.SystemSettingsService/GetSystemSettings": {
+   "rest_path": "/api/v1/system/settings",
+   "summary": "GetSystemSettings reads the singleton platform settings. Admin-only,",
+   "request": {}
+  },
+  "/cloud.v1.api.TenantDashboardService/GetTenantDashboard": {
+   "rest_path": "/api/v1/tenant-dashboard/get-tenant-dashboard",
+   "summary": "GetTenantDashboard returns the aggregated dashboard. Read-only.",
+   "request": {
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TenantSettingsService/GetTenantSettings": {
+   "rest_path": "/api/v1/tenant-settings/get-tenant-settings",
+   "summary": "GetTenantSettings fetches the tenant's settings. Read-only.",
+   "request": {
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestPresetService/GetTestPreset": {
+   "rest_path": "/api/v1/test-preset/get-test-preset",
+   "summary": "GetTestPreset fetches one test preset by id. Read-only.",
+   "request": {
+    "id": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestPresetService/ListTestPresets": {
+   "rest_path": "/api/v1/test-preset/list-test-presets",
+   "summary": "ListTestPresets lists a tenant's test presets. Read-only.",
+   "request": {
+    "dbKinds": "array of integer",
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "isSystem": "boolean",
+    "page": "Page {size, token}",
+    "protocols": "array of integer",
+    "sort": "Sort3 {desc, entity, kind}",
+    "stroppyVersions": "array of string",
+    "tags": "object",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestRunOverviewService/GetLogFacets": {
+   "rest_path": "/api/v1/test-run-overview/get-log-facets",
+   "summary": "GetLogFacets returns the distinct values + counts of the log filter",
+   "request": {
+    "filter": "LogFilter {actions, componentIds, end, machineIds, mentions, nodeExecutionIds, nodeIds, parentNodeExecutionIds, phases, query, search, sources, stageNames, start, stepIds, streams, unit, units}",
+    "runId": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestRunOverviewService/GetRunMetrics": {
+   "rest_path": "/api/v1/test-run-overview/get-run-metrics",
+   "summary": "GetRunMetrics fetches the run's metrics. Read-only.",
+   "request": {
+    "runId": "string",
+    "tenantId": "string",
+    "window": "TimeRange {end, start}"
+   }
+  },
+  "/cloud.v1.api.TestRunOverviewService/GetTestRunOverview": {
+   "rest_path": "/api/v1/test-run-overview/get-test-run-overview",
+   "summary": "GetTestRunOverview fetches the Overview snapshot. Read-only.",
+   "request": {
+    "runId": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestRunOverviewService/GrafanaSession": {
+   "rest_path": "/api/v1/test-run-overview/grafana-session",
+   "summary": "GrafanaSession mints a run-scoped token so the caller's embedded Grafana",
+   "request": {
+    "runId": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestRunOverviewService/QueryLogs": {
+   "rest_path": "/api/v1/test-run-overview/query-logs",
+   "summary": "QueryLogs fetches a cursor-paged window of historical log lines. Read-only.",
+   "request": {
+    "direction": "integer",
+    "filter": "LogFilter {actions, componentIds, end, machineIds, mentions, nodeExecutionIds, nodeIds, parentNodeExecutionIds, phases, query, search, sources, stageNames, start, stepIds, streams, unit, units}",
+    "from": "LogCursor {observedAt, seq}",
+    "limit": "integer",
+    "runId": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestRunOverviewService/ResolveLogRef": {
+   "rest_path": "/api/v1/test-run-overview/resolve-log-ref",
+   "summary": "ResolveLogRef resolves a shareable LogRef into a filter + anchor. Read-only.",
+   "request": {
+    "ref": "LogRef {componentId, cursor, end, nodeExecutionId, runId, start}",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestRunService/GetTestRun": {
+   "rest_path": "/api/v1/test-run/get-test-run",
+   "summary": "GetTestRun fetches a single run by id. Read-only.",
+   "request": {
+    "id": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestRunService/ListTestRunFacets": {
+   "rest_path": "/api/v1/test-run/list-test-run-facets",
+   "summary": "ListTestRunFacets lists distinct values for run-list facet controls.",
+   "request": {
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestRunService/ListTestRuns": {
+   "rest_path": "/api/v1/test-run/list-test-runs",
+   "summary": "ListTestRuns lists runs with filtering and pagination. Read-only.",
+   "request": {
+    "dbKinds": "array of integer",
+    "dbPresetIds": "array of string",
+    "durationMax": "string",
+    "durationMin": "string",
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "finishedAfter": "string",
+    "finishedBefore": "string",
+    "page": "Page {size, token}",
+    "progressMax": "integer",
+    "progressMin": "integer",
+    "protocols": "array of integer",
+    "providers": "array of integer",
+    "sort": "Sort6 {desc, entity, kind}",
+    "standalone": "boolean",
+    "startedAfter": "string",
+    "startedBefore": "string",
+    "statuses": "array of integer",
+    "stroppyVersions": "array of string",
+    "suiteCellIds": "array of string",
+    "suiteRunId": "string",
+    "tenantId": "string",
+    "testPresetIds": "array of string",
+    "triggers": "array of integer",
+    "workloadPresetIds": "array of string"
+   }
+  },
+  "/cloud.v1.api.TestWizardService/GetTestWizardDraft": {
+   "rest_path": "/api/v1/test-wizard/get-test-wizard-draft",
+   "summary": "GetTestWizardDraft fetches a single draft by id. Read-only.",
+   "request": {
+    "draftId": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestWizardService/ListTestWizardDrafts": {
+   "rest_path": "/api/v1/test-wizard/list-test-wizard-drafts",
+   "summary": "ListTestWizardDrafts lists drafts with filtering and pagination. Read-only.",
+   "request": {
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "page": "Page {size, token}",
+    "sort": "EntitySort {desc, field}",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.TestWizardService/ProbeCatalog": {
+   "rest_path": "/api/v1/test-wizard/probe-catalog",
+   "summary": "ProbeCatalog lists the runnable scripts a stroppy binary embeds (its",
+   "request": {
+    "version": "string"
+   }
+  },
+  "/cloud.v1.api.TestWizardService/ProbeScript": {
+   "rest_path": "/api/v1/test-wizard/probe-script",
+   "summary": "ProbeScript introspects a stroppy script. Read-only / no side effects.",
+   "request": {
+    "driverType": "string",
+    "env": "object",
+    "files": "array of ProbeWorkloadFile",
+    "includeHuman": "boolean",
+    "poolSize": "integer",
+    "scaleFactor": "number",
+    "script": "string",
+    "sql": "string",
+    "version": "string"
+   }
+  },
+  "/cloud.v1.api.WorkloadPresetService/GetWorkloadPreset": {
+   "rest_path": "/api/v1/workload-preset/get-workload-preset",
+   "summary": "GetWorkloadPreset fetches one workload preset by id. Read-only.",
+   "request": {
+    "id": "string",
+    "tenantId": "string"
+   }
+  },
+  "/cloud.v1.api.WorkloadPresetService/ListWorkloadPresets": {
+   "rest_path": "/api/v1/workload-preset/list-workload-presets",
+   "summary": "ListWorkloadPresets lists a tenant's workload presets. Read-only.",
+   "request": {
+    "filter": "EntityFilter {authorIds, createdAfter, createdBefore, favoritesOnly, ids, includeDeleted, search, updatedAfter, updatedBefore}",
+    "isSystem": "boolean",
+    "page": "Page {size, token}",
+    "protocols": "array of integer",
+    "scripts": "array of string",
+    "sort": "Sort2 {desc, entity, kind}",
+    "stroppyVersions": "array of string",
+    "tags": "object",
+    "tenantId": "string"
+   }
+  }
+ }
+}

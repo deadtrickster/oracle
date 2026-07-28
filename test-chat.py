@@ -95,7 +95,7 @@ print("\n7. the turn built from all this keeps its three sources apart")
 spec = importlib.util.spec_from_file_location("rcv", HERE / "oracle-capture-receiver.py")
 rcv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rcv)
-rcv.ensure_model = lambda kind: iter(())
+rcv.ensure_model = lambda kind, host="": iter(())
 rcv._kb_ids = lambda: ["kb"]
 rcv._retrieve = lambda q, kb, top_n=64: ([{"document_keyword": "pg.pdf",
                                            "content_with_weight": "WAL flush is the bottleneck"}], True)

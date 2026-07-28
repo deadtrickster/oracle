@@ -44,7 +44,7 @@ def check(name, cond, detail=""):
 HOST = "stage.cloud.stroppy.io"
 URL = f"https://{HOST}/t/default/runs/abc"
 
-rcv.ensure_model = lambda kind: iter(())
+rcv.ensure_model = lambda kind, host="": iter(())
 rcv._kb_ids = lambda: ["kb"]
 rcv._retrieve = lambda q, kb, top_n=64: ([{"document_keyword": "pg.pdf",
                                            "content_with_weight": f"corpus text about {q}"}], True)

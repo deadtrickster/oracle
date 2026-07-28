@@ -124,6 +124,36 @@ const h4 = html();
 check("first call's text once", count(h4, "Step one text.") === 1, `${count(h4, "Step one text.")}×`);
 check("second call's text once", count(h4, "Step two text.") === 1, `${count(h4, "Step two text.")}×`);
 
+console.log("\n5. a confirmed action asks before it happens, and says what it will touch");
+onMessage({ type: "oracle:chatHistory", host: "mail.example", turns: [], session: "main" });
+ev("delta", { text: "I'll open the newest DHL email." });
+ev("tool_request", { calls: [{ id: "k1", name: "click", says: 'clicked "DHL Paket"', acting: true,
+                               confirm: true }] });
+ev("confirm_request", { id: "k1", name: "click", says: 'click "DHL Paket"',
+                        args: { text: "DHL Paket" },
+                        preview: { found: true, label: "DHL Paket — Ihre Sendung ist unterwegs",
+                                   tag: "div", href: "" } });
+const h5 = html();
+check("a confirmation bar is shown", h5.includes('class="confirm'), h5.slice(-260));
+check("it names the element that will be clicked",
+      h5.includes("DHL Paket — Ihre Sendung ist unterwegs"));
+check("it offers both choices with their keys",
+      h5.includes("Enter") && h5.includes("Esc"));
+check("it says the target is highlighted on the page", h5.includes("highlighted on the page"));
+
+console.log("\n5b. and it warns when the model picked something that is not there");
+ev("confirm_request", { id: "k2", name: "click", says: 'click "Send"',
+                        args: { text: "Send" }, preview: { found: false } });
+const h5b = html();
+check("a missing target is flagged, not silently confirmed",
+      h5b.includes("nothing on the page matches"), h5b.slice(-240));
+check("and it is styled as a problem", h5b.includes('class="confirm bad"'));
+
+console.log("\n5c. the bar never outlives the turn");
+ev("done", { epoch: 1 });
+check("no confirmation bar remains after the turn ends", !html().includes('class="confirm'),
+      "a stale bar would take Enter and send it nowhere");
+
 console.log();
 if (fails.length) {
   console.log(`FAILED: ${fails.length} -> ${fails.join(", ")}`);

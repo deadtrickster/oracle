@@ -99,7 +99,7 @@ def resident() -> str:
     return "vl" if vl_available() else "none"
 
 
-def ensure(kind: str):
+def ensure(kind: str, host: str = ""):
     """Make `kind` ("text"|"vl") resident, swapping if needed. Yields progress strings.
 
     Raises RuntimeError if the model could not be made resident. Yielding nothing means it was
@@ -132,7 +132,7 @@ def ensure(kind: str):
                     if waiting:
                         yield f"the other process loaded {kind} — reusing it"
                     return
-                yield from _swap(kind)
+                yield from _swap(kind, host)
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
@@ -307,7 +307,7 @@ def _where_from(kind: str) -> str:
         return "loading"
 
 
-def _swap(kind: str):
+def _swap(kind: str, host: str = ""):
     other = "text model" if kind == "vl" else "vision model"
     want = "qwen3-vl" if kind == "vl" else "the text model"
     yield f"swapping GPU: unloading the {other}, loading {want}…"
@@ -357,6 +357,6 @@ def _swap(kind: str):
     if kind == "text":
         try:
             import oracle_kv
-            yield from oracle_kv.warm_all()
+            yield from oracle_kv.warm_all(current=host)
         except Exception:
             pass                                     # a cold cache is slow, never wrong

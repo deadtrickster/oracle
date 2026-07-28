@@ -30,10 +30,11 @@
   // What the model DID this turn — read the page, clicked a tab, searched the corpus. Shown as it
   // happens, because a harness that acts silently is one you cannot supervise.
   let live = [];              // prose and steps, in the order they happened
+  let confirming = null;      // an action waiting on the user's key, in "confirm" mode
   let queued = [];            // questions typed while a turn was still running
   let stepsOpen = false;      // folded once the turn is done; click to reopen
   let turnFailed = false;     // ...but never folded when it ended badly
-  let actions = false;
+  let actions = "off";      // "off" | "confirm" | "allow"
   let debugOn = false;
   // A running clock, because "how long has this been going" is the question a blinking cursor
   // cannot answer. A screenshot plus two GPU swaps is genuinely minutes; the difference between
@@ -96,9 +97,23 @@
       .ico { cursor:pointer; border:0; background:transparent; color:inherit; font-size:14px;
         opacity:.35; padding:2px 4px; } .ico:hover { opacity:1; }
       .ico.on { opacity:1; }
+      .ico.ask { opacity:1; }
       .step { font-size:11px; opacity:.7; margin:0 0 6px; padding-left:8px;
         border-left:2px solid rgba(128,128,128,.35); }
       .step.act { border-left-color:#b7791f; }
+      /* The pending-action bar. Deliberately the loudest thing in the panel: it is the only
+         element that is waiting on the user rather than reporting to them, and a confirmation you
+         can miss is a confirmation that trains you to hit Enter without reading. */
+      .confirm { border:1px solid #b7791f; background:#2a2113; border-radius:6px;
+                 padding:8px 10px; margin:0 0 8px; }
+      .confirm.bad { border-color:#a33; background:#2a1616; }
+      .confirm .ca { font-size:12px; font-weight:600; color:#f5c26b; }
+      .confirm .ct { font-size:12px; margin-top:3px; word-break:break-word; }
+      .confirm .cb { margin-top:7px; display:flex; gap:6px; }
+      .confirm button { font-size:11px; padding:3px 9px; border-radius:4px; cursor:pointer;
+                        border:1px solid #555; background:#333; color:#eee; }
+      .confirm button.go { background:#b7791f; border-color:#b7791f; color:#1a1a1a;
+                           font-weight:600; }
       .step.bad { border-left-color:#c0392b; opacity:.85; }
       .step .why { display:block; opacity:.7; font-size:10px; margin-top:2px; }
       .step.fold { cursor:pointer; border-left-color:transparent; opacity:.55; }
@@ -430,6 +445,21 @@
           (it.image ? `<img class="thumb" src="${esc(it.image)}">` : "") + `</p>`;
       }
     }
+    // A pending action, if one is waiting on you. Rendered as a distinct bar rather than a step,
+    // because it is the one thing on screen that is asking rather than reporting.
+    if (confirming) {
+      const p = confirming.preview || {};
+      h += `<div class="confirm${p.found ? "" : " bad"}">` +
+        `<div class="ca">${esc(confirming.says || "act on the page")}</div>` +
+        (p.found
+          ? `<div class="ct">→ <b>${esc(p.label || p.tag || "element")}</b>` +
+            (p.href ? ` <span class="why">${esc(p.href)}</span>` : "") +
+            `<span class="why">highlighted on the page</span></div>`
+          : `<div class="ct">⚠ nothing on the page matches — allowing this will probably do ` +
+            `nothing</div>`) +
+        `<div class="cb"><button class="go" data-confirm="1">Enter — do it</button>` +
+        `<button class="no" data-confirm="0">Esc — skip</button></div></div>`;
+    }
     if (streaming) {
       // The status line must appear even when text has ALREADY streamed. The model says what it is
       // about to do and then calls the tool, so `acc` is non-empty exactly when the slow thing
@@ -598,19 +628,64 @@
     send(next.q, next.image, next.thumb, next.source);
   }
 
+  function decide(ok) {
+    if (!confirming) return;
+    const id = confirming.id;
+    confirming = null;
+    status = ok ? "acting…" : "skipped — carrying on";
+    render();
+    try { chrome.runtime.sendMessage({ type: "chatConfirm", id, ok }); } catch (_) {}
+  }
+
+  // Keys are captured at the document level so they work wherever focus happens to be — the whole
+  // point is that you answer without hunting for a button. Enter allows, Esc skips; anything else
+  // falls through, and walking away skips it when the worker's timeout fires.
+  document.addEventListener("keydown", (e) => {
+    if (!confirming) return;
+    if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); decide(true); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); decide(false); }
+  }, true);
+  scroll.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-confirm]");
+    if (b) decide(b.dataset.confirm === "1");
+  });
+
   go.addEventListener("click", () => send());
   input.addEventListener("keydown", (e) => {
+    // While an action is pending, Enter belongs to the decision, not to the message box.
+    if (confirming && e.key === "Enter") { e.preventDefault(); decide(true); return; }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
+  // Three settings, cycled by one button: look only → ask me → allow all.
+  //
+  // "Ask me" is the one worth having and is therefore the FIRST step away from off: the model picks
+  // the target, the page highlights it, you press Enter. It is the setting that makes acting useful
+  // on a site where a wrong click matters, which is most sites. Allow-all stays reachable for a
+  // benchmark UI you own and are watching, and stays two clicks from off so it cannot be arrived at
+  // by accident.
+  const ACT_MODES = ["off", "confirm", "allow"];
+  // Distinct GLYPHS per mode, not one glyph in three colours: this button decides whether a model
+  // may press things in the user's session, and "which shade of amber is it" is not a way to find
+  // that out at a glance.
+  const ACT_UI = {
+    off: { icon: "👁", cls: "",
+           title: "Look only — Oracle cannot click or type here. Click: ask me before each action" },
+    confirm: { icon: "🙋", cls: "ask",
+               title: "Ask me — Oracle highlights what it wants to click and waits for Enter. " +
+                      "Click: allow everything without asking" },
+    allow: { icon: "🖐", cls: "on",
+             title: "Allow all — Oracle may click and type here WITHOUT asking. Click: look only" },
+  };
   function paintAct() {
     const b = $(".act");
-    b.classList.toggle("on", actions);
-    b.title = actions
-      ? "Oracle MAY click and type on this site — click to revoke"
-      : "Oracle can look but not touch on this site — click to allow clicking and typing";
+    const ui = ACT_UI[actions] || ACT_UI.off;
+    b.classList.remove("on", "ask");
+    if (ui.cls) b.classList.add(ui.cls);
+    b.textContent = ui.icon;
+    b.title = ui.title;
   }
   $(".act").addEventListener("click", () => {
-    actions = !actions;
+    actions = ACT_MODES[(ACT_MODES.indexOf(actions) + 1) % ACT_MODES.length] || "off";
     paintAct();
     try { chrome.runtime.sendMessage({ type: "oracle:chatAllow", allow: actions }); } catch (_) {}
   });
@@ -834,7 +909,8 @@
       paintSession();
       currentHost = msg.host || "";
       root.querySelector(".bar .h").textContent = msg.host ? `· ${msg.host}` : "";
-      actions = !!msg.actions;
+      actions = typeof msg.actions === "string" ? msg.actions
+                : (msg.actions ? "allow" : "off");
       debugOn = !!msg.debug;
       paintAct();
       paintDbg();
@@ -885,6 +961,14 @@
       render();
       return;
     }
+    if (event === "confirm_request") {
+      // The model wants to act. Show WHAT, and wait for a key. Enter allows it, Esc skips it, and
+      // doing nothing skips it too — the safe outcome must be the one that requires no decision.
+      confirming = data;
+      status = "waiting for you…";
+      render();
+      return;
+    }
     if (event === "tool_image") {
       // The screenshot a tool took on its own initiative, shown next to the step that took it.
       const s = live.find((x) => x.t === "step" && x.id === data.id);
@@ -913,6 +997,9 @@
     }
     if (event === "done") {
       streaming = false; go.disabled = false;
+      // A turn cannot end with an action still awaiting a keypress: the worker that was waiting is
+      // gone, so the bar would sit there forever and Enter would go nowhere.
+      confirming = null;
       clearInterval(ticker); ticker = null; startedAt = 0;
       // Commit the live items into the transcript IN ORDER, so what you were watching is what
       // stays on screen. Flattening them into one assistant turn is what reordered them.

@@ -121,7 +121,80 @@ def _pack_for(host: str):
             names.append(f.name)
     if not parts:
         return None, None
-    return "\n\n".join(parts), ", ".join(names)
+    # Clip EACH pack to its own budget before joining, never the concatenation.
+    #
+    # Found by measuring rather than by reading: stroppy.io.md (14.5k) + cloud.stroppy.io.md (10.1k)
+    # came to 22.5k against a 20k budget, and the clipper keeps the head and the tail — so what it
+    # removed was the MIDDLE of the joined text, which is the first half of the specific pack. The
+    # URL grammar the model relies on had silently stopped being in the prompt, while the pack file
+    # on disk still contained it and every test still passed. A shared budget consumed broad-first
+    # means the more general pack starves the more specific one, which is exactly backwards.
+    return "\n\n".join(_clip(p, PACK_CHARS) for p in parts), ", ".join(names)
+
+
+# ---------------------------------------------------------------- site helpers
+#
+# A pack may ship EXECUTABLE knowledge next to its prose: `site-packs/<domain>.js`, discovered by
+# the same suffix rule as the .md. The file defines named functions that run in the page, and the
+# model can call them by NAME — it never writes or supplies JavaScript.
+#
+# That distinction is the whole safety argument, and it is worth being precise about. "Let the model
+# run JS in an authenticated session" is unbounded: one generated line reaches every mutating
+# endpoint on the origin, and nothing can review it before it runs. "Let the model call
+# `list_runs({db:'orioledb'})`, which WE wrote" is bounded by a function we can read, test and diff.
+# Same expressive power for the questions users actually ask; a fraction of the blast radius. The
+# model chooses which arm to move, not what the arm is made of.
+#
+# The manifest is a JSON header comment so ONE file serves both readers: the receiver parses the
+# header for names/params to describe to the model, and the extension ships the body to the page.
+# Keeping them in separate files guarantees they drift.
+_HELPER_RE = re.compile(r"/\*\s*ORACLE-SITE-TOOLS\s*(\{.*?\})\s*\*/", re.S)
+
+
+def _helper_files(host: str) -> list:
+    return [f for f in sorted(_PACK_DIR.glob("*.js"), key=lambda p: len(p.stem))
+            if host == f.stem.lower() or host.endswith("." + f.stem.lower())]
+
+
+def helpers_for(host: str) -> dict:
+    """{"code": js, "functions": {...}, "sources": "...", "allowlists": {...}} for a host.
+
+    Empty dict when the site has no helper file — which must stay the normal case: every site works
+    without one, and a helper is an optimisation for sites we know well, never a requirement."""
+    code, fns, names, allow, ns = [], {}, [], {}, ""
+    for f in _helper_files(host):
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        m = _HELPER_RE.search(text)
+        if not m:
+            continue                       # no manifest = not a helper file; ignore it silently
+        try:
+            manifest = json.loads(m.group(1))
+        except ValueError:
+            continue                       # a malformed manifest must not take the site down
+        for name, spec in (manifest.get("functions") or {}).items():
+            fns[name] = spec
+            # An arg that names an API path (or anything else enumerable) can be constrained to a
+            # generated list. Enforced HERE, on the receiver, not inside the page: a check that
+            # lives in the code being called is a check the caller can be talked out of.
+            wl = spec.get("allowlist")
+            if wl and wl.get("file"):
+                try:
+                    doc = json.loads((_PACK_DIR / wl["file"]).read_text())
+                    ops = doc.get("operations") or doc.get("values") or {}
+                    allow[name] = {"param": wl.get("param", "path"),
+                                   "values": set(ops), "detail": ops}
+                except Exception:
+                    fns.pop(name, None)    # cannot load the gate -> do not offer the tool
+        ns = manifest.get("namespace") or ns
+        code.append(text)
+        names.append(f.name)
+    if not fns:
+        return {}
+    return {"code": "\n;\n".join(code), "functions": fns, "namespace": ns,
+            "sources": ", ".join(names), "allowlists": allow}
 
 
 def _load_cache() -> dict:
@@ -199,7 +272,7 @@ def block(url: str, fetched: str | None = None, citable: bool = False) -> str:
                 "corpus excerpts, and each one has to resolve to a page a reader can open.")
         return (f"About {host} — reference material we maintain for this site "
                 f"(source: {path}). {cite}\n"
-                f"{_clip(_strip_meta(pack), PACK_CHARS)}\n[end of site reference]")
+                f"{_strip_meta(pack)}\n[end of site reference]")
 
     text = fetched if fetched else cached(host)
     if not text:

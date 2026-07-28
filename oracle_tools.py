@@ -32,7 +32,7 @@ that owns the hand does the moving, and reports what actually happened.
 LOCAL = {"search_corpus"}
 
 # Tools that need a browser. The extension executes these and posts the result back.
-BROWSER = {"read_page", "look_at_page", "click", "type_text", "wait", "navigate"}
+BROWSER = {"read_page", "look_at_page", "click", "type_text", "wait", "navigate", "site_call"}
 
 # Tools that change the user's session. Only offered for hosts the user has enabled.
 ACTING = {"click", "type_text", "navigate"}
@@ -105,10 +105,64 @@ ACT_TOOLS = [
 ]
 
 
-def for_host(actions_allowed: bool) -> list:
+def site_tool(helpers: dict, actions_allowed: bool):
+    """One `site_call` tool describing the named functions this site's helper file provides.
+
+    Why a single tool with an `fn` enum, rather than one tool per function: the tool list is part of
+    the CACHED PREFIX. A site with a dozen helpers would push a dozen schemas in front of every
+    request on every host, and the prefix is the thing we spent real effort keeping stable. One tool
+    whose enum varies per host keeps the shape constant.
+
+    Helper functions that change something are marked `"acts": true` in the manifest and obey the
+    same per-host gate as click/type_text — a site helper is not a way around the gate, and if it
+    became one the gate would be theatre."""
+    fns = {n: s for n, s in (helpers.get("functions") or {}).items()
+           if actions_allowed or not s.get("acts")}
+    if not fns:
+        return None
+    lines = []
+    for name, spec in sorted(fns.items()):
+        params = ", ".join(f"{p}: {d}" for p, d in (spec.get("params") or {}).items())
+        lines.append(f"  {name}({params}) — {spec.get('description', '')}"
+                     + ("  [CHANGES THINGS]" if spec.get("acts") else ""))
+    return _fn("site_call",
+               "Call one of this site's own functions. These talk to the site's API directly and "
+               "return exact JSON — no screenshot, no reading numbers off pixels, no model swap. "
+               "PREFER THIS over look_at_page whenever a function below answers the question: a "
+               "number you read from a chart is a transcription, a number from here is the value. "
+               "Available on this site:\n" + "\n".join(lines),
+               {"fn": {"type": "string", "enum": sorted(fns), "description": "Which function."},
+                "args": {"type": "object", "description": "Its arguments, as named above."}},
+               ["fn"])
+
+
+def for_host(actions_allowed: bool, helpers: dict | None = None) -> list:
     """The tool list to offer. Acting tools are ABSENT, not merely discouraged, when the host is not
     enabled — a tool the model cannot see is a tool it cannot mis-call."""
-    return READ_TOOLS + (ACT_TOOLS if actions_allowed else [])
+    tools = READ_TOOLS + (ACT_TOOLS if actions_allowed else [])
+    site = site_tool(helpers or {}, actions_allowed)
+    return tools + ([site] if site else [])
+
+
+def check_site_call(helpers: dict, args: dict) -> str | None:
+    """Reject a site_call the manifest does not permit; None means allowed.
+
+    The allowlist check lives here — in the harness, before the call leaves the receiver — because
+    the alternative is checking inside the page, where the code doing the checking is the code being
+    asked to run. A gate is only a gate if it sits upstream of the thing it gates."""
+    fn = (args or {}).get("fn")
+    spec = (helpers.get("functions") or {}).get(fn)
+    if not spec:
+        return f"{fn!r} is not a function this site provides."
+    gate = (helpers.get("allowlists") or {}).get(fn)
+    if not gate:
+        return None
+    val = ((args or {}).get("args") or {}).get(gate["param"])
+    if val not in gate["values"]:
+        return (f"{gate['param']}={val!r} is not permitted. This site's API allowlist is generated "
+                f"from its OpenAPI spec and contains only operations the spec marks as having no "
+                f"side effects. Call list_operations to see them.")
+    return None
 
 
 def is_browser(name: str) -> bool:
@@ -138,4 +192,8 @@ def describe(name: str, args: dict) -> str:
         return f"typed into {a.get('selector', '?')}"
     if name == "navigate":
         return f"went to {a.get('url', '?')}"
+    if name == "site_call":
+        inner = a.get("args") or {}
+        detail = inner.get("path") or inner.get("id") or ""
+        return f"asked the site's API: {a.get('fn', '?')}" + (f" ({detail})" if detail else "")
     return f"{name}({a})"

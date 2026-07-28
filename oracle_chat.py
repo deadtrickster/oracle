@@ -216,24 +216,55 @@ def reset(host: str, session: str = MAIN) -> int:
 _ALLOW = CHAT_DIR / "allow-actions.json"
 
 
-def actions_allowed(host: str) -> bool:
-    """May the chat ACT on this host (click, type)? Off until the user says otherwise, per host.
+OFF, CONFIRM, ALLOW = "off", "confirm", "allow"
+
+
+def mode(host: str) -> str:
+    """How far the chat may go on this host: "off", "confirm" or "allow".
 
     Per host rather than global because trust is not a property of the assistant, it is a property
     of what a mistake would cost — clicking around a benchmark UI you own is not the same as
-    clicking around a bank."""
+    clicking around a bank.
+
+    The middle setting is the one that matters, and it exists because the binary was wrong in both
+    directions. "off" is safe and useless: the model can see a button, know it is the answer, and be
+    unable to press it. "allow" is useful and unbounded: in a mail client, Archive, Delete and Send
+    are all one click apart, and the model authenticated none of it. "confirm" splits the decision
+    along its natural seam — the model chooses WHICH element (the part it is good at, having just
+    read the page) and the human decides WHETHER (the part that carries the consequence). It also
+    makes the act legible before it happens rather than after, which is the difference between
+    supervising and auditing.
+
+    Stored values stay backwards compatible: an existing `true` reads as "allow".
+    """
     try:
-        return bool(json.loads(_ALLOW.read_text()).get(host))
+        v = json.loads(_ALLOW.read_text()).get(host)
     except Exception:
-        return False
+        return OFF
+    if v is True:
+        return ALLOW
+    if isinstance(v, str) and v in (CONFIRM, ALLOW):
+        return v
+    return OFF
 
 
-def set_actions(host: str, allowed: bool) -> bool:
+def actions_allowed(host: str) -> bool:
+    """Are the acting tools OFFERED at all? True for both "confirm" and "allow" — under "confirm"
+    the model really can act, it just cannot do so unilaterally, so hiding the tools would be a
+    lie about what is possible and would send it back to narrating clicks it never makes."""
+    return mode(host) != OFF
+
+
+def set_actions(host: str, allowed) -> bool:
+    """`allowed` may be a bool (legacy) or one of "off"/"confirm"/"allow"."""
     try:
         d = json.loads(_ALLOW.read_text())
     except Exception:
         d = {}
-    d[host] = bool(allowed)
+    if isinstance(allowed, str) and allowed in (OFF, CONFIRM, ALLOW):
+        d[host] = allowed
+    else:
+        d[host] = ALLOW if allowed else OFF
     try:
         CHAT_DIR.mkdir(parents=True, exist_ok=True)
         tmp = _ALLOW.with_suffix(".tmp")
@@ -241,7 +272,7 @@ def set_actions(host: str, allowed: bool) -> bool:
         os.replace(tmp, _ALLOW)
     except Exception:
         pass
-    return bool(allowed)
+    return mode(host)
 
 
 def delete(host: str, session: str = MAIN) -> bool:

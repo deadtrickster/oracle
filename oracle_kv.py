@@ -107,9 +107,23 @@ def warm(host: str, timeout: int = 300) -> dict:
         return {}
 
 
-def warm_all(limit: int = WARM_MAX):
-    """Re-warm the most recent hosts, one slot each. Yields progress strings."""
+def warm_all(limit: int = WARM_MAX, current: str = ""):
+    """Re-warm the most recent hosts, one slot each. Yields at most ONE progress string.
+
+    Warming every known host is correct — the next question may come from any of them. Narrating it
+    per host is not: these lines surface in whoever's chat happens to be open, so someone reading a
+    conversation on one site was told "re-warmed 6192 prompt tokens for cloud.stroppy.io", which
+    names a site they are not on, about work they did not ask for, in a status line that otherwise
+    only ever describes their own request. Housekeeping for other hosts is not the user's business;
+    housekeeping for THIS one is, because it explains a pause they are about to sit through."""
+    done, mine = 0, 0
     for host in known()[:limit]:
         got = warm(host)
         if got.get("tokens"):
-            yield f"re-warmed {got['tokens']} prompt tokens for {host}"
+            done += 1
+            if current and host == current:
+                mine = got["tokens"]
+    if mine:
+        yield f"re-warmed this site's {mine}-token prompt cache"
+    elif done:
+        yield f"re-warmed {done} cached prompt{'s' if done != 1 else ''}"
