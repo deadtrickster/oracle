@@ -84,6 +84,22 @@ every site lacks the file, and without a negative entry each request would re-di
 > citable** — it may disambiguate vocabulary, never supply a fact. And it is capped: an attacker who
 > cannot make the model obey can still make it forget the question by filling the window.
 
+**5e. Chat about this site.** A pinned panel (popup *Chat about this site →*, or right-click →
+*Chat with Oracle about this site*) holding **one continued conversation per HOST** — reading a run
+report, then the docs, then another run is one line of thought about one system. The transcript
+lives on the receiver, so it survives the tab, the browser, and a restart, and reopening the panel
+shows what was actually stored.
+> Three sources, kept apart on purpose: **corpus excerpts** are the only evidence (numbered, cited,
+> checkable in the corpus browser), **page and site context** explain the question but are never
+> cited, and **the conversation** answers questions about itself. The other prompts' single-source
+> rule ("answer ONLY from the excerpts") can't apply in a chat — it would refuse "what did we just
+> decide?" — so it becomes an *attribution* rule instead, with the offline rule intact: a technical
+> fact not in the excerpts is "the corpus doesn't cover that", never something recalled from weights.
+>
+> History is **append-only**. When a conversation outgrows its budget it starts a new **epoch**
+> rather than being compacted — rewriting history would invalidate the KV prefix cache and cost a
+> full re-process every turn. The ⎌ button ("new topic") is the same mechanism: nothing is deleted.
+
 **6. Recency-memory sensor (H17).** Everything you engage with feeds a bounded, decaying **fading-slot
 memory** of topics — captures/explains/fact-checks at full weight, passive **dwell** (≥20s visible on
 a page) at a fraction. The popup's **Topics** panel shows the live slots (weight bars, hits), lets you
@@ -152,6 +168,8 @@ systemctl --user enable --now oracle-capture
 | `POST /vision` | `{image,mime,prompt,url,title,page_text,crop_text,source,image_alt,image_title,image_caption}` → SSE qwen3-vl answer; swaps the GPU to vision and back automatically |
 | `POST /observe` | `{text,weight,url,title}` → fold into the fading-slot memory (denylist applied) |
 | `GET /slots` · `POST /exclude` · `POST /forget` · `POST /pin` | inspect + control the memory |
+| `POST /chat` | `{message,host,url,title,where,agents_md,debug}` → SSE grounded turn, appended to that host's conversation |
+| `GET /chat/history?host=` · `GET /chat/hosts` · `POST /chat/reset` | read a conversation, list them, start a new epoch |
 | `GET /job?stem=` | ingest confirmation (local status + RAGFlow parse state + chunk count) |
 | `GET /status` · `POST /drain` | health + queue counts; force an ingest pass |
 

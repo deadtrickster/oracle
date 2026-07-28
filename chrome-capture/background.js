@@ -23,6 +23,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: "img", title: "Explain this image with Oracle", contexts: ["image"] });
   // The whole viewport, both models: page text (summarised) + a screenshot read by qwen3-vl.
   chrome.contextMenus.create({ id: "page-vl", title: "Explain this page with Oracle (vision)", contexts: ["page"] });
+  chrome.contextMenus.create({ id: "chat", title: "Chat with Oracle about this site", contexts: ["page", "selection"] });
   refreshBadge();
 });
 
@@ -34,6 +35,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   else if (info.menuItemId === "shot") screenshotRegion(tab);
   else if (info.menuItemId === "img") visionImage(info.srcUrl, tab);
   else if (info.menuItemId === "page-vl") visionPage(tab);
+  else if (info.menuItemId === "chat") openChat(tab);
 });
 
 chrome.commands.onCommand.addListener((cmd) => {
@@ -57,6 +59,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "vision:region") { if (sender.tab) visionRegion(msg, sender.tab); return false; }
   if (msg.type === "visionPage") {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) visionPage(tab); sendResponse({ ok: true }); });
+    return true;
+  }
+  if (msg.type === "oracle:chat") { if (sender.tab) chatSend(msg.message, sender.tab); return false; }
+  if (msg.type === "oracle:chatLoad") { if (sender.tab) chatLoad(sender.tab); return false; }
+  if (msg.type === "oracle:chatReset") { if (sender.tab) chatReset(sender.tab); return false; }
+  if (msg.type === "openChat") {
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) openChat(tab); sendResponse({ ok: true }); });
     return true;
   }
   if (msg.type === "oracle:groundVision") { if (sender.tab) groundVision(msg.text, sender.tab); return false; }
@@ -274,6 +283,69 @@ async function ground(tab, mode, selection) {
   } catch (_) {
     send({ event: "error", data: { error: "Oracle receiver offline — start oracle-capture-receiver.py." } });
   }
+}
+
+// ---------------------------------------------------------------- per-host chat
+
+async function openChat(tab) {
+  if (!scriptableTab(tab)) { notify("Chat needs an http/https page."); return; }
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "chat.js"] });
+}
+
+async function chatLoad(tab) {
+  // The transcript lives on the receiver, so reopening the panel — in another tab, another window,
+  // or after a restart — shows the conversation that is actually stored rather than a fresh one.
+  let host = "";
+  try { host = new URL(tab.url).host; } catch (_) {}
+  try {
+    const r = await fetch(`${RECEIVER}/chat/history?host=${encodeURIComponent(host)}`);
+    const d = r.ok ? await r.json() : { turns: [] };
+    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: d.turns || [],
+                                      epoch: d.epoch }).catch(() => {});
+  } catch (_) {
+    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: [] }).catch(() => {});
+  }
+}
+
+async function chatSend(message, tab) {
+  const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev }).catch(() => {});
+  let host = "";
+  try { host = new URL(tab.url).host; } catch (_) {}
+  const debug = await debugOn();
+  let where = { around: "", headings: "", page: "" };
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId: tab.id },
+                                                       func: extractSelectionContext });
+    where = r?.result || where;
+  } catch (_) { /* injection refused; the question still works */ }
+  if (debug) {
+    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "debug", data: {
+      side: "extension", stage: "chat send", host, around_chars: where.around.length,
+      headings: where.headings, page_fallback_chars: where.page.length } } }).catch(() => {});
+  }
+  try {
+    const r = await fetch(RECEIVER + "/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, host, url: tab.url, title: tab.title,
+                             agents_md: await agentsMd(tab.url), debug, where }),
+    });
+    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
+    await pumpSSE(r.body, send);
+  } catch (_) {
+    send({ event: "error", data: { error: "Oracle receiver offline." } });
+  }
+  observe(message, OBS.explain, tab.url, tab.title);
+}
+
+async function chatReset(tab) {
+  let host = "";
+  try { host = new URL(tab.url).host; } catch (_) {}
+  try {
+    await fetch(RECEIVER + "/chat/reset", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host }),
+    });
+  } catch (_) {}
 }
 
 // ---------------------------------------------------------------- per-domain context (AGENTS.md)

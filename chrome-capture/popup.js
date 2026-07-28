@@ -193,6 +193,10 @@ $("page-vl").addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "visionPage" });
   window.close();   // the popup would otherwise be in the screenshot of the viewport
 });
+$("chat").addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "openChat" });
+  window.close();
+});
 $("exclude-site").addEventListener("click", excludeSite);
 $("refresh-topics").addEventListener("click", loadTopics);
 

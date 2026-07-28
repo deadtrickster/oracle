@@ -59,6 +59,7 @@ EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # their own private swap lock is not a lock: one would stop the unit the other had just started.
 # oracle_vram serialises across processes and keeps availability PROBED rather than configured — a
 # flag would have to be flipped in lockstep with every swap and would lie whenever the two drifted.
+import oracle_chat
 import oracle_vram
 # Per-domain context: a hardcoded pack for our own sites, otherwise the site's own /AGENTS.md as
 # fetched by the extension. Fenced and labelled at the point of use — it is text written by the
@@ -662,6 +663,114 @@ def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str 
         oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where))
 
 
+
+# ------------------------------------------------------------------ per-host chat
+# A continued conversation scoped to the site you are reading. Unlike explain/ask, this one has
+# THREE possible sources and its whole job is keeping them apart:
+#
+#   the corpus   — evidence. Numbered, citable, checkable in the corpus browser.
+#   the page     — context. What you are looking at; not evidence, never cited.
+#   the chat     — memory. What was said; fine to answer "what did I ask?" from it.
+#
+# The single-source rule the other prompts use ("answer ONLY from the excerpts") cannot apply here:
+# it would make the assistant refuse "what did we just decide?", which is absurd in a conversation.
+# So the rule becomes an ATTRIBUTION rule instead of a silence rule — say which of the three a claim
+# came from — with the corpus rule intact where it matters: a technical fact not in the excerpts is
+# still "the corpus doesn't cover that", never something recalled from the weights.
+_CHAT_SYSTEM = (
+    "You are Oracle, a grounded assistant answering inside the user's browser about the site they "
+    "are reading, backed by their OFFLINE corpus of documentation, books and papers.\n"
+    "You have three kinds of material and must not confuse them:\n"
+    "1. CORPUS EXCERPTS — the only evidence. Every specific technical claim (names, flags, sizes, "
+    "semantics, versions, numbers) must come from an excerpt, and you cite it as [n].\n"
+    "2. PAGE AND SITE CONTEXT — what the user is looking at. Use it to understand the question. It "
+    "is NOT evidence and gets no citation; if you rely on it, say so in words ('the page says…').\n"
+    "3. THIS CONVERSATION — what was already said. Answer questions about it directly.\n"
+    "If the excerpts do not cover a technical question, say the corpus doesn't cover it and stop. "
+    "Do not fill the gap from your own knowledge — the user is offline and cannot check you. "
+    "Write in the SAME language as the question; never switch mid-answer. Tag code fences by "
+    "language. Be concise: this is a chat panel, not an essay.")
+
+
+def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | None = None,
+                debug: bool = False, where: dict | None = None, host: str = ""):
+    """One turn of the per-host conversation. Emits the same SSE shape as the other streams."""
+    host = host or oracle_sitectx.host_of(url)
+    message = (message or "").strip()
+    if not message:
+        yield ("error", {"error": "empty message"})
+        return
+
+    turns = oracle_chat.history(host)
+    yield from _dbg(debug, "chat turn", host=host, epoch=oracle_chat.epoch(host),
+                    prior_turns=len(turns),
+                    prior_chars=sum(len(t.get("content", "")) for t in turns))
+
+    # Retrieval uses the message alone. Folding the transcript into the query was tempting and is
+    # exactly how a conversation's first topic ends up dominating retrieval for its whole life.
+    chunks, reranked, cites = [], False, []
+    try:
+        kb_ids = _kb_ids()
+        if kb_ids:
+            chunks, reranked = _retrieve(message, kb_ids)
+            chunks = _diversify(message, chunks) if chunks else []
+            cites = _citations(chunks, message) if chunks else []
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        yield from _dbg(debug, "retrieval skipped", why="RAGFlow unreachable")
+    except Exception as e:
+        yield from _dbg(debug, "retrieval failed", why=str(e))
+    yield ("sources", {"sources": sorted({c.get("document_keyword", "?") for c in chunks}),
+                       "citations": cites, "reranked": reranked})
+
+    excerpts = "\n\n".join(
+        f"[{i+1}] (source: {c.get('document_keyword','?')})\n"
+        f"{c.get('content_with_weight') or c.get('content','')}"
+        for i, c in enumerate(chunks))
+    site = oracle_sitectx.block(url, agents_md)
+    page = _page_context(url, title, where)
+    parts = [p for p in [page, site] if p]
+    parts.append(f"Excerpts for THIS question:\n{excerpts}" if excerpts
+                 else "Excerpts for THIS question: (retrieval returned nothing relevant)")
+    parts.append(f"Question: {message}")
+    user = "\n\n".join(parts)
+
+    msgs = ([{"role": "system", "content": _CHAT_SYSTEM}]
+            + [{"role": t["role"], "content": t["content"]} for t in turns]
+            + [{"role": "user", "content": user}])
+    yield from _dbg(debug, "prompt sent to the text model", chars=sum(len(m["content"]) for m in msgs),
+                    history_turns=len(turns), excerpt_count=len(chunks),
+                    page_context_chars=len(page), site_context_chars=len(site),
+                    system=_CHAT_SYSTEM, text=user)
+
+    try:
+        for note in ensure_model("text"):
+            yield ("status", {"text": note})
+    except RuntimeError as e:
+        yield ("error", {"error": str(e)})
+        return
+
+    # Record the user turn only once the model is reachable, so a failed swap does not leave a
+    # question in the transcript that was never asked of anything.
+    roll = oracle_chat.append(host, "user", message)
+    if roll["rolled"]:
+        yield ("status", {"text": f"previous conversation was full — started a new topic "
+                                  f"(epoch {roll['epoch']}); nothing was deleted"})
+    acc = []
+    try:
+        for delta in _chat_stream(msgs):
+            acc.append(delta)
+            yield ("delta", {"text": delta})
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        yield ("error", {"error": "Synthesis model is unreachable."})
+        return
+    except Exception as e:
+        yield ("error", {"error": f"chat error: {e}"})
+        return
+    if acc:
+        oracle_chat.append(host, "assistant", "".join(acc))
+    yield ("done", {"epoch": roll["epoch"]})
+
+
 VL_CTX_CHARS = int(os.environ.get("ORACLE_VL_CTX_CHARS", "4000"))
 # Above this many characters, a raw page dump is worth compressing before it is handed to the
 # vision model — a long dashboard page is mostly nav, filters and repeated legends.
@@ -1094,6 +1203,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/status"):
             self._send(status())
+        elif self.path.startswith("/chat/hosts"):
+            self._send({"hosts": oracle_chat.hosts()})
+        elif self.path.startswith("/chat/history"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            h = (q.get("host", [""])[0] or
+                 oracle_sitectx.host_of(q.get("url", [""])[0])).strip()
+            self._send({"host": h, "epoch": oracle_chat.epoch(h),
+                        "turns": [{"role": t["role"], "content": t["content"], "at": t.get("at", 0)}
+                                  for t in oracle_chat.history(h)]})
         elif self.path.startswith("/health"):
             self._send({"ok": True})
         elif self.path.startswith("/slots"):
@@ -1147,6 +1265,14 @@ class Handler(BaseHTTPRequestHandler):
                                               ("image_alt", "image_title", "image_caption")},
                                              p.get("source", "region"), p.get("agents_md"),
                                              bool(p.get("debug"))))
+            elif self.path.startswith("/chat/reset"):
+                h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
+                self._send({"host": h, "epoch": oracle_chat.reset(h)})
+            elif self.path.startswith("/chat"):
+                self._send_sse(chat_stream(p.get("message", ""), p.get("url", ""),
+                                           p.get("title", ""), p.get("agents_md"),
+                                           bool(p.get("debug")), p.get("where"),
+                                           (p.get("host") or "").strip()))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))

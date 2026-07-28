@@ -1,0 +1,142 @@
+"""Per-host conversations: one continued chat per site you are reading.
+
+Scoped to the HOST, not the tab or the page. Reading a benchmark report, then its docs, then a run
+page is one line of thought about one system, and it is the host that says so — you should be able
+to ask "so what changed since that first run?" three pages later without repeating yourself.
+
+## Append-only, with epochs
+
+The store never rewrites a turn. That is not tidiness, it is the prerequisite for the KV prefix
+cache: llama.cpp reuses a slot by longest common prefix, so editing history — summarising old
+turns, dropping the middle — invalidates everything from the edit onward and costs a full
+re-process of the conversation. So when a conversation outgrows its budget the store does not
+compact it; it starts a new EPOCH. The old turns stay on disk, readable, and the new epoch begins a
+clean prefix.
+
+That makes the cost model honest: growth inside an epoch is incremental (only the new turns get
+processed), and the one expensive moment is a visible, deliberate boundary rather than a mystery
+slowdown halfway through a conversation.
+
+`reset()` is the same mechanism the user can reach: "new topic" is a new epoch, not a delete.
+Nothing is destroyed by talking to it.
+"""
+import json
+import os
+import re
+import threading
+import time
+from pathlib import Path
+
+CHAT_DIR = Path(os.environ.get(
+    "ORACLE_CHAT_DIR",
+    str(Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "oracle" / "chat")))
+# Budget for ONE epoch, in characters of transcript. Crossing it starts a new epoch rather than
+# rewriting history (see above).
+CHAT_MAX_CHARS = int(os.environ.get("ORACLE_CHAT_MAX_CHARS", "24000"))
+CHAT_MAX_TURNS = int(os.environ.get("ORACLE_CHAT_MAX_TURNS", "40"))
+
+_locks: dict = {}
+_locks_guard = threading.Lock()
+
+
+def _lock(host: str) -> threading.Lock:
+    with _locks_guard:
+        return _locks.setdefault(host, threading.Lock())
+
+
+def _safe(host: str) -> str:
+    """A filename that cannot escape CHAT_DIR. Hosts come off the wire; `../../x` is a host as far
+    as a JSON payload is concerned."""
+    h = re.sub(r"[^a-zA-Z0-9._-]", "_", (host or "").lower()).strip("._-")
+    return h[:120] or "unknown"
+
+
+def _path(host: str) -> Path:
+    return CHAT_DIR / f"{_safe(host)}.json"
+
+
+def _read(host: str) -> dict:
+    try:
+        d = json.loads(_path(host).read_text())
+        if isinstance(d, dict) and isinstance(d.get("turns"), list):
+            return d
+    except Exception:
+        pass
+    return {"host": host, "epoch": 1, "turns": []}
+
+
+def _write(host: str, doc: dict) -> None:
+    try:
+        CHAT_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _path(host).with_suffix(".tmp")
+        tmp.write_text(json.dumps(doc))
+        os.replace(tmp, _path(host))     # atomic: a half-written transcript is worse than none
+    except Exception:
+        pass
+
+
+def history(host: str) -> list:
+    """Turns of the CURRENT epoch, oldest first — what goes into the prompt."""
+    d = _read(host)
+    ep = d.get("epoch", 1)
+    return [t for t in d["turns"] if t.get("epoch", 1) == ep]
+
+
+def all_turns(host: str) -> list:
+    return _read(host)["turns"]
+
+
+def epoch(host: str) -> int:
+    return _read(host).get("epoch", 1)
+
+
+def append(host: str, role: str, content: str) -> dict:
+    """Add a turn. Returns {"epoch": n, "rolled": bool} — `rolled` means this turn began a new
+    epoch because the previous one was full."""
+    if not host:
+        return {"epoch": 1, "rolled": False}
+    with _lock(host):
+        d = _read(host)
+        ep = d.get("epoch", 1)
+        cur = [t for t in d["turns"] if t.get("epoch", 1) == ep]
+        rolled = False
+        # Roll BEFORE appending a user turn, never mid-exchange: an epoch that begins with an
+        # assistant reply to a question it cannot see reads as a non-sequitur.
+        if role == "user" and cur and (
+                sum(len(t.get("content", "")) for t in cur) + len(content) > CHAT_MAX_CHARS
+                or len(cur) >= CHAT_MAX_TURNS):
+            ep += 1
+            d["epoch"] = ep
+            rolled = True
+        d["turns"].append({"role": role, "content": content, "at": time.time(), "epoch": ep})
+        _write(host, d)
+        return {"epoch": ep, "rolled": rolled}
+
+
+def reset(host: str) -> int:
+    """Start a new epoch — "new topic". Keeps everything; only the prompt window moves."""
+    with _lock(host):
+        d = _read(host)
+        if not [t for t in d["turns"] if t.get("epoch", 1) == d.get("epoch", 1)]:
+            return d.get("epoch", 1)          # already empty, nothing to roll
+        d["epoch"] = d.get("epoch", 1) + 1
+        _write(host, d)
+        return d["epoch"]
+
+
+def hosts() -> list:
+    """Every host with a stored conversation, most recently used first."""
+    out = []
+    try:
+        for f in CHAT_DIR.glob("*.json"):
+            try:
+                d = json.loads(f.read_text())
+            except Exception:
+                continue
+            turns = d.get("turns") or []
+            if turns:
+                out.append({"host": d.get("host") or f.stem, "turns": len(turns),
+                            "epoch": d.get("epoch", 1), "at": turns[-1].get("at", 0)})
+    except Exception:
+        pass
+    return sorted(out, key=lambda x: x["at"], reverse=True)
