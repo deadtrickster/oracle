@@ -14,6 +14,7 @@ re-process of the conversation on every turn.
   ./test-chat.py
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -169,6 +170,34 @@ check("a region with NO question still carries the reading",
       "p99 at 412ms" in allmsgs)
 check("and the transcript holds it, not the pixels",
       "iVBORw0KGgo" not in "".join(t.get("content", "") for t in ch.history(H)))
+
+print("\n7c. sessions: quick queries do not land in the chat you type in")
+ch.reset(H)
+ch.reset(H, "quick")
+list(rcv.chat_stream("typed into the panel", "https://docs.stroppy.io/x", "D", None, False, None, H))
+list(rcv.chat_stream("explain this selection", "https://docs.stroppy.io/x", "D", None, False, None, H,
+                     session="quick"))
+main_said = [t["content"] for t in ch.history(H)]
+quick_said = [t["content"] for t in ch.history(H, "quick")]
+check("the panel's conversation has only its own turn", "typed into the panel" in main_said[0])
+check("and does not have the quick one", not any("explain this selection" in c for c in main_said))
+check("the quick session has its own", "explain this selection" in quick_said[0])
+check("they are separate files",
+      ch._path(H, "quick") != ch._path(H) and ch._path(H, "quick").exists())
+check("main keeps the legacy filename", ch._path(H).name == f"{ch._safe(H)}.json")
+names = {(s["host"], s["session"]) for s in ch.sessions(H)}
+check("both are listed for this host", names == {(H, "main"), (H, "quick")}, str(names))
+check("and listing is host-scoped", all(s["host"] == H for s in ch.sessions(H)))
+ch.delete(H, "quick")
+check("deleting one leaves the other", ch.history(H) and not ch.history(H, "quick"))
+
+print("\n7d. an image rides with the turn for the UI, never into the prompt")
+ch.reset(H)
+ch.append(H, "user", "look", image="data:image/png;base64,AAAA")
+t = ch.history(H)[0]
+check("the transcript keeps it", t.get("image", "").startswith("data:image/png"))
+check("but the model's messages do not",
+      "AAAA" not in json.dumps(ch.to_messages(ch.history(H)), ensure_ascii=False))
 
 print("\n8. the turn completes")
 done = [d for k, d in evs if k == "done"]

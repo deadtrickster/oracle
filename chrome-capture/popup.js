@@ -197,6 +197,60 @@ $("chat").addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "openChat" });
   window.close();
 });
+
+// Stored conversations, ALL hosts. The chat panel lists only the site you are on, because that is
+// what you are thinking about while you are there; a global list is a settings job, and this is the
+// settings surface. Same two-click delete, for the same reason: it is the control that destroys.
+const RECEIVER_URL = "http://127.0.0.1:8788";
+
+async function loadSessions() {
+  const box = $("sessions");
+  box.textContent = "loading…";
+  let list = [];
+  try {
+    const r = await fetch(RECEIVER_URL + "/chat/sessions");
+    if (r.ok) list = (await r.json()).sessions || [];
+  } catch (_) {
+    box.textContent = "receiver offline";
+    return;
+  }
+  if (!list.length) { box.textContent = "none yet"; return; }
+  box.innerHTML = "";
+  for (const s of list) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;gap:6px;align-items:baseline;padding:3px 0;" +
+      "border-top:1px solid rgba(128,128,128,.15)";
+    const name = document.createElement("span");
+    name.style.cssText = "flex:1;word-break:break-all";
+    name.textContent = `${s.host} · ${s.session}`;
+    const meta = document.createElement("span");
+    meta.style.cssText = "opacity:.6;white-space:nowrap";
+    meta.textContent = `${s.turns}`;
+    const del = document.createElement("button");
+    del.className = "ghost";
+    del.style.cssText = "font-size:10px;padding:1px 5px;color:#c0392b";
+    del.textContent = "delete";
+    let armed = false;
+    del.addEventListener("click", async () => {
+      if (!armed) { armed = true; del.textContent = "sure?"; setTimeout(() => {
+        armed = false; del.textContent = "delete";
+      }, 4000); return; }
+      del.textContent = "…";
+      try {
+        await fetch(RECEIVER_URL + "/chat/delete", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ host: s.host, session: s.session }),
+        });
+      } catch (_) {}
+      loadSessions();
+    });
+    row.append(name, meta, del);
+    box.appendChild(row);
+  }
+}
+
+$("sessions-refresh").addEventListener("click", loadSessions);
+loadSessions();
 $("exclude-site").addEventListener("click", excludeSite);
 $("refresh-topics").addEventListener("click", loadTopics);
 

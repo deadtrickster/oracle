@@ -33,6 +33,10 @@
   // slow and stuck should be readable at a glance rather than inferred.
   let startedAt = 0;
   let ticker = null;
+  // Two conversations per site: the one you type in, and the one the quick surfaces write to.
+  // Separate because "what does this phrase mean" and "explain this whole run" are not one thread,
+  // and interleaving them would make both harder to read.
+  let session = "main";
 
   function tick() {
     const el = root.querySelector(".elapsed");
@@ -86,7 +90,15 @@
       .msg .bub { padding:7px 10px; border-radius:9px; background:rgba(128,128,128,.10); }
       .msg.me .bub { background:#e8f3f2; }
       .thumb { display:block; max-width:100%; max-height:180px; border-radius:6px; margin-bottom:6px;
-        border:1px solid rgba(128,128,128,.35); }
+        border:1px solid rgba(128,128,128,.35); cursor:zoom-in; }
+      .bub.tool { font:11px/1.45 ui-monospace,monospace; opacity:.8; white-space:pre-wrap;
+        word-break:break-word; }
+      .sesbar { display:flex; gap:6px; padding:5px 12px; font-size:11px; align-items:center;
+        border-bottom:1px solid rgba(128,128,128,.18); }
+      .sesbar b { font-weight:600; }
+      .sesbar .pick { border:0; background:rgba(128,128,128,.16); color:inherit; font:inherit;
+        border-radius:10px; padding:2px 9px; cursor:pointer; opacity:.65; }
+      .sesbar .pick.on { opacity:1; background:#128a86; color:#fff; }
       .msg p { margin:0 0 6px; } .msg p:last-child { margin:0; }
       .msg ul { margin:5px 0; padding-left:18px; }
       pre { background:#f4f4f4; padding:8px; border-radius:6px; overflow:auto; }
@@ -129,6 +141,11 @@
         <button class="tab" data-pane="dbg">Debug<span class="n"></span></button>
         <button class="tab" data-pane="ses">Sessions</button>
       </div>
+      <div class="sesbar">
+        <b>session</b>
+        <button class="pick" data-session="main">chat</button>
+        <button class="pick" data-session="quick">quick (explain · regions)</button>
+      </div>
       <div class="scroll"></div>
       <div class="dbg" hidden></div>
       <div class="ses" hidden></div>
@@ -161,16 +178,24 @@
       const pl = OracleCite.plan(t.content, t.cites);   // excerpt -> sequential display number
       body = OracleCite.linkify(body, pl, "occ" + i) + OracleCite.footnotes(pl, "occ" + i);
     }
-    const thumb = t.thumb ? `<img class="thumb" src="${t.thumb}">` : "";
+    // Show the picture the turn was about — the region you selected, or the screenshot a tool took
+    // of its own accord. The model never sees these; it works from the vision model's reading. But
+    // an answer about an image you cannot see is an answer you cannot check.
+    const img = t.image ? `<img class="thumb" src="${esc(t.image)}">` : "";
+    if (t.role === "tool") {
+      return `<div class="msg"><div class="who">${esc(t.tool || "tool")}</div>
+        <div class="bub tool">${img}${esc((t.content || "").slice(0, 600))}</div></div>`;
+    }
     return `<div class="msg ${t.role === "user" ? "me" : ""}">
       <div class="who">${t.role === "user" ? "you" : "oracle"}</div>
-      <div class="bub">${thumb}${body}</div></div>`;
+      <div class="bub">${img}${body}</div></div>`;
   }
 
   function render() {
     let h = turns.map(bubble).join("");
     if (steps.length) h += steps.map((s) =>
-      `<p class="step${s.acting ? " act" : ""}">${esc(s.says)}</p>`).join("");
+      `<p class="step${s.acting ? " act" : ""}">${esc(s.says)}` +
+      (s.image ? `<img class="thumb" src="${esc(s.image)}">` : "") + `</p>`).join("");
     if (streaming) {
       // The status line must appear even when text has ALREADY streamed. The model says what it is
       // about to do and then calls the tool, so `acc` is non-empty exactly when the slow thing
@@ -209,16 +234,20 @@
     return `${Math.round(s / 86400)}d ago`;
   }
 
-  function renderSessions(hosts, here) {
-    if (!hosts.length) {
-      sesEl.innerHTML = `<p class="empty">No stored conversations yet.</p>`;
+  function renderSessions(list, here) {
+    // THIS HOST only. Conversations for every other site are somebody else's business here; they
+    // are managed from the extension's own settings page, where a global list belongs.
+    if (!list.length) {
+      sesEl.innerHTML = `<p class="empty">No stored conversations for ${esc(here)} yet.
+        Other sites are listed in the Oracle popup.</p>`;
       return;
     }
-    sesEl.innerHTML = hosts.map((s) => `
+    sesEl.innerHTML = list.map((s) => `
       <div class="row">
-        <span class="h">${esc(s.host)}${s.host === here ? '<span class="me">this site</span>' : ""}</span>
+        <span class="h">${esc(s.session)}${s.session === session ? '<span class="me">open</span>' : ""}
+          <span class="me">${esc(s.preview || "")}</span></span>
         <span class="meta">${s.turns} turn${s.turns === 1 ? "" : "s"} · ${esc(ago(s.at))}</span>
-        <button class="del" data-host="${esc(s.host)}">delete</button>
+        <button class="del" data-host="${esc(s.host)}" data-session="${esc(s.session)}">delete</button>
       </div>`).join("");
     sesEl.querySelectorAll(".del").forEach((b) => b.addEventListener("click", () => {
       // Deliberately two clicks: this is the one control here that destroys something. "New topic"
@@ -230,7 +259,10 @@
         return;
       }
       b.textContent = "deleting…";
-      try { chrome.runtime.sendMessage({ type: "oracle:chatDelete", host: b.dataset.host }); } catch (_) {}
+      try {
+        chrome.runtime.sendMessage({ type: "oracle:chatDelete", host: b.dataset.host,
+                                     session: b.dataset.session });
+      } catch (_) {}
     }));
   }
 
@@ -262,13 +294,13 @@
     }));
   }
 
-  function send(preset, image, thumb) {
+  function send(preset, image, thumb, source) {
     const q = preset !== undefined ? preset : input.value.trim();
     // A region with no typed question is a legitimate turn — the picture IS the question — so only
     // a typed-and-empty send is a no-op.
     if (streaming || (!q && !image)) return;
     if (preset === undefined) input.value = "";
-    turns.push({ role: "user", content: q || "(region sent)", thumb });
+    turns.push({ role: "user", content: q || "(region sent)", image: thumb });
     streaming = true; acc = ""; status = ""; cites = null; sources = null;
     steps = []; dbgEvents = []; renderDbg();
     startedAt = Date.now();
@@ -276,7 +308,9 @@
     ticker = setInterval(tick, 1000);
     render(); tick();
     go.disabled = true;
-    try { chrome.runtime.sendMessage({ type: "oracle:chat", message: q, image }); } catch (_) {}
+    try {
+      chrome.runtime.sendMessage({ type: "oracle:chat", message: q, image, session, source });
+    } catch (_) {}
   }
 
   root.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
@@ -324,6 +358,19 @@
     try { chrome.runtime.sendMessage({ type: "oracle:setDebug", on: debugOn }); } catch (_) {}
     renderDbg();
   });
+  function paintSession() {
+    root.querySelectorAll(".pick").forEach(
+      (b) => b.classList.toggle("on", b.dataset.session === session));
+  }
+  root.querySelectorAll(".pick").forEach((b) => b.addEventListener("click", () => {
+    if (streaming || b.dataset.session === session) return;
+    session = b.dataset.session;
+    turns = []; steps = []; acc = "";
+    paintSession();
+    render();
+    try { chrome.runtime.sendMessage({ type: "oracle:chatLoad", session }); } catch (_) {}
+  }));
+
   $(".min").addEventListener("click", () => { host.style.display = "none"; });
   $(".newt").addEventListener("click", () => {
     if (streaming) return;
@@ -353,7 +400,10 @@
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "oracle:chatHistory") {
-      turns = (msg.turns || []).map((t) => ({ role: t.role, content: t.content }));
+      turns = (msg.turns || []).map((t) => ({ role: t.role, content: t.content,
+                                              image: t.image || "", tool: t.tool || "" }));
+      if (msg.session) session = msg.session;
+      paintSession();
       root.querySelector(".bar .h").textContent = msg.host ? `· ${msg.host}` : "";
       actions = !!msg.actions;
       debugOn = !!msg.debug;
@@ -363,14 +413,32 @@
       renderDbg();
       return;
     }
-    if (msg.type === "oracle:chatSessions") { renderSessions(msg.hosts || [], msg.here || ""); return; }
-    if (msg.type === "oracle:chatAsk") { send(msg.message || "", msg.image || "", msg.thumb); return; }
+    if (msg.type === "oracle:chatSessions") { renderSessions(msg.sessions || [], msg.here || ""); return; }
+    if (msg.type === "oracle:chatAsk") {
+      // A quick query (explain / fact-check / a region) arriving from elsewhere: switch the panel to
+      // the session it belongs to first, so the answer appears in the conversation that will keep
+      // it rather than in whichever one happened to be open.
+      if (msg.session && msg.session !== session) {
+        session = msg.session;
+        turns = [];
+        paintSession();
+      }
+      send(msg.message || "", msg.image || "", msg.thumb, msg.source || "");
+      return;
+    }
     if (msg.type !== "oracle:chatEvent") return;
     const { event, data } = msg.ev || {};
     if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }
     if (event === "status") { status = data.text || ""; render(); return; }
     if (event === "tool_request") {
-      (data.calls || []).forEach((c) => steps.push({ says: c.says, acting: c.acting }));
+      (data.calls || []).forEach((c) => steps.push({ id: c.id, says: c.says, acting: c.acting }));
+      render();
+      return;
+    }
+    if (event === "tool_image") {
+      // The screenshot a tool took on its own initiative, shown next to the step that took it.
+      const s = steps.find((x) => x.id === data.id);
+      if (s) s.image = data.image; else steps.push({ says: data.says, image: data.image });
       render();
       return;
     }

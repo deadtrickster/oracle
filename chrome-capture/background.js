@@ -68,13 +68,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) visionPage(tab); sendResponse({ ok: true }); });
     return true;
   }
-  if (msg.type === "oracle:chat") { if (sender.tab) chatSend(msg.message, sender.tab, msg.image || ""); return false; }
-  if (msg.type === "oracle:chatLoad") { if (sender.tab) chatLoad(sender.tab); return false; }
+  if (msg.type === "oracle:chat") {
+    if (sender.tab) chatSend(msg.message, sender.tab, msg.image || "", msg.session, msg.source);
+    return false;
+  }
+  if (msg.type === "oracle:chatLoad") { if (sender.tab) chatLoad(sender.tab, msg.session); return false; }
   if (msg.type === "oracle:chatReset") { if (sender.tab) chatReset(sender.tab); return false; }
   if (msg.type === "oracle:chatAllow") { if (sender.tab) chatAllow(sender.tab, msg.allow); return false; }
   if (msg.type === "oracle:setDebug") { chrome.storage.local.set({ [DEBUG_KEY]: !!msg.on }); return false; }
   if (msg.type === "oracle:chatSessions") { if (sender.tab) chatSessions(sender.tab); return false; }
-  if (msg.type === "oracle:chatDelete") { if (sender.tab) chatDelete(sender.tab, msg.host); return false; }
+  if (msg.type === "oracle:chatDelete") {
+    if (sender.tab) chatDelete(sender.tab, msg.host, msg.session);
+    return false;
+  }
   if (msg.type === "openChat") {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) openChat(tab); sendResponse({ ok: true }); });
     return true;
@@ -259,7 +265,27 @@ function extractSelectionContext() {
   return out;
 }
 
+// Explain and fact-check now go through the CHAT, into a session of their own.
+//
+// They used to be one-shot cards: an answer appeared, you read it, it closed, and anything you
+// wanted to ask next started from nothing. Routing them through the chat means they get the same
+// memory, the same tools (they can look at the page rather than guess at it), and a transcript you
+// can pick up — while staying separate from the conversation you type in, because "what does this
+// phrase mean" and "explain this whole run to me" are not the same thread.
 async function ground(tab, mode, selection) {
+  selection = (selection || "").trim();
+  if (!scriptableTab(tab) || !selection) return;
+  observe(selection, OBS[mode] || 0.8, tab.url, tab.title);
+  await openChat(tab);
+  const framed = mode === "factcheck"
+    ? `Fact-check this claim from the page, against the corpus:\n\n"${selection.slice(0, 2000)}"`
+    : `Explain this, from the page I'm reading:\n\n"${selection.slice(0, 2000)}"`;
+  chrome.tabs.sendMessage(tab.id, { type: "oracle:chatAsk", message: framed, session: QUICK })
+    .catch(() => {});
+}
+
+// The old one-shot path, still used by the ⚓ "ground this" button on a vision card.
+async function groundOnce(tab, mode, selection) {
   selection = (selection || "").trim();
   if (!scriptableTab(tab) || !selection) return;
   try {
@@ -313,23 +339,34 @@ async function openChat(tab) {
   await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "chat.js"] });
 }
 
-async function chatLoad(tab) {
+// Which conversation the panel is showing. "main" is the chat you type in; "quick" is where
+// explain / fact-check / a region sent to vision land, so those stop being cards that vanish and
+// become a transcript with the same tools and the same memory.
+const QUICK = "quick";
+let chatSession = "main";
+
+async function chatLoad(tab, session) {
+  if (session) chatSession = session;
   // The transcript lives on the receiver, so reopening the panel — in another tab, another window,
   // or after a restart — shows the conversation that is actually stored rather than a fresh one.
   let host = "";
   try { host = new URL(tab.url).host; } catch (_) {}
   try {
-    const r = await fetch(`${RECEIVER}/chat/history?host=${encodeURIComponent(host)}`);
+    const r = await fetch(`${RECEIVER}/chat/history?host=${encodeURIComponent(host)}` +
+                          `&session=${encodeURIComponent(chatSession)}`);
     const d = r.ok ? await r.json() : { turns: [] };
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: d.turns || [],
                                       epoch: d.epoch, actions: !!d.actions,
+                                      session: chatSession,
                                       debug: await debugOn() }).catch(() => {});
   } catch (_) {
-    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: [] }).catch(() => {});
+    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: [],
+                                      session: chatSession }).catch(() => {});
   }
 }
 
-async function chatSend(message, tab, image = "") {
+async function chatSend(message, tab, image = "", session = null, source = "") {
+  if (session) chatSession = session;
   const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev }).catch(() => {});
   let host = "";
   try { host = new URL(tab.url).host; } catch (_) {}
@@ -353,7 +390,8 @@ async function chatSend(message, tab, image = "") {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, host, url: tab.url, title: tab.title,
                              agents_md: await agentsMd(tab.url), debug, where,
-                             image, mime: "image/png" }),
+                             image, mime: "image/png", session: chatSession,
+                             source: source || "region" }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
     await chatPump(r.body, send, tab);
@@ -387,7 +425,8 @@ async function chatRegion(msg, tab) {
     canvas.getContext("2d").drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
     const b64 = await blobToB64(await canvas.convertToBlob({ type: "image/png" }));
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatAsk", message: (prompt || "").trim(),
-                                      image: b64, thumb: "data:image/png;base64," + b64 })
+                                      image: b64, thumb: "data:image/png;base64," + b64,
+                                      session: QUICK })
       .catch(() => {});
   } catch (e) {
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "error",
@@ -405,6 +444,29 @@ async function chatRegion(msg, tab) {
 // intention rather than its outcome is how a model ends up confidently narrating a click that
 // missed, which is this repo's oldest failure mode wearing gloves.
 const CHAT_MAX_HANDOFFS = 12;
+
+// KEEPALIVE. An MV3 service worker is torn down after ~30s of inactivity, and a long-running fetch
+// does not reliably count — a look_at_page round trip is a screenshot, a GPU swap, a vision read
+// and a swap back, comfortably two minutes, and if the worker dies mid-flight nobody ever posts the
+// result. The receiver is left holding an unanswered tool call and the panel spins forever, which
+// is exactly what he saw twice.
+//
+// The documented way to stay alive is to keep touching an extension API. So do that, explicitly,
+// for as long as a tool is running — a harness that needs to be awake should keep itself awake
+// rather than hope.
+let _keepalive = null;
+let _keepaliveDepth = 0;
+
+function keepaliveStart() {
+  _keepaliveDepth++;
+  if (_keepalive) return;
+  _keepalive = setInterval(() => chrome.runtime.getPlatformInfo().catch(() => {}), 20000);
+}
+
+function keepaliveStop() {
+  _keepaliveDepth = Math.max(0, _keepaliveDepth - 1);
+  if (_keepaliveDepth === 0 && _keepalive) { clearInterval(_keepalive); _keepalive = null; }
+}
 
 // injected: read the page, or one part of it
 function toolReadPage(selector) {
@@ -477,6 +539,10 @@ async function runBrowserTool(call, tab) {
     if (call.name === "look_at_page") {
       const shot = a.full_page ? (await fullPageShot(tab)).b64
         : (await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })).split(",")[1];
+      // Hand the picture back with the reading. When the model decides to look at something on its
+      // own, the person supervising it should see the same thing it saw — otherwise the transcript
+      // says "I looked" and shows nothing, which is a claim rather than evidence.
+      call.image = "data:image/png;base64," + shot;
       const r = await fetch(RECEIVER + "/vision", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: shot, mime: "image/png", url: tab.url, title: tab.title,
@@ -502,10 +568,17 @@ async function chatHandleTools(calls, tab, send, depth) {
     send({ event: "error", data: { error: "too many tool steps — stopping." } });
     return;
   }
+  keepaliveStart();
   const results = [];
-  for (const c of calls) {
-    send({ event: "status", data: { text: c.says + "…" } });
-    results.push({ id: c.id, name: c.name, content: await runBrowserTool(c, tab) });
+  try {
+    for (const c of calls) {
+      send({ event: "status", data: { text: c.says + "…" } });
+      const content = await runBrowserTool(c, tab);
+      if (c.image) send({ event: "tool_image", data: { id: c.id, image: c.image, says: c.says } });
+      results.push({ id: c.id, name: c.name, content, image: c.image || "" });
+    }
+  } finally {
+    keepaliveStop();
   }
   let host = "";
   try { host = new URL(tab.url).host; } catch (_) {}
@@ -513,7 +586,7 @@ async function chatHandleTools(calls, tab, send, depth) {
     const r = await fetch(RECEIVER + "/chat/tool", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host, results, url: tab.url, title: tab.title,
-                             debug: await debugOn() }),
+                             session: chatSession, debug: await debugOn() }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
     await chatPump(r.body, send, tab, depth + 1);
@@ -545,20 +618,22 @@ async function chatPump(body, send, tab, depth = 0) {
 async function chatSessions(tab) {
   let host = "";
   try { host = new URL(tab.url).host; } catch (_) {}
-  let hosts = [];
+  let sessions = [];
   try {
-    const r = await fetch(RECEIVER + "/chat/hosts");
-    if (r.ok) hosts = (await r.json()).hosts || [];
+    // Scoped to this host: the panel lists the conversations for the site you are on. The global
+    // list lives in the extension's settings page, where a global list belongs.
+    const r = await fetch(`${RECEIVER}/chat/sessions?host=${encodeURIComponent(host)}`);
+    if (r.ok) sessions = (await r.json()).sessions || [];
   } catch (_) {}
-  chrome.tabs.sendMessage(tab.id, { type: "oracle:chatSessions", hosts, here: host })
+  chrome.tabs.sendMessage(tab.id, { type: "oracle:chatSessions", sessions, here: host })
     .catch(() => {});
 }
 
-async function chatDelete(tab, host) {
+async function chatDelete(tab, host, session) {
   try {
     await fetch(RECEIVER + "/chat/delete", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host }),
+      body: JSON.stringify({ host, session: session || "main" }),
     });
   } catch (_) {}
   await chatSessions(tab);
@@ -566,7 +641,7 @@ async function chatDelete(tab, host) {
   // on screen that the next question would silently contradict.
   let here = "";
   try { here = new URL(tab.url).host; } catch (_) {}
-  if (host === here) chatLoad(tab);
+  if (host === here && (session || "main") === chatSession) chatLoad(tab);
 }
 
 // The per-host gate for acting tools. Stored on the RECEIVER, not in the extension, because the
@@ -655,7 +730,9 @@ async function agentsMd(url) {
 
 // ---------------------------------------------------------------- screenshot region -> vision model
 
-async function screenshotRegion(tab, target = "vision") {
+// Default target is the CHAT now: a region you selected belongs in a conversation you can continue,
+// not in a card that closes and takes the picture with it.
+async function screenshotRegion(tab, target = "chat") {
   if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
   // NO pre-flight check on /status here. An earlier version refused when status.vision was false
   // and it silently broke the feature the moment auto-swap landed: `vision:false` now means only
@@ -878,47 +955,23 @@ async function fullPageShot(tab) {
 
 async function visionPage(tab) {
   if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
-  const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode: "vision", ev }).catch(() => {});
-  let thumb = null;
+  await openChat(tab);
   try {
-    let pageText = "";
-    try {
-      const [pt] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => (document.body && document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 6000),
-      });
-      pageText = pt?.result || "";
-    } catch (_) { /* some pages refuse injection; the pixels still work */ }
-
-    const debug = await debugOn();
     const shot = await fullPageShot(tab);
-    thumb = "data:image/png;base64," + shot.b64;
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
-    await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
-    if (debug) {
-      dbg(tab, { stage: "full-page screenshot", slices: shot.slices, capped: shot.capped,
-                 page_css_height: shot.pageCssHeight, captured_css_height: shot.capturedCssHeight,
-                 png_kb: Math.round(shot.b64.length * 0.75 / 1024) });
-      dbg(tab, { stage: "sent to receiver", page_text_chars: pageText.length, source: "fullpage",
-                 text: pageText.slice(0, 4000) });
+    if (await debugOn()) {
+      chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "debug", data: {
+        side: "extension", stage: "full-page screenshot", slices: shot.slices, capped: shot.capped,
+        page_css_height: shot.pageCssHeight, captured_css_height: shot.capturedCssHeight,
+        png_kb: Math.round(shot.b64.length * 0.75 / 1024) } } }).catch(() => {});
     }
-    const r = await fetch(RECEIVER + "/vision", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        image: shot.b64, mime: "image/png",
-        prompt: "Explain this page: what is it, what is it showing, and what should I notice?",
-        url: tab.url, title: tab.title, page_text: pageText, crop_text: "", source: "fullpage",
-        agents_md: await agentsMd(tab.url), debug,
-      }),
-    });
-    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpOrFail(r.body, send);
+    chrome.tabs.sendMessage(tab.id, {
+      type: "oracle:chatAsk", session: QUICK, image: shot.b64,
+      thumb: "data:image/png;base64," + shot.b64, source: "fullpage",
+      message: "Explain this page: what is it, what is it showing, and what should I notice?",
+    }).catch(() => {});
   } catch (e) {
-    try {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
-      await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
-    } catch (_) {}
-    send({ event: "error", data: { error: "Vision failed: " + (e.message || e) + " (is the receiver + qwen3-vl up?)" } });
+    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "error",
+      data: { error: "Could not capture the page: " + (e.message || e) } } }).catch(() => {});
   }
 }
 
@@ -983,28 +1036,20 @@ async function visionImage(srcUrl, tab) {
     if (!b64) { notify("Could not read that image."); return; }
     thumb = `data:${mime};base64,${b64}`;
 
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
-    await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
-    const r = await fetch(RECEIVER + "/vision", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        image: b64, mime, prompt: "",
-        url: tab.url, title: tab.title,
-        image_alt: meta.alt, image_title: meta.title, image_caption: meta.caption,
-        // `near` is prose AROUND the image, not text inside it — `source` tells the receiver to
-        // label it as such instead of claiming it was rendered inside a cropped rectangle.
-        crop_text: meta.near, page_text: meta.page || "", source: "image",
-        agents_md: await agentsMd(tab.url), debug: await debugOn(),
-      }),
-    });
-    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpOrFail(r.body, send);
+    await openChat(tab);
+    // The image's own markup travels in the QUESTION, since the chat path carries a message rather
+    // than the /vision payload's named fields. It is still the first thing the vision model reads.
+    const described = [["alt", meta.alt], ["title", meta.title], ["caption", meta.caption]]
+      .filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join("\n");
+    chrome.tabs.sendMessage(tab.id, {
+      type: "oracle:chatAsk", session: QUICK, image: b64, thumb, source: "image",
+      message: "Explain this image from the page." +
+        (described ? `\n\nThe page describes it as:\n${described}` : "") +
+        (meta.near ? `\n\nText around it: ${meta.near.slice(0, 600)}` : ""),
+    }).catch(() => {});
   } catch (e) {
-    try {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
-      await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
-    } catch (_) {}
-    send({ event: "error", data: { error: "Image read failed: " + (e.message || e) } });
+    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "error",
+      data: { error: "Image read failed: " + (e.message || e) } } }).catch(() => {});
   }
 }
 

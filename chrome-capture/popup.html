@@ -77,6 +77,13 @@
     <button class="ghost" id="shot" style="width:100%;margin-top:6px">Screenshot a region → vision</button>
     <button class="ghost" id="page-vl" style="width:100%;margin-top:6px">Explain this page (text + vision)</button>
     <button class="ghost" id="chat" style="width:100%;margin-top:6px">Chat about this site →</button>
+    <div id="sessions-box" style="margin-top:10px">
+      <div style="display:flex;align-items:baseline;gap:6px">
+        <b style="font-size:11px;opacity:.75;flex:1">Stored conversations</b>
+        <button class="ghost" id="sessions-refresh" style="font-size:10px;padding:2px 6px">refresh</button>
+      </div>
+      <div id="sessions" style="margin-top:4px;font-size:11px;max-height:180px;overflow:auto"></div>
+    </div>
     <div class="msg" id="cap-msg"></div>
     <label class="chk"><input type="checkbox" id="pdf" checked> attach PDF (shows a debug banner)</label>
     <label class="chk"><input type="checkbox" id="debug"> debug: show every event + injected context in the card</label>

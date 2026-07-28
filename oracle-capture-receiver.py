@@ -879,7 +879,7 @@ def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str 
 def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | None = None,
                 debug: bool = False, where: dict | None = None, host: str = "",
                 image: str = "", image_mime: str = "image/png",
-                session: str = oracle_chat.MAIN):
+                session: str = oracle_chat.MAIN, source: str = "region"):
     """One turn of the per-host conversation. Emits the same SSE shape as the other streams.
 
     With an `image`, the turn takes the vision detour first: qwen3-vl READS the region, its reading
@@ -917,8 +917,14 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
                 try:
                     for note in ensure_model("vl"):
                         yield ("status", {"text": note})
-                    reading = oracle_vision.describe(data_url, question=message,
-                                                     label=(title or url or "")[:120])
+                    # The same context the one-shot vision card builds — page identity, site pack,
+                    # what the region is. Routing images through the chat must not quietly downgrade
+                    # what the vision model is told, or the answers get worse for a UI reason.
+                    ctx = _vl_context(url, title, "", False, "", None, source, agents_md)
+                    reading = oracle_vision.describe(
+                        data_url, label=(title or url or "")[:120],
+                        question=(ctx + "\n\n" if ctx else "") +
+                                 (f"The user asks: {message}" if message else ""))
                     if key:
                         oracle_vision.remember(key, reading, question=message, label=title or url)
                 except Exception as e:
@@ -1669,7 +1675,8 @@ class Handler(BaseHTTPRequestHandler):
                                            (p.get("host") or "").strip(),
                                            p.get("image", ""),
                                            p.get("mime", "image/png"),
-                                           (p.get("session") or oracle_chat.MAIN).strip()))
+                                           (p.get("session") or oracle_chat.MAIN).strip(),
+                                           p.get("source", "region")))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))
