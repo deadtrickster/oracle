@@ -101,6 +101,12 @@
       .step .why { display:block; opacity:.7; font-size:10px; margin-top:2px; }
       .step.fold { cursor:pointer; border-left-color:transparent; opacity:.55; }
       .step.fold:hover { opacity:.9; }
+      .step.res .more { margin-left:8px; opacity:.55; text-decoration:underline; cursor:pointer; }
+      .step.res .more:hover { opacity:1; }
+      .rawout { font:10px/1.4 ui-monospace,monospace; white-space:pre-wrap; word-break:break-word;
+        max-height:220px; overflow:auto; margin:2px 0 8px 10px; padding:6px 8px; opacity:.8;
+        background:rgba(128,128,128,.10); border-radius:5px; }
+      .rawout[hidden] { display:none; }
       .tabs { display:flex; gap:2px; padding:0 10px; flex:none;
         border-bottom:1px solid rgba(128,128,128,.25); }
       .tab { border:0; background:transparent; color:inherit; font:inherit; font-size:11px;
@@ -301,6 +307,24 @@
     return out.join("").replace(/<<FENCE(\d+)>>/g, (_, i) => fenced[Number(i)]);
   }
 
+  const toolFailed = (raw) =>
+    /^(NOT CLICKED|NOT TYPED|no element matches|error|unknown tool|look_at_page failed)/i
+      .test((raw || "").trim());
+
+  // One line that says what came back, from payloads that were written for a model to read.
+  function toolGist(raw) {
+    const s = (raw || "").trim();
+    if (!s) return "(nothing)";
+    if (toolFailed(s)) return s.split("\n")[0].slice(0, 120);
+    try {
+      const d = JSON.parse(s.split("\nAFTER:")[0]);
+      if (d.clicked) return `clicked “${d.clicked}”`;
+      if (d.typed) return "typed";
+    } catch (_) { /* not JSON — a page dump or a vision reading */ }
+    const words = s.replace(/\s+/g, " ").trim();
+    return `${words.length.toLocaleString()} chars — ${words.slice(0, 90)}…`;
+  }
+
   function bubble(t, i) {
     let body = md(t.content);
     if (t.role === "user") {
@@ -313,9 +337,21 @@
     // of its own accord. The model never sees these; it works from the vision model's reading. But
     // an answer about an image you cannot see is an answer you cannot check.
     const img = t.image ? `<img class="thumb" src="${esc(t.image)}">` : "";
+
+    // A tool RESULT is a machine payload — a JSON blob, a page dump — and pasting it into the
+    // conversation is how a reloaded panel turned into a wall of URLs and nav text. It gets the
+    // same one-line treatment as a live step, with the raw output one click away for when the
+    // question is "what did it actually get back".
     if (t.role === "tool") {
-      return `<div class="msg"><div class="who">${esc(t.tool || "tool")}</div>
-        <div class="bub tool">${img}${esc((t.content || "").slice(0, 600))}</div></div>`;
+      const raw = t.content || "";
+      return `<p class="step${toolFailed(raw) ? " bad" : ""} res" data-i="${i}">` +
+        `${toolFailed(raw) ? "✗" : "✓"} ${esc(t.tool || "tool")}: ${esc(toolGist(raw))}` +
+        `<span class="more">show output</span></p>` +
+        `<pre class="rawout" data-i="${i}" hidden>${esc(raw.slice(0, 4000))}</pre>` + img;
+    }
+    // An assistant turn that only asked for tools is not a message; it is the steps themselves.
+    if (t.role === "assistant" && (t.calls || []).length && !(t.content || "").trim()) {
+      return (t.calls || []).map((c) => `<p class="step">· ${esc(c)}</p>`).join("");
     }
     return `<div class="msg ${t.role === "user" ? "me" : ""}">
       <div class="who">${t.role === "user" ? "you" : "oracle"}</div>
@@ -530,7 +566,11 @@
       openLightbox(t.getAttribute("src"));
       return;
     }
-    if (t.classList.contains("fold")) { stepsOpen = !stepsOpen; render(); }
+    if (t.classList.contains("fold")) { stepsOpen = !stepsOpen; render(); return; }
+    if (t.classList.contains("more")) {
+      const pre = scroll.querySelector(`pre.rawout[data-i="${t.closest(".res").dataset.i}"]`);
+      if (pre) { pre.hidden = !pre.hidden; t.textContent = pre.hidden ? "show output" : "hide"; }
+    }
   });
 
   function paintSession() {
@@ -684,7 +724,8 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "oracle:chatHistory") {
       turns = (msg.turns || []).map((t) => ({ role: t.role, content: t.content,
-                                              image: t.image || "", tool: t.tool || "" }));
+                                              image: t.image || "", tool: t.tool || "",
+                                              calls: t.calls || [] }));
       if (msg.session) session = msg.session;
       paintSession();
       currentHost = msg.host || "";
