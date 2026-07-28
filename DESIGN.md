@@ -1099,6 +1099,25 @@ It costs ~6 s of GPU — but spent in the background while the swap finishes, ra
 user's next question. Storing 11 KB of text instead of 112 MB of tensors to recover the same state
 is also, on reflection, simply the better trade.
 
+**The tier that actually dominates is neither of those: it is the model FILES in page cache.** A
+prompt prefix is thousands of tokens; a model is 49.6 GB of text weights plus 17.7 GB of qwen3-vl,
+and `--no-mmap` *copies* rather than maps, so a swap re-reads the whole file unless the kernel still
+has it. Twelve model loads in six hours makes that the largest single latency in the system —
+larger than every prompt-processing saving here combined. 125 GB of RAM against 67 GB of models
+means both fit, so after a swap the model just *evicted* is pulled back into page cache: a swap is
+by definition a promise to swap back. Gated on `MemAvailable` with headroom, because a cache tier
+that causes reclaim has made things worse.
+
+Two notes, both learned the hard way. `POSIX_FADV_WILLNEED` alone is **not enough** — it is a hint
+the kernel caps far below 50 GB, and using it by itself would have produced a warming step that
+reported success and warmed almost nothing, which is this repo's signature bug written deliberately
+in the name of elegance. It issues the hint *and* reads the file, and `cached_fraction()` (mincore)
+exists so the claim can be checked rather than believed. And the load progress line used to say
+"reading weights from disk" unconditionally: true before this tier existed, false after, and false
+in the way that gets acted on — it reads as "you are short of RAM" when the file is 100% resident.
+It now measures and says which. **Even fully cached a load is 20-30 s**, because `--no-mmap` copies
+~50 GB out of page cache and then pushes ~20 GB across PCIe; no amount of RAM removes that.
+
 ### 6.3 Per-host chat, and the harness it is turning into
 
 One continued conversation per **host** — not per tab, not per page. Reading a run report, then the
@@ -1121,7 +1140,7 @@ never mid-exchange, so an epoch never opens with a reply to a question it cannot
 transcript, not the pixels — so three turns later "that spike" still refers to something, the
 follow-up costs no GPU swap, and the conversation stays replayable into a cached prefix.
 
-#### Where this is going: the chat is becoming a harness (planned, TODO G6)
+#### The chat as a harness — built (TODO G6)
 
 The current shape has a clear ceiling, and it shows up in one question: *"what do you think about
 this page?"* That goes to corpus retrieval, because retrieval is the only thing the turn knows how
@@ -1151,8 +1170,66 @@ Two architectural points this forces, both worth stating before building:
    explicit gate, and the gate belongs in the harness rather than in a prompt rule asking the model
    to be careful.
 
-The retrieval-by-default behaviour goes away with this: a turn should retrieve when the question is
-about the corpus and look when it is about the page, and the model is the thing that knows which.
+Retrieval-by-default went away with this: a turn retrieves when the question is about the corpus and
+looks when it is about the page, and the model is what knows which.
+
+**What it does, observed.** Asked to explain a benchmark run, it clicked `METRICS`, clicked
+`GRAFANA`, guessed a CSS selector that did not exist, was told so, and recovered by taking a
+screenshot — the before/after URLs in the tool results prove the navigation rather than the model
+asserting it. That is the shape that was wanted: it goes through the tabs itself.
+
+**Every tool reports the OUTCOME, not the intention.** A click returns what it clicked *and* the
+page's URL, title and text ~900 ms later, because a click that switches a tab changes the thing
+being reasoned about. A click that matches nothing returns the list of clickable labels actually on
+the page; a `read_page` that misses says the selector was a guess and returns the whole page anyway.
+Both exist because the first versions returned a bare failure, and a model given nothing to correct
+itself with simply guesses again — which is how an invented `div[data-testid="metrics-panel"]`
+appeared in a transcript.
+
+**Three things this surfaced that are worth stating as rules.**
+
+1. **Do not photograph yourself.** `look_at_page` captured Oracle's own panel along with the page,
+   so the model read its own previous answer as part of the site — describing itself, from a stale
+   copy, unable to tell that is what it was doing. Every Oracle surface is tagged `data-oracle-ui`
+   and hidden for the duration of a capture.
+2. **A dangling tool call is a malformed prompt, not a lost turn.** The loop runs in an MV3 service
+   worker Chrome may terminate mid-flight; the result then never arrives and the transcript keeps an
+   assistant `tool_call` with nothing after it, which no chat template can render. Missing results
+   are synthesised as "this step never completed", so the model can reason about the gap. (The
+   worker is also kept alive for the whole turn now — the first version only did it during tool
+   execution, which is not the long part.)
+3. **A plan the model narrates and then abandons reads as a lie.** It announced "let me check the
+   METRICS tab, then return to GRAFANA" and then called something else entirely. The prompt now says
+   to announce one step at a time and never to report a result from a tool it has not called — and,
+   more usefully, the UI shows each step's outcome (`✓`/`✗` with the reason) so the prose is
+   checkable against what happened.
+
+### 6.4 One queue for the GPU: batching, and vision first
+
+`oracle_vram` answers "make this model resident, one swapper at a time". It does not answer what
+happens when several requests are in flight: a vision request and three text requests arriving
+together produce swap-swap-swap-swap — four model loads at 20-40s each to serve four requests whose
+actual work is shorter than the swapping.
+
+So requests queue for the GPU (`oracle_broker`) and it is handed out in **batches**:
+
+- an arrival for the model already loaded **joins the running batch**, rather than waiting behind a
+  swap that would only have to swap back;
+- when a batch drains, **vision goes next** if anyone is waiting — it is the expensive,
+  user-visible one (a screenshot someone is staring at), while text work is faster and more often a
+  background step;
+- a batch is bounded in **count and time**, because an unbounded batch is a livelock with good
+  manners.
+
+The lease covers the whole operation, not just the swap: releasing after `ensure` would let a text
+request pull the vision model out from under a call still running. It is released while a *browser*
+tool runs, since that work happens in the extension and holding the GPU through a screenshot blocks
+everyone for nothing.
+
+The tests assert the **order** things ran in, because the order is the entire feature — a broker
+that serialises correctly but swaps between every request has solved nothing. One test was wrong
+first time and the broker was right: a same-model arrival joining a running batch is the win, not a
+priority failure.
 
 ## 7. MCP servers (the tool layer)
 

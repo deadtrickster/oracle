@@ -1162,6 +1162,94 @@ length — the cache boundary silently moves to token zero and the whole mechani
 by reading the output, so it's a test rather than a comment, and the test asserts the one property
 that matters: every feature, on a given host, must produce a byte-identical prefix.
 
+## Act 25 — I asked it what it thought of the page, and it had never looked
+
+The chat panel could answer questions about my corpus. Asked "what do you think about this page?",
+it searched the corpus — because searching the corpus was the only thing a turn knew how to do. The
+corpus has never seen that page. So it answered from the page's *title*, and from whatever the
+conversation had already established, fluently.
+
+The fix is not a better prompt. It is hands. A turn now has tools: read the page, look at it with
+the vision model, search the corpus, click, type. Retrieval stopped being what every turn does and
+became one option among several, chosen by the thing that knows which the question needs.
+
+Two structural decisions turned out to matter more than the tools themselves.
+
+**The browser drives the loop, not the server.** The receiver decides *what* to do and can do none
+of it — it has no DOM and never will. So a turn ends with a request for a tool, the extension
+performs it, and posts the result back as the next turn. This is the same rule the whole project
+runs on: the model decides "move the right hand", and the component that *owns* the hand does the
+moving and reports what actually happened. Anything else is a system narrating actions it did not
+take.
+
+**Reading and acting are different in kind, so they are gated differently.** A wrong read is a wrong
+answer: visible, recoverable, annoying. A wrong *click* is a wrong deed — a deleted run, a triggered
+rerun, a submitted form — inside a session the model did not authenticate and cannot undo. The page
+I built this against has **Delete**, **Rerun** and **New Run** within a few hundred pixels of each
+other. So clicking is enabled per host, and when a host is not enabled the acting tools are not
+described to the model at all. Not described-and-discouraged. Absent. A tool it cannot see is a tool
+it cannot mis-call, and "please be careful" in a prompt is the workaround this project keeps
+refusing to write.
+
+Then I watched it work, which is where the real lessons were.
+
+Asked to explain a benchmark run, it clicked METRICS, clicked GRAFANA, guessed a CSS selector that
+did not exist, was told so, and recovered by taking a screenshot. The before/after URLs in the tool
+results proved the navigation rather than the model asserting it. That is exactly the behaviour I
+wanted — and three things about it were wrong in ways I would not have predicted.
+
+**It photographed itself.** The screenshot included Oracle's own chat panel, so the model read its
+own previous answer as part of the website. Describing itself. From a stale copy. With no way to
+know that was what it was doing.
+
+**It invented a selector.** `div[data-testid="metrics-panel"]` — nothing on the page has it. The
+tool replied `no element matches`, which is *true* and *useless*: a model given a bare failure has
+nothing to correct itself with, so it guesses again. Every failing tool now answers with what would
+have worked — a click that misses returns the clickable labels that actually exist; a read that
+misses returns the whole page and says the selector was a guess. A miss should make the next attempt
+unnecessary, not merely possible.
+
+**And it announced a plan it then abandoned.** "Let me check the METRICS tab again, then return to
+GRAFANA" — followed by a completely different call, which failed, followed by a silent recovery. My
+user watched a confident plan, then silence, then an answer, with nothing joining them. He described
+it as *"it recovered, without telling me"*, which is the politest possible framing of a system whose
+narration and behaviour had come apart.
+
+The interesting part is that the model was not lying. It said what it intended, then adapted — which
+is correct behaviour. The failure was mine: the interface showed intentions and hid outcomes. Steps
+now report `✓` or `✗` with the reason. The prose is checkable against what happened, which is the
+only form of trust that survives contact with a system that acts.
+
+## Act 26 — The status line said "reading weights from disk". The file was in RAM.
+
+Loading a 50 GB model is disk-bound, so the swap progress line said `reading weights from disk`. I
+wrote that when it was true.
+
+Then I added a tier that keeps both models' files in page cache — 125 GB of RAM against 67 GB of
+models, so a swap can copy from memory instead of re-reading from an SSD. It worked: both models
+measured 100% resident. The line kept saying `reading weights from disk`, because it was a constant
+string.
+
+My user read it and asked: *"it keeps reading qwen next from disk. not enough ram?"*
+
+That question is the whole cost of the bug. Not that the message was wrong — that it was wrong in a
+direction that gets acted on. It reads as *you are short of memory*, and the honest answer is that
+71 GB were free and the time was going somewhere else entirely: `--no-mmap` copies ~50 GB out of
+page cache into the process and then pushes ~20 GB across PCIe into VRAM. Twenty to thirty seconds
+that no amount of RAM removes.
+
+A status line that states a cause it has not measured is not a status line. It is a guess wearing a
+uniform. It now measures — mincore, once, before the load — and says which of three things is
+actually happening.
+
+There is a second, funnier half. My first implementation of that page-cache tier used
+`POSIX_FADV_WILLNEED` and nothing else, because it is elegant: no CPU, no copy, just a hint to the
+kernel. The hint is capped far below 50 GB. It would have produced a warming step that reported
+success, warmed almost nothing, and left the swaps exactly as slow as before — this project's
+signature failure, written by me, deliberately, in the name of elegance. It now issues the hint
+*and* reads the file, and there is a `cached_fraction()` built on `mincore` so the claim can be
+checked instead of believed.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
@@ -1302,3 +1390,14 @@ things actually happened — most beats are a thing I set out to do, the wall I 
 - "A rule written against one failure mode outlives the assumption that made it correct. Prompts have no type system to tell you."
 - "Three separate vetoes on the same answer, each individually defensible, each written before the thing it was blocking existed."
 - "It breaks the cache while still producing correct answers. The only symptom is latency — which is why it's a test and not a comment."
+- "Asked what it thought of the page, it searched the corpus — because searching the corpus was the only thing a turn knew how to do."
+- "The model decides 'move the right hand'. The component that owns the hand does the moving, and reports what actually happened."
+- "A wrong read is a wrong answer. A wrong click is a wrong deed — in a session the model didn't authenticate and can't undo."
+- "Delete, Rerun and New Run sat within a few hundred pixels of each other. So the acting tools aren't discouraged, they're absent."
+- "It photographed itself: the screenshot included Oracle's own panel, so it read its own last answer as part of the website."
+- "`no element matches` is true and useless. A miss should make the next attempt unnecessary, not merely possible."
+- "The model wasn't lying — it said what it intended, then adapted. My interface showed intentions and hid outcomes."
+- "'It recovered, without telling me' is the politest possible description of narration and behaviour coming apart."
+- "The status line said 'reading weights from disk'. The file was 100% in RAM. He read it and asked if he needed more memory."
+- "A status line that states a cause it hasn't measured is a guess wearing a uniform."
+- "fadvise alone would have warmed almost nothing and reported success — this project's signature bug, written by me, in the name of elegance."

@@ -768,7 +768,40 @@ the number. (Protocol §5: a new idea goes to §H, not §G — the freeze is the
   PostgreSQL `checkpoint_timeout` advice for an OrioleDB run. Final answer opens with the run
   identity, flags the 11x p50→p99 spread, and verifies the transaction mix against the TPC-C spec.
 
-### G6 — THE CHAT AS A HARNESS: tools, not just context 📐 (DESIGN §6.3)
+### 2026-07-28 (night) — the harness works: it clicks through tabs by itself ✅ (G6, DESIGN §6.3/6.4)
+- **Built and observed working.** Asked to explain a run, it clicked `METRICS`, clicked `GRAFANA`,
+  guessed a selector that did not exist, was told so, and recovered with a screenshot. The
+  before/after URLs in the tool results prove the navigation instead of the model asserting it.
+- **Read/act split, gated per host.** Acting tools are ABSENT from the tool list when a host is not
+  enabled — a tool the model cannot see cannot be mis-called, and asking a model to be careful is
+  the workaround this repo refuses to write. The page it was built against has Delete, Rerun and
+  New Run within a few hundred pixels of each other.
+- **The extension drives the loop.** The receiver has no DOM, so a turn ends with a `tool_request`
+  and the extension re-enters by posting the result. Every tool reports its OUTCOME: a click returns
+  the page's url/title/text ~900 ms later, a miss returns the clickable labels that DO exist, a
+  `read_page` miss says the selector was a guess and returns the whole page.
+- **Sessions per host** (`main` = the panel, `quick` = explain/fact-check/regions), append-only with
+  epochs, listed per host in the panel and globally in the popup. `main` keeps the legacy filename,
+  so nothing recorded before sessions moved.
+- **`oracle_broker`**: batches GPU work by model, vision first when both wait, bounded so text
+  cannot starve it. Tests assert the ORDER, because order is the feature.
+- **RAM tier**: keep the evicted model's file in page cache after a swap (fadvise + a real read;
+  fadvise alone silently warms almost nothing). Both models measured at 100% resident.
+- **🔴 Four self-inflicted faults, all his catches:** (1) `node --check` PASSED on a file with two
+  adjacent string literals, so a syntax error killed the service worker while my gate said fine —
+  `chrome-capture/check.sh` now parses each file the way Chrome does; (2) the keepalive existed but
+  only covered tool execution, not the first model call, so Chrome killed the worker mid-turn and
+  the panel span for 7 minutes; (3) a stuck turn froze the session switcher, so you could not even
+  go and look at the other conversation; (4) `look_at_page` photographed Oracle's own panel, so the
+  model read its own last answer as part of the page.
+- **Two honesty fixes worth keeping in mind:** the swap progress line claimed "reading weights from
+  disk" unconditionally (it now measures — both models are page-cached, and the 20-30 s is the
+  `--no-mmap` copy plus the PCIe push, which RAM cannot remove); and the panel said "consulting the
+  corpus…" before the model had decided to do anything of the kind.
+- **Still open:** a `p95` in a vision reading of a dashboard whose legend shows p50/p90/p99 —
+  probably a relabelled p99, unverified, and it is the number feeding the tail-latency conclusion.
+
+### G6 — THE CHAT AS A HARNESS: tools, not just context ✅ (DESIGN §6.3)
 - **The prompt that exposes the ceiling (his):** *"what do you think about this page?"* goes to
   corpus retrieval, because retrieval is the only thing a turn knows how to do — and the corpus has
   nothing to say about a page it has never seen. The honest answer requires LOOKING, so the model

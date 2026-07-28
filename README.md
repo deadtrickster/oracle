@@ -94,6 +94,19 @@ Everything in this repo that generalises past this machine is a corollary of the
   docstring, which is prompt too, and never gets audited. A list in a prompt doesn't read as "for
   example"; it reads as ground truth. The fix was deletion, and a rule: **a prompt may describe how
   to use a tool; it must never describe what the data contains.**
+- **Asked what it thought of the page, it had never looked.** The chat could only do one thing — search
+  the corpus — and the corpus has never seen that page, so it answered from the title and sounded
+  fine. The fix wasn't a better prompt, it was hands: read, look, click, type, with the *browser*
+  executing because the server has no DOM. Then watching it work taught more than building it did.
+  It photographed its own panel and read its last answer as part of the website. It invented a CSS
+  selector, got a bare "no element matches", and guessed again — so every failing tool now replies
+  with what *would* have worked. And it announced a plan, silently abandoned it, and produced an
+  answer: the model wasn't lying, my interface was showing intentions and hiding outcomes.
+- **The status line said "reading weights from disk". The file was in RAM.** It was a constant
+  string, true when written and false after the page-cache tier landed — and false in the direction
+  that gets acted on: it reads as *you need more memory* when 71 GB were free and the 20–30s was
+  `--no-mmap` copying 50 GB and pushing 20 GB over PCIe. A status line stating a cause it hasn't
+  measured is a guess wearing a uniform.
 - **I moved 2,500 tokens and every answer broke.** Sharing one prompt prefix across features took an
   identical request from 9,325 tokens processed to **4**, and a new question on the same site now
   skips 2,533. It also, in the same edit, described our own curated reference material as "not
@@ -152,10 +165,13 @@ CPU / RAM      RAGFlow + DeepDoc parsing · SereneDB doc store (Postgres-wire/Du
   and stitched, capped), or paste a screenshot into a local Claude Code chat. All of them send the
   page's *text* with the pixels and swap the GPU automatically — one 24 GB slot, arbitrated by a
   single shared module ([DESIGN.md](DESIGN.md) §6.1).
-- **A conversation per site**: a pinned chat panel with one continued, append-only transcript per
-  host, kept on the receiver so it outlives the tab. Corpus excerpts are evidence and get citations;
-  the page and the site's own reference material explain the question and don't. Becoming a proper
-  harness next — tools to look at and act on the page, not just be fed it (§6.3).
+- **A conversation per site, with hands**: a pinned chat panel holding an append-only transcript per
+  host, kept on the receiver so it outlives the tab — and able to *act*. It reads the page, looks at
+  it with the vision model, searches the corpus, and clicks through a site's own tabs to gather what
+  it needs. Asked to explain a benchmark run it clicked METRICS, clicked GRAFANA, guessed a selector
+  that didn't exist, was told so, and recovered with a screenshot. Clicking is enabled per host, and
+  where it isn't, the acting tools aren't described to the model at all ([DESIGN.md](DESIGN.md)
+  §6.3).
 - **Curation**: a rules→LLM-judge cascade that deletes retrieval poison (exercises, ToC, index,
   OCR garbage), a versioned labeling rubric with a human-in-the-loop labeling UI, and an
   in-progress trained junk classifier.

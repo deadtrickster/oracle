@@ -96,6 +96,18 @@ shows what was actually stored.
 > decide?" — so it becomes an *attribution* rule instead, with the offline rule intact: a technical
 > fact not in the excerpts is "the corpus doesn't cover that", never something recalled from weights.
 >
+> **It has hands.** A turn can `read_page`, `look_at_page` (screenshot → qwen3-vl), `search_corpus`,
+> `click` and `type_text`, looping until it can answer. Asked to explain a benchmark run it clicked
+> METRICS, clicked GRAFANA, guessed a selector that didn't exist, was told so, and recovered with a
+> screenshot. Every tool reports its **outcome** — a click returns the page's url/title/text
+> afterwards, a miss returns the labels that *do* exist — and each step shows `✓`/`✗` in the panel,
+> so the model's prose is checkable against what actually happened.
+>
+> **Clicking is gated per host** (🖐 in the title bar). A wrong read is a wrong answer; a wrong click
+> is a wrong *deed* in your logged-in session — the page this was built against has Delete, Rerun and
+> New Run beside each other. Where a host isn't enabled, the acting tools aren't described to the
+> model at all.
+>
 > Two ways to feed it without typing: **Send selection to Oracle chat** and **Send a region to
 > Oracle chat** — the same gestures as *Explain this* and *Screenshot a region*, with the answer
 > landing in the conversation instead of a card that closes. A region is read by **qwen3-vl** and
