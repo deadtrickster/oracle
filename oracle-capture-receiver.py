@@ -59,6 +59,7 @@ EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # their own private swap lock is not a lock: one would stop the unit the other had just started.
 # oracle_vram serialises across processes and keeps availability PROBED rather than configured — a
 # flag would have to be flipped in lockstep with every swap and would lie whenever the two drifted.
+import oracle_broker
 import oracle_chat
 import oracle_kv
 import oracle_tools
@@ -811,13 +812,21 @@ def _grounded_stream(retrieval_query: str, framing: str, task: str, site: str = 
                     page_context_chars=len(page), excerpt_count=len(chunks),
                     reranked=reranked, system=system, text=user)
     # Retrieval is done (CPU + embeddings); only NOW is the text model needed, so a swap — if the
-    # vision model is currently resident — is paid for as late as possible.
-    try:
-        for note in ensure_model("text"):
-            yield ("status", {"text": note})
-    except RuntimeError as e:
-        yield ("error", {"error": str(e)})
-        return
+    # vision model is currently resident — is paid for as late as possible, and the queue is joined
+    # as late as possible too.
+    with oracle_broker.lease("text") as waited:
+        if waited:
+            yield ("status", {"text": waited})
+        try:
+            for note in ensure_model("text"):
+                yield ("status", {"text": note})
+        except RuntimeError as e:
+            yield ("error", {"error": str(e)})
+            return
+        yield from _synth(system, user)
+
+
+def _synth(system: str, user: str):
     try:
         for delta in _chat_stream([{"role": "system", "content": system},
                                    {"role": "user", "content": user}]):
@@ -869,7 +878,8 @@ def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str 
 
 def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | None = None,
                 debug: bool = False, where: dict | None = None, host: str = "",
-                image: str = "", image_mime: str = "image/png"):
+                image: str = "", image_mime: str = "image/png",
+                session: str = oracle_chat.MAIN):
     """One turn of the per-host conversation. Emits the same SSE shape as the other streams.
 
     With an `image`, the turn takes the vision detour first: qwen3-vl READS the region, its reading
@@ -901,16 +911,19 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
             yield from _dbg(debug, "image reading (cached)", chars=len(reading), text=reading)
         else:
             yield ("status", {"text": "reading the region with qwen3-vl…"})
-            try:
-                for note in ensure_model("vl"):
-                    yield ("status", {"text": note})
-                reading = oracle_vision.describe(data_url, question=message,
-                                                 label=(title or url or "")[:120])
-                if key:
-                    oracle_vision.remember(key, reading, question=message, label=title or url)
-            except Exception as e:
-                yield ("status", {"text": f"could not read the image: {e}"})
-                reading = ""
+            with oracle_broker.lease("vl") as waited:
+                if waited:
+                    yield ("status", {"text": waited})
+                try:
+                    for note in ensure_model("vl"):
+                        yield ("status", {"text": note})
+                    reading = oracle_vision.describe(data_url, question=message,
+                                                     label=(title or url or "")[:120])
+                    if key:
+                        oracle_vision.remember(key, reading, question=message, label=title or url)
+                except Exception as e:
+                    yield ("status", {"text": f"could not read the image: {e}"})
+                    reading = ""
             yield from _dbg(debug, "image reading", chars=len(reading), text=reading)
 
     # Record the user turn before the loop, so a browser tool round trip (which re-enters this
@@ -920,11 +933,14 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
         stored = ((message + "\n\n") if message else "") + oracle_vision.block(
             reading, "a region the user selected on this page")
     if stored:
-        roll = oracle_chat.append(host, "user", stored)
+        # The image rides along on the turn for the UI only — the model gets the READING. A
+        # transcript that says "the region you selected" and cannot show it is one you cannot audit.
+        roll = oracle_chat.append(host, "user", stored, session=session,
+                                  image=(data_url if image else ""))
         if roll["rolled"]:
             yield ("status", {"text": f"previous conversation was full — started a new topic "
                                       f"(epoch {roll['epoch']}); nothing was deleted"})
-    yield from _chat_loop(host, url, title, agents_md, where, debug)
+    yield from _chat_loop(host, url, title, agents_md, where, debug, session)
 
 
 def _run_local_tool(name: str, args: dict, debug: bool):
@@ -965,7 +981,8 @@ def _try_json(s):
         return {}
 
 
-def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool):
+def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool,
+               session: str = oracle_chat.MAIN):
     """Drive the model until it answers, needs the browser, or runs out of steps.
 
     Two kinds of tool and two very different control flows. `search_corpus` runs here, so the loop
@@ -981,15 +998,24 @@ def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool):
     can_act = oracle_chat.actions_allowed(host)
     tools = oracle_tools.for_host(can_act)
 
-    try:
-        for note in ensure_model("text"):
-            yield ("status", {"text": note})
-    except RuntimeError as e:
-        yield ("error", {"error": str(e)})
-        return
+    # The lease covers the whole loop, so a multi-step turn is not interrupted between steps by
+    # someone else's swap. It is released while a BROWSER tool runs, because that work happens in
+    # the extension and holding the GPU through a screenshot would block everyone for nothing.
+    with oracle_broker.lease("text") as waited:
+        if waited:
+            yield ("status", {"text": waited})
+        try:
+            for note in ensure_model("text"):
+                yield ("status", {"text": note})
+        except RuntimeError as e:
+            yield ("error", {"error": str(e)})
+            return
+        yield from _chat_steps(host, session, system, page, tools, can_act, debug)
 
+
+def _chat_steps(host, session, system, page, tools, can_act, debug):
     for step in range(CHAT_MAX_STEPS):
-        turns = oracle_chat.history(host)
+        turns = oracle_chat.history(host, session)
         msgs = ([{"role": "system", "content": system}]
                 + ([{"role": "user", "content": _CHAT_TASK + ("\n\n" + page if page else "")}]
                    if step == 0 else [])
@@ -1015,11 +1041,11 @@ def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool):
             yield from _dbg(debug, "salvaged a leaked tool call", n=len(calls))
         if not calls:
             if text.strip():
-                oracle_chat.append(host, "assistant", text)
-            yield ("done", {"epoch": oracle_chat.epoch(host)})
+                oracle_chat.append(host, "assistant", text, session=session)
+            yield ("done", {"epoch": oracle_chat.epoch(host, session)})
             return
 
-        oracle_chat.append(host, "assistant", text, tool_calls=calls)
+        oracle_chat.append(host, "assistant", text, tool_calls=calls, session=session)
 
         browser = [c for c in calls if oracle_tools.is_browser(c["function"]["name"])]
         if browser:
@@ -1035,7 +1061,7 @@ def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool):
                              "acting": oracle_tools.is_acting(c["function"]["name"]),
                              "says": oracle_tools.describe(c["function"]["name"], args)})
             yield ("tool_request", {"calls": asks})
-            yield ("done", {"epoch": oracle_chat.epoch(host), "pending_tools": True})
+            yield ("done", {"epoch": oracle_chat.epoch(host, session), "pending_tools": True})
             return
 
         for c in calls:
@@ -1052,36 +1078,40 @@ def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool):
                                    "reranked": res.get("reranked", False)})
             yield from _dbg(debug, f"tool result: {name}", chars=len(res["text"]),
                             args=args, text=res["text"])
-            oracle_chat.append(host, "tool", res["text"], tool_call_id=c["id"], name=name)
+            oracle_chat.append(host, "tool", res["text"], tool_call_id=c["id"], name=name,
+                               session=session)
 
     yield ("delta", {"text": f"\n\n_(stopped after {CHAT_MAX_STEPS} steps without reaching an "
                              f"answer — ask again, more narrowly.)_"})
-    yield ("done", {"epoch": oracle_chat.epoch(host)})
+    yield ("done", {"epoch": oracle_chat.epoch(host, session)})
 
 
 def chat_tool_results(host: str, results: list, url: str = "", title: str = "",
                       agents_md: str | None = None, where: dict | None = None,
-                      debug: bool = False):
+                      debug: bool = False, session: str = oracle_chat.MAIN):
     """The extension reporting back what a browser tool actually did. Records each result and
     resumes the loop."""
     if not host:
         yield ("error", {"error": "no host"})
         return
-    pending = {c.get("id") for c in oracle_chat.pending_tools(host)}
+    pending = {c.get("id") for c in oracle_chat.pending_tools(host, session)}
     for r in results or []:
         cid = r.get("id")
         if cid not in pending:
             continue                      # a stale reply from an abandoned loop
+        # A tool that took a screenshot sends it back too, so the conversation can SHOW what it
+        # looked at. The model still only ever sees the reading.
         oracle_chat.append(host, "tool", str(r.get("content", ""))[:20000],
-                           tool_call_id=cid, name=r.get("name", ""))
-    still = oracle_chat.pending_tools(host)
+                           tool_call_id=cid, name=r.get("name", ""), session=session,
+                           image=str(r.get("image", ""))[:2_000_000])
+    still = oracle_chat.pending_tools(host, session)
     if still:
         # Never call the model with an unanswered tool call in the transcript: the chat template
         # requires a result for every call, and a half-answered turn produces a malformed prompt.
         for c in still:
             oracle_chat.append(host, "tool", "error: not executed", tool_call_id=c.get("id"),
-                               name=(c.get("function") or {}).get("name", ""))
-    yield from _chat_loop(host, url, title, agents_md, where, debug)
+                               name=(c.get("function") or {}).get("name", ""), session=session)
+    yield from _chat_loop(host, url, title, agents_md, where, debug, session)
 
 
 VL_CTX_CHARS = int(os.environ.get("ORACLE_VL_CTX_CHARS", "4000"))
@@ -1244,38 +1274,43 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
                              f"{len(page_text)} < {VL_SUMMARIZE_OVER} chars" if len(page_text) < VL_SUMMARIZE_OVER
                              else "text model not resident (it would have to be swapped in)"))
 
-    # STEP 2: now swap to vision.
-    try:
-        for note in ensure_model("vl"):
-            yield ("status", {"text": note})
-    except RuntimeError as e:
-        yield ("error", {"error": f"{e}\n\n{VL_DISABLED_MSG}", "reason": "vision_unavailable"})
-        return
-    prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
-    ctx = _vl_context(url, title, brief or page_text, summarized, crop_text, img, source, agents_md)
-    # Order matters: context, then the image, then the question. The text frames what the pixels
-    # are before the model looks at them; the question stays last so it is the most recent thing.
-    yield from _dbg(debug, "context sent to qwen3-vl", chars=len(ctx),
-                    sections=_sections(ctx), prompt=prompt, text=ctx)
-    content = ([{"type": "text", "text": ctx}] if ctx else []) + [
-        {"type": "image_url", "image_url": {"url": image_data_url}},
-        {"type": "text", "text": prompt}]
-    # A SYSTEM message, which this path did not have. Everything used to arrive as one user blob,
-    # so a site pack's "how to answer" section read as background prose rather than as a standing
-    # instruction — and the model duly opened every answer by explaining what Grafana is. The site
-    # pack rides along here for the same reason it does everywhere else.
-    msgs = [{"role": "system", "content": _VISION_SYSTEM + (
-                "\n\n" + oracle_sitectx.block(url, agents_md) if url else "")},
-            {"role": "user", "content": content}]
-    try:
-        for delta in _chat_stream(msgs, url=VL_URL, model=VL_MODEL, timeout=420, max_tokens=1500):
-            yield ("delta", {"text": delta})
-    except (urllib.error.URLError, ConnectionError, TimeoutError):
-        yield ("error", {"error": "Vision model (qwen3-vl) is unreachable."})
-        return
-    except Exception as e:
-        yield ("error", {"error": f"vision error: {e}"})
-        return
+    # STEP 2: queue for the GPU, then swap to vision. The lease is held for the whole read, not just
+    # the swap — releasing after `ensure` would let a text request swap the vision model out from
+    # under a call that is still running, which is the exact thrashing the broker exists to stop.
+    with oracle_broker.lease("vl") as waited:
+        if waited:
+            yield ("status", {"text": waited})
+        try:
+            for note in ensure_model("vl"):
+                yield ("status", {"text": note})
+        except RuntimeError as e:
+            yield ("error", {"error": f"{e}\n\n{VL_DISABLED_MSG}", "reason": "vision_unavailable"})
+            return
+        prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
+        ctx = _vl_context(url, title, brief or page_text, summarized, crop_text, img, source, agents_md)
+        # Order matters: context, then the image, then the question. The text frames what the pixels
+        # are before the model looks at them; the question stays last so it is the most recent thing.
+        yield from _dbg(debug, "context sent to qwen3-vl", chars=len(ctx),
+                        sections=_sections(ctx), prompt=prompt, text=ctx)
+        content = ([{"type": "text", "text": ctx}] if ctx else []) + [
+            {"type": "image_url", "image_url": {"url": image_data_url}},
+            {"type": "text", "text": prompt}]
+        # A SYSTEM message, which this path did not have. Everything used to arrive as one user blob,
+        # so a site pack's "how to answer" section read as background prose rather than as a standing
+        # instruction — and the model duly opened every answer by explaining what Grafana is. The site
+        # pack rides along here for the same reason it does everywhere else.
+        msgs = [{"role": "system", "content": _VISION_SYSTEM + (
+                    "\n\n" + oracle_sitectx.block(url, agents_md) if url else "")},
+                {"role": "user", "content": content}]
+        try:
+            for delta in _chat_stream(msgs, url=VL_URL, model=VL_MODEL, timeout=420, max_tokens=1500):
+                yield ("delta", {"text": delta})
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            yield ("error", {"error": "Vision model (qwen3-vl) is unreachable."})
+            return
+        except Exception as e:
+            yield ("error", {"error": f"vision error: {e}"})
+            return
     yield ("done", {})
 
 
@@ -1533,22 +1568,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/status"):
             self._send(status())
+        elif self.path.startswith("/chat/sessions"):
+            # With ?host=, only that host's — which is what the panel wants. Without, everything,
+            # which is what a settings page wants.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._send({"sessions": oracle_chat.sessions(q.get("host", [""])[0].strip())})
         elif self.path.startswith("/chat/hosts"):
             self._send({"hosts": oracle_chat.hosts()})
         elif self.path.startswith("/chat/history"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             h = (q.get("host", [""])[0] or
                  oracle_sitectx.host_of(q.get("url", [""])[0])).strip()
-            self._send({"host": h, "epoch": oracle_chat.epoch(h),
+            s = (q.get("session", [oracle_chat.MAIN])[0] or oracle_chat.MAIN).strip()
+            self._send({"host": h, "session": s, "epoch": oracle_chat.epoch(h, s),
                         "actions": oracle_chat.actions_allowed(h),
                         "turns": [{"role": t["role"], "content": t.get("content", ""),
                                    "at": t.get("at", 0),
                                    "tool": t.get("name", ""),
+                                   "image": t.get("image", ""),
                                    "calls": [oracle_tools.describe(
                                        c["function"]["name"],
                                        _try_json(c["function"].get("arguments")))
                                        for c in (t.get("tool_calls") or [])]}
-                                  for t in oracle_chat.history(h)]})
+                                  for t in oracle_chat.history(h, s)]})
         elif self.path.startswith("/health"):
             self._send({"ok": True})
         elif self.path.startswith("/slots"):
@@ -1606,24 +1648,28 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_sse(chat_tool_results(
                     (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip(),
                     p.get("results") or [], p.get("url", ""), p.get("title", ""),
-                    p.get("agents_md"), p.get("where"), bool(p.get("debug"))))
+                    p.get("agents_md"), p.get("where"), bool(p.get("debug")),
+                    (p.get("session") or oracle_chat.MAIN).strip()))
             elif self.path.startswith("/chat/delete"):
                 h = (p.get("host") or "").strip()
-                self._send({"host": h, "deleted": oracle_chat.delete(h),
-                            "hosts": oracle_chat.hosts()})
+                s = (p.get("session") or oracle_chat.MAIN).strip()
+                self._send({"host": h, "session": s, "deleted": oracle_chat.delete(h, s),
+                            "sessions": oracle_chat.sessions()})
             elif self.path.startswith("/chat/allow"):
                 h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
                 self._send({"host": h, "actions": oracle_chat.set_actions(h, bool(p.get("allow")))})
             elif self.path.startswith("/chat/reset"):
                 h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
-                self._send({"host": h, "epoch": oracle_chat.reset(h)})
+                s = (p.get("session") or oracle_chat.MAIN).strip()
+                self._send({"host": h, "session": s, "epoch": oracle_chat.reset(h, s)})
             elif self.path.startswith("/chat"):
                 self._send_sse(chat_stream(p.get("message", ""), p.get("url", ""),
                                            p.get("title", ""), p.get("agents_md"),
                                            bool(p.get("debug")), p.get("where"),
                                            (p.get("host") or "").strip(),
                                            p.get("image", ""),
-                                           p.get("mime", "image/png")))
+                                           p.get("mime", "image/png"),
+                                           (p.get("session") or oracle_chat.MAIN).strip()))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))

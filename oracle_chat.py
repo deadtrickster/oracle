@@ -39,9 +39,9 @@ _locks: dict = {}
 _locks_guard = threading.Lock()
 
 
-def _lock(host: str) -> threading.Lock:
+def _lock(key: str) -> threading.Lock:
     with _locks_guard:
-        return _locks.setdefault(host, threading.Lock())
+        return _locks.setdefault(key, threading.Lock())
 
 
 def _safe(host: str) -> str:
@@ -51,47 +51,61 @@ def _safe(host: str) -> str:
     return h[:120] or "unknown"
 
 
-def _path(host: str) -> Path:
-    return CHAT_DIR / f"{_safe(host)}.json"
+# A host can hold more than one conversation. `main` is the chat panel; `quick` is where the
+# one-shot surfaces (explain, fact-check, a region sent to vision) land, so those stop being
+# throwaway cards and become a transcript you can pick up and continue.
+#
+# `main` deliberately keeps the ORIGINAL filename, so every conversation recorded before sessions
+# existed is still exactly where it was. A migration that rewrites files to prove a point is a
+# migration that can lose them.
+MAIN = "main"
 
 
-def _read(host: str) -> dict:
+def _path(host: str, session: str = MAIN) -> Path:
+    if session == MAIN:
+        return CHAT_DIR / f"{_safe(host)}.json"
+    return CHAT_DIR / f"{_safe(host)}__{_safe(session)}.json"
+
+
+def _read(host: str, session: str = MAIN) -> dict:
     try:
-        d = json.loads(_path(host).read_text())
+        d = json.loads(_path(host, session).read_text())
         if isinstance(d, dict) and isinstance(d.get("turns"), list):
             return d
     except Exception:
         pass
-    return {"host": host, "epoch": 1, "turns": []}
+    return {"host": host, "session": session, "epoch": 1, "turns": []}
 
 
-def _write(host: str, doc: dict) -> None:
+def _write(host: str, doc: dict, session: str = MAIN) -> None:
     try:
         CHAT_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = _path(host).with_suffix(".tmp")
+        p = _path(host, session)
+        tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(doc))
-        os.replace(tmp, _path(host))     # atomic: a half-written transcript is worse than none
+        os.replace(tmp, p)               # atomic: a half-written transcript is worse than none
     except Exception:
         pass
 
 
-def history(host: str) -> list:
+def history(host: str, session: str = MAIN) -> list:
     """Turns of the CURRENT epoch, oldest first — what goes into the prompt."""
-    d = _read(host)
+    d = _read(host, session)
     ep = d.get("epoch", 1)
     return [t for t in d["turns"] if t.get("epoch", 1) == ep]
 
 
-def all_turns(host: str) -> list:
-    return _read(host)["turns"]
+def all_turns(host: str, session: str = MAIN) -> list:
+    return _read(host, session)["turns"]
 
 
-def epoch(host: str) -> int:
-    return _read(host).get("epoch", 1)
+def epoch(host: str, session: str = MAIN) -> int:
+    return _read(host, session).get("epoch", 1)
 
 
 def append(host: str, role: str, content: str, tool_calls: list | None = None,
-           tool_call_id: str = "", name: str = "") -> dict:
+           tool_call_id: str = "", name: str = "", session: str = MAIN,
+           image: str = "") -> dict:
     """Add a turn. Returns {"epoch": n, "rolled": bool} — `rolled` means this turn began a new
     epoch because the previous one was full.
 
@@ -101,8 +115,8 @@ def append(host: str, role: str, content: str, tool_calls: list | None = None,
     """
     if not host:
         return {"epoch": 1, "rolled": False}
-    with _lock(host):
-        d = _read(host)
+    with _lock(f"{host}/{session}"):
+        d = _read(host, session)
         ep = d.get("epoch", 1)
         cur = [t for t in d["turns"] if t.get("epoch", 1) == ep]
         rolled = False
@@ -121,8 +135,15 @@ def append(host: str, role: str, content: str, tool_calls: list | None = None,
             turn["tool_call_id"] = tool_call_id
         if name:
             turn["name"] = name
+        # The picture the turn was about, as a data: URL, kept for the UI only. It is deliberately
+        # NOT sent to the model — the model gets the vision model's READING (§to_messages), because
+        # the text model cannot see and re-sending pixels it cannot use would only cost context.
+        # But a transcript that mentions "the region you selected" and cannot show it is a
+        # transcript you cannot audit, so the UI keeps the image.
+        if image:
+            turn["image"] = image[:2_000_000]
         d["turns"].append(turn)
-        _write(host, d)
+        _write(host, d, session)
         return {"epoch": ep, "rolled": rolled}
 
 
@@ -166,11 +187,11 @@ def to_messages(turns: list) -> list:
     return out
 
 
-def pending_tools(host: str) -> list:
+def pending_tools(host: str, session: str = MAIN) -> list:
     """Tool calls the model asked for and nobody has answered yet — the last assistant turn's calls
     with no matching tool result after them. Survives a browser restart mid-loop, which a purely
     in-memory pending list would not."""
-    turns = history(host)
+    turns = history(host, session)
     for i in range(len(turns) - 1, -1, -1):
         t = turns[i]
         if t.get("tool_calls"):
@@ -181,14 +202,14 @@ def pending_tools(host: str) -> list:
     return []
 
 
-def reset(host: str) -> int:
+def reset(host: str, session: str = MAIN) -> int:
     """Start a new epoch — "new topic". Keeps everything; only the prompt window moves."""
-    with _lock(host):
-        d = _read(host)
+    with _lock(f"{host}/{session}"):
+        d = _read(host, session)
         if not [t for t in d["turns"] if t.get("epoch", 1) == d.get("epoch", 1)]:
             return d.get("epoch", 1)          # already empty, nothing to roll
         d["epoch"] = d.get("epoch", 1) + 1
-        _write(host, d)
+        _write(host, d, session)
         return d["epoch"]
 
 
@@ -223,7 +244,7 @@ def set_actions(host: str, allowed: bool) -> bool:
     return bool(allowed)
 
 
-def delete(host: str) -> bool:
+def delete(host: str, session: str = MAIN) -> bool:
     """Delete a conversation outright. `reset` starts a new epoch and keeps everything; this is the
     other thing, and the difference should stay visible in the UI.
 
@@ -231,27 +252,51 @@ def delete(host: str) -> bool:
     is a fact about the site, not about a conversation you happened to finish."""
     if not host:
         return False
-    with _lock(host):
+    with _lock(f"{host}/{session}"):
         try:
-            _path(host).unlink()
+            _path(host, session).unlink()
             return True
         except OSError:
             return False
 
 
-def hosts() -> list:
-    """Every host with a stored conversation, most recently used first."""
+def _scan() -> list:
+    """Every stored conversation on disk as (host, session, doc). One place that knows the file
+    naming, so `main`'s legacy filename is decoded once rather than in three callers."""
     out = []
     try:
-        for f in CHAT_DIR.glob("*.json"):
+        for f in sorted(CHAT_DIR.glob("*.json")):
+            if f.name in ("allow-actions.json", "prefixes.json", "index.json"):
+                continue
             try:
                 d = json.loads(f.read_text())
             except Exception:
                 continue
-            turns = d.get("turns") or []
-            if turns:
-                out.append({"host": d.get("host") or f.stem, "turns": len(turns),
-                            "epoch": d.get("epoch", 1), "at": turns[-1].get("at", 0)})
+            if not isinstance(d, dict) or not isinstance(d.get("turns"), list):
+                continue
+            stem = f.stem
+            session = d.get("session") or (stem.split("__", 1)[1] if "__" in stem else MAIN)
+            out.append((d.get("host") or stem.split("__", 1)[0], session, d))
     except Exception:
         pass
+    return out
+
+
+def sessions(host: str = "") -> list:
+    """Stored conversations, most recently used first. With `host`, only that host's — which is what
+    the panel wants; without it, all of them, which is what a settings page wants."""
+    out = []
+    for h, s, d in _scan():
+        turns = d.get("turns") or []
+        if not turns or (host and h != host):
+            continue
+        out.append({"host": h, "session": s, "turns": len(turns),
+                    "epoch": d.get("epoch", 1), "at": turns[-1].get("at", 0),
+                    "preview": next((t.get("content", "")[:80] for t in turns
+                                     if t["role"] == "user"), "")})
     return sorted(out, key=lambda x: x["at"], reverse=True)
+
+
+def hosts() -> list:
+    """Backwards-compatible view: one entry per stored conversation, newest first."""
+    return sessions()
