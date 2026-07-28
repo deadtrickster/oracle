@@ -403,10 +403,15 @@
       // coming, and no token was coming.
       //
       // Not "consulting the corpus" either: the model decides whether to search at all.
+      // ONLY the indicator. The text is already on screen as the last live item — rendering `acc`
+      // here too drew every streaming reply twice, which is why it happened on every reply and
+      // resolved itself on reload: after `done` the live items are committed and `acc` is cleared,
+      // so the second copy disappears with the bubble that was drawing it.
       const busy = `<div class="busy"><span class="spin"></span> &nbsp;${esc(status || "thinking…")}` +
         `<span class="elapsed"></span></div>`;
-      h += `<div class="msg"><div class="who">oracle</div><div class="bub">` +
-        (acc ? md(acc) + busy : busy) + `</div></div>`;
+      h += acc
+        ? `<div class="step">${busy}</div>`
+        : `<div class="msg"><div class="who">oracle</div><div class="bub">${busy}</div></div>`;
     }
     if (!h) h = `<p class="empty">Ask anything about this site. Answers are grounded in your
       offline corpus and cited; the page you are on is used as context, not as evidence.
