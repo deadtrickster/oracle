@@ -10,6 +10,7 @@
   function ensureHost() {
     if (host && document.documentElement.contains(host)) return;
     host = document.createElement("div");
+    host.dataset.oracleUi = "card";      // hidden during screenshots — see withOracleHidden()
     host.style.cssText = "all:initial;position:absolute;z-index:2147483647;";
     root = host.attachShadow({ mode: "open" });
     document.documentElement.appendChild(host);

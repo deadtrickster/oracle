@@ -13,6 +13,10 @@
   if (window.__oracleChat) { window.__oracleChat.show(); return; }
 
   const host = document.createElement("div");
+  // Marked so a screenshot can hide it. Oracle's own UI must never appear in a picture Oracle is
+  // about to reason about — it would be describing itself, and worse, describing a stale copy of
+  // its own last answer as if it were part of the page.
+  host.dataset.oracleUi = "chat";
   host.style.cssText = "all:initial;position:fixed;z-index:2147483646;right:18px;bottom:18px;";
   const root = host.attachShadow({ mode: "open" });
   document.documentElement.appendChild(host);
@@ -92,6 +96,8 @@
       .step { font-size:11px; opacity:.7; margin:0 0 6px; padding-left:8px;
         border-left:2px solid rgba(128,128,128,.35); }
       .step.act { border-left-color:#b7791f; }
+      .step.bad { border-left-color:#c0392b; opacity:.85; }
+      .step .why { display:block; opacity:.7; font-size:10px; margin-top:2px; }
       .tabs { display:flex; gap:2px; padding:0 10px; flex:none;
         border-bottom:1px solid rgba(128,128,128,.25); }
       .tab { border:0; background:transparent; color:inherit; font:inherit; font-size:11px;
@@ -297,7 +303,9 @@
   function render() {
     let h = turns.map(bubble).join("");
     if (steps.length) h += steps.map((s) =>
-      `<p class="step${s.acting ? " act" : ""}">${esc(s.says)}` +
+      `<p class="step${s.acting ? " act" : ""}${s.failed ? " bad" : ""}">` +
+      `${s.done ? (s.failed ? "✗ " : "✓ ") : "· "}${esc(s.says)}` +
+      (s.failed && s.detail ? `<span class="why">${esc(s.detail)}</span>` : "") +
       (s.image ? `<img class="thumb" src="${esc(s.image)}">` : "") + `</p>`).join("");
     if (streaming) {
       // The status line must appear even when text has ALREADY streamed. The model says what it is
@@ -587,6 +595,15 @@
       // The screenshot a tool took on its own initiative, shown next to the step that took it.
       const s = steps.find((x) => x.id === data.id);
       if (s) s.image = data.image; else steps.push({ says: data.says, image: data.image });
+      render();
+      return;
+    }
+    if (event === "tool_done") {
+      const s = steps.find((x) => x.id === data.id);
+      if (s) { s.done = true; s.failed = data.failed; s.detail = data.detail; }
+      // A finished tool means the model is thinking again, not that the turn stalled. Say so, or
+      // the panel sits on the last tool's label while nothing appears to happen.
+      status = data.failed ? "that step failed — deciding what to do instead…" : "thinking…";
       render();
       return;
     }

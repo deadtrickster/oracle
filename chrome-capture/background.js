@@ -481,7 +481,16 @@ function keepaliveStop() {
 // injected: read the page, or one part of it
 function toolReadPage(selector) {
   const el = selector ? document.querySelector(selector) : document.body;
-  if (!el) return `no element matches ${selector}`;
+  if (!el) {
+    // A miss must be as useful as a hit, or the model just guesses another selector — which is
+    // exactly what happened: it invented div[data-testid="metrics-panel"], got a bare "no element
+    // matches", and had nothing to correct itself with. Selectors are GUESSES about a page nobody
+    // showed it; the reply should make the next attempt unnecessary rather than merely possible.
+    const text = (document.body.innerText || "").replace(/\s+/g, " ").trim();
+    return `no element matches ${selector} — that selector was a guess and the page does not have ` +
+           `it. Call read_page with NO selector to get the whole page, which is usually what you ` +
+           `want. Here it is anyway:\n${text.slice(0, 8000)}`;
+  }
   const t = (el.innerText || "").replace(/\s+/g, " ").trim();
   return t ? t.slice(0, 8000) : "(that element renders no text)";
 }
@@ -547,8 +556,9 @@ async function runBrowserTool(call, tab) {
     }
     if (call.name === "type_text") return String(await exec(toolType, [a]));
     if (call.name === "look_at_page") {
-      const shot = a.full_page ? (await fullPageShot(tab)).b64
-        : (await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })).split(",")[1];
+      const shot = await withOracleHidden(tab, async () => (
+        a.full_page ? (await fullPageShot(tab)).b64
+          : (await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })).split(",")[1]));
       // Hand the picture back with the reading. When the model decides to look at something on its
       // own, the person supervising it should see the same thing it saw — otherwise the transcript
       // says "I looked" and shows nothing, which is a claim rather than evidence.
@@ -584,6 +594,14 @@ async function chatHandleTools(calls, tab, send, depth) {
     for (const c of calls) {
       send({ event: "status", data: { text: c.says + "…" } });
       const content = await runBrowserTool(c, tab);
+      // Report the OUTCOME of each step, not just that it was attempted. A tool that misses and a
+      // model that quietly tries something else is the pair that produced "it recovered, without
+      // telling me" — the prose described a plan it had already abandoned, and the only record of
+      // what really happened was a step line that said the attempt was made.
+      const failed = /^(NOT CLICKED|NOT TYPED|no element matches|error|unknown tool|look_at_page failed)/i
+        .test(content.trim());
+      send({ event: "tool_done", data: { id: c.id, failed,
+                                         detail: failed ? content.split("\n")[0].slice(0, 160) : "" } });
       if (c.image) send({ event: "tool_image", data: { id: c.id, image: c.image, says: c.says } });
       results.push({ id: c.id, name: c.name, content, image: c.image || "" });
     }
@@ -900,6 +918,35 @@ const FULLPAGE_MAX_SLICES = 6;
 const FULLPAGE_MAX_CSS_PX = 12000;
 const FULLPAGE_MAX_DEVICE_PX = 9000;   // beyond this the image costs more tokens than it informs
 
+// Take a picture of the PAGE, not of us. Every Oracle surface is tagged data-oracle-ui, so it can
+// be hidden for the duration of a capture and put back afterwards. Without this the model reads a
+// screenshot containing its own previous answer and treats it as part of the site — describing
+// itself, from a stale copy, with no way to tell that is what it is doing.
+async function withOracleHidden(tab, fn) {
+  const set = (on) => chrome.scripting.executeScript({
+    target: { tabId: tab.id }, args: [on],
+    func: (hide) => {
+      for (const el of document.querySelectorAll("[data-oracle-ui]")) {
+        if (hide) {
+          el.setAttribute("data-oracle-vis", el.style.visibility || "");
+          el.style.visibility = "hidden";
+        } else if (el.hasAttribute("data-oracle-vis")) {
+          el.style.visibility = el.getAttribute("data-oracle-vis");
+          el.removeAttribute("data-oracle-vis");
+        }
+      }
+    },
+  }).catch(() => {});
+  await set(true);
+  // A repaint has to land before the capture, or the panel is still in the pixels.
+  await new Promise((r) => setTimeout(r, 90));
+  try {
+    return await fn();
+  } finally {
+    await set(false);
+  }
+}
+
 async function fullPageShot(tab) {
   const run = (func, args) => chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args })
     .then(([r]) => r?.result);
@@ -967,7 +1014,7 @@ async function visionPage(tab) {
   if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
   await openChat(tab);
   try {
-    const shot = await fullPageShot(tab);
+    const shot = await withOracleHidden(tab, () => fullPageShot(tab));
     if (await debugOn()) {
       chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "debug", data: {
         side: "extension", stage: "full-page screenshot", slices: shot.slices, capped: shot.capped,

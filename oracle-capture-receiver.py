@@ -659,8 +659,11 @@ _CHAT_TASK = (
     "from the corpus — it has never seen this page.\n"
     "- A question about how something WORKS in general goes to search_corpus, and its excerpts get "
     "numbered citations.\n"
-    "Work in small steps and say what you are doing as you go. When you have enough, stop calling "
-    "tools and answer.")
+    "Work in small steps. Say what you are ABOUT to do in one short line, then call the tool — do "
+    "not describe a sequence of steps you have not taken yet, and never report the result of a "
+    "tool you have not called. Tools fail: a click can miss, a selector can match nothing. When one "
+    "does, say so plainly and try something else; the user is watching each step and a plan you "
+    "have quietly abandoned reads as a lie. When you have enough, stop calling tools and answer.")
 
 
 def _system_for(site: str = "", host: str = "") -> str:
