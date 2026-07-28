@@ -119,8 +119,11 @@ check("and are not duplicated into the prefix", "a corpus excerpt" not in sysmsg
 
 seen.clear()
 list(rcv.explain_stream("what is this", "https://unknown.example/p", "T"))
-check("an unknown domain adds nothing",
-      "site reference" not in seen.get("system", "") + seen.get("user", ""))
+# The preamble QUOTES the pack's header when explaining what site reference material is, so
+# searching for that phrase matches the preamble itself. Check for an actual attached pack — the
+# header is "About <host> — …", which only appears when one was loaded.
+check("an unknown domain adds no pack",
+      "About unknown.example" not in seen.get("system", "") + seen.get("user", ""))
 
 print()
 if fails:

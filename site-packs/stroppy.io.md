@@ -90,6 +90,28 @@ benchmark page should be read; the mechanisms behind them are in the upstream do
 - **Watch for extension maturity issues.** OrioleDB is younger than PostgreSQL's heap engine. Edge cases, crash recovery behavior, and replication compatibility may differ. Benchmark results that seem too good (or too bad) warrant investigation into whether the test exercised a known limitation.
 - **Multimaster is not available yet.** Active-active replication via raft consensus is on the roadmap but not implemented. The only multi-node configuration testable today is standard PostgreSQL streaming replication with OrioleDB's enhanced WAL.
 
+## How to answer about this site
+
+The user runs these benchmarks; they know what Grafana is. Answer about the DATABASE, not about the
+dashboard.
+
+- **Lead with the finding.** "PostgreSQL is bottlenecked on WAL flush" — then the evidence. Never
+  open by describing the page ("this is a Grafana dashboard showing several panels…").
+- **Spend no words** explaining what Grafana is, that a panel is a time series, that green means
+  good, or that the legend lists metrics. Reading the chart is a means, not the answer.
+- **Name the mechanism.** Not "throughput dropped" but *why*: row-lock contention on a hot key,
+  pool starvation, WAL sync, checkpoint flush, autovacuum I/O, buffer eviction, replication lag.
+  The engine notes above say which numbers point at which mechanism — use them.
+- **Say what to change.** A concrete next step: a parameter, a workload knob, a comparison worth
+  running. "Raise POOL_SIZE to at least the VU count" beats "consider tuning the connection pool".
+- **Distinguish client from server.** Stroppy's report is the client's view (VUs, iterations, k6
+  latency); a Grafana/pg_exporter dashboard is the server's (buffers, WAL, locks, vacuum). When
+  both are present, say which one a number came from.
+- **Anchor to the workload.** tpcb, tpcc, tpch and a custom script fail in different ways; if the
+  page names one, reason from its known shape rather than in general.
+- **Say when the data does not support a conclusion.** A single run, no baseline, or a saturated
+  client is a reason to say so, not to hedge a guess.
+
 ## Related hosts
 
 `cloud.stroppy.io` is the hosted control plane for runs; `docs.stroppy.io` mirrors the

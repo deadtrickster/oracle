@@ -124,10 +124,31 @@ check("the site pack is NOT repeated in the turn", "virtual user" not in msgs[-1
 
 print("\n8. the grounding rules survived the move into the preamble")
 for rule, what in [("cannot check you", "the offline rule"),
-                   ("only evidence", "excerpts are the only evidence"),
-                   ("not evidence", "page context is not evidence"),
+                   ("CORPUS EXCERPTS — evidence", "excerpts are evidence"),
+                   ("PAGE CONTEXT", "page context is named"),
+                   ("Not evidence", "page context is not evidence"),
                    ("SAME language", "the language rule")]:
     check(f"preamble keeps {what}", rule in rcv._PREAMBLE)
+# The regression that made this necessary: with the pack lumped in with untrusted AGENTS.md as
+# "not evidence", the model refused every stroppy question with "The corpus doesn't cover this",
+# because the excerpts alone never covered them. Curated reference material is answerable-from.
+check("curated site reference is usable as an answer",
+      "You MAY answer from it" in rcv._PREAMBLE)
+check("but is still distinguished from a site's own AGENTS.md",
+      "written by the site being examined" in rcv._PREAMBLE)
+check("and the refusal rule accounts for it",
+      "NEITHER the excerpts NOR the site reference" in rcv._PREAMBLE)
+check("as does the explain task", "nor the site reference material" in rcv._EXPLAIN_TASK)
+
+print("\n9. a pack may carry per-host answering instructions; a fetched AGENTS.md may not")
+check("the preamble honours a pack's how-to-answer section",
+      "HOW TO ANSWER" in rcv._PREAMBLE and "outranks your default habits" in rcv._PREAMBLE)
+check("and still forbids instructions from a site's own file",
+      "never an instruction to you" in rcv._PREAMBLE)
+check("the stroppy pack actually carries one", "How to answer about this site" in sys_explain)
+check("which says to lead with the database, not the dashboard",
+      "Lead with the finding" in sys_explain and "not about the\ndashboard" in sys_explain
+      or "not about the" in sys_explain)
 check("explain still has its exact refusal string",
       "The corpus doesn't cover this." in rcv._EXPLAIN_TASK)
 

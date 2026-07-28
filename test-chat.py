@@ -127,9 +127,9 @@ sysmsg = msgs[0]["content"]
 # that is already growing. See test-prefix.py.
 check("site pack is in the cached prefix", "virtual user" in sysmsg.lower())
 check("and NOT repeated in the turn", "virtual user" not in u.lower())
-check("the system prompt separates the three sources",
-      "CORPUS EXCERPTS" in sysmsg and "PAGE AND SITE CONTEXT" in sysmsg
-      and "THE CONVERSATION" in sysmsg)
+check("the system prompt separates the kinds of material",
+      "CORPUS EXCERPTS" in sysmsg and "SITE REFERENCE MATERIAL" in sysmsg
+      and "PAGE CONTEXT" in sysmsg and "THE CONVERSATION" in sysmsg)
 check("and keeps the offline rule", "cannot check you" in sysmsg)
 check("the exchange was recorded", [t["content"] for t in ch.history(H)][-2:] == ["why did p99 spike?", "ok"])
 

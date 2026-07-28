@@ -281,6 +281,10 @@ async function ground(tab, mode, selection) {
     ? { claim: selection, url: tab.url, title: tab.title, agents_md, debug, where }
     : { selection, url: tab.url, title: tab.title, agents_md, debug, where };
   const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode, ev }).catch(() => {});
+  // Mark the phase boundary. Everything above talks to the PAGE's host; everything below talks to
+  // the receiver. When it hangs, that one word is the difference between "the site is slow" and
+  // "the model is loading", and the card used to show the same text for both.
+  send({ event: "status", data: { text: "asking Oracle…" } });
   try {
     const r = await fetch(RECEIVER + endpoint, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -401,6 +405,7 @@ async function chatReset(tab) {
 // Cached in chrome.storage, INCLUDING MISSES. Nearly every site lacks the file, and without a
 // negative entry every explain/vision would re-request a 404 before it could answer.
 const SITE_TTL = 24 * 3600 * 1000;
+const AGENTS_TIMEOUT_MS = 2500;   // a bonus, never a dependency — see agentsMd()
 const DEBUG_KEY = "oracleDebug";
 
 // "I'm not sure it ever injects page context" should be answerable by looking, not by reading code.
@@ -424,7 +429,14 @@ async function agentsMd(url) {
   if (hit && Date.now() - hit.at < SITE_TTL) return hit.text;
   let text = "";
   try {
-    const r = await fetch(new URL("/AGENTS.md", url).href, { credentials: "omit", redirect: "follow" });
+    // TIMEOUT, not optional. This is a request to the site the user happens to be on, and it sits
+    // in front of every explain / fact-check / vision call. Without a deadline, any host that
+    // accepts the connection and never answers hangs the feature forever — the card stays on
+    // "Consulting the corpus…" and nothing says why, because the receiver was never even asked.
+    // A page must not get to decide how long our own tooling takes.
+    const r = await fetch(new URL("/AGENTS.md", url).href, {
+      credentials: "omit", redirect: "follow", signal: AbortSignal.timeout(AGENTS_TIMEOUT_MS),
+    });
     if (r.ok) {
       const ct = (r.headers.get("content-type") || "").toLowerCase();
       const body = (await r.text()).slice(0, 40000);
