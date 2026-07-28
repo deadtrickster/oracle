@@ -207,9 +207,10 @@ async function ground(tab, mode, selection) {
   } catch (_) { return; }
   observe(selection, OBS[mode] || 0.8, tab.url, tab.title);
   const endpoint = mode === "factcheck" ? "/factcheck" : "/explain";
+  const agents_md = await agentsMd(tab.url);
   const body = mode === "factcheck"
-    ? { claim: selection, url: tab.url, title: tab.title }
-    : { selection, url: tab.url, title: tab.title };
+    ? { claim: selection, url: tab.url, title: tab.title, agents_md }
+    : { selection, url: tab.url, title: tab.title, agents_md };
   const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode, ev }).catch(() => {});
   try {
     const r = await fetch(RECEIVER + endpoint, {
@@ -220,6 +221,44 @@ async function ground(tab, mode, selection) {
   } catch (_) {
     send({ event: "error", data: { error: "Oracle receiver offline — start oracle-capture-receiver.py." } });
   }
+}
+
+// ---------------------------------------------------------------- per-domain context (AGENTS.md)
+//
+// A page rarely explains its own vocabulary, and a model without that context produces something
+// fluent and wrong. So before answering about a page, try the site's own agent brief at
+// https://<host>/AGENTS.md — the convention this repo bets on — and send it along.
+//
+// The FETCH happens here, not in the receiver: the extension has host permissions and the page has
+// already loaded from this host, so an authenticated or intranet site is reachable. The receiver is
+// expected to work on a plane; it should not be the thing making outbound requests.
+//
+// Cached in chrome.storage, INCLUDING MISSES. Nearly every site lacks the file, and without a
+// negative entry every explain/vision would re-request a 404 before it could answer.
+const SITE_TTL = 24 * 3600 * 1000;
+
+async function agentsMd(url) {
+  let host;
+  try { host = new URL(url).host; } catch (_) { return null; }
+  if (!host) return null;
+  const key = "agentsmd:" + host;
+  const hit = (await chrome.storage.local.get(key))[key];
+  if (hit && Date.now() - hit.at < SITE_TTL) return hit.text;
+  let text = "";
+  try {
+    const r = await fetch(new URL("/AGENTS.md", url).href, { credentials: "omit", redirect: "follow" });
+    if (r.ok) {
+      const ct = (r.headers.get("content-type") || "").toLowerCase();
+      const body = (await r.text()).slice(0, 40000);
+      // A single-page app answers 200 with its index.html for ANY path, so "the request succeeded"
+      // is not evidence the file exists. Reject anything that is served as HTML or opens like it —
+      // otherwise every SPA on the internet contributes its own markup as "site context".
+      const looksHtml = ct.includes("text/html") || /^\s*(<!doctype|<html|<head|<script)/i.test(body);
+      if (!looksHtml && body.trim().length > 40) text = body;
+    }
+  } catch (_) { /* offline, blocked, or no such host — a miss, cached like any other */ }
+  await chrome.storage.local.set({ [key]: { text, at: Date.now() } });
+  return text;
 }
 
 // ---------------------------------------------------------------- screenshot region -> vision model
@@ -324,7 +363,7 @@ async function visionRegion(msg, tab) {
       body: JSON.stringify({
         image: b64, mime: "image/png", prompt,
         url: tab.url, title: tab.title, page_text: pageText, crop_text: cropText,
-        source: "region",
+        source: "region", agents_md: await agentsMd(tab.url),
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
@@ -371,6 +410,7 @@ async function visionPage(tab) {
         image: shot.split(",")[1], mime: "image/png",
         prompt: "Explain this page: what is it, what is it showing, and what should I notice?",
         url: tab.url, title: tab.title, page_text: pageText, crop_text: "", source: "page",
+        agents_md: await agentsMd(tab.url),
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
@@ -456,6 +496,7 @@ async function visionImage(srcUrl, tab) {
         // `near` is prose AROUND the image, not text inside it — `source` tells the receiver to
         // label it as such instead of claiming it was rendered inside a cropped rectangle.
         crop_text: meta.near, page_text: meta.page || "", source: "image",
+        agents_md: await agentsMd(tab.url),
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
@@ -479,7 +520,8 @@ async function groundVision(text, tab) {
   try {
     const r = await fetch(RECEIVER + "/explain", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ selection: text.slice(0, 1500), url: tab.url, title: tab.title }),
+      body: JSON.stringify({ selection: text.slice(0, 1500), url: tab.url, title: tab.title,
+                             agents_md: await agentsMd(tab.url) }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
     await pumpSSE(r.body, send);

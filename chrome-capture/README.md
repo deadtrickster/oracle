@@ -71,6 +71,19 @@ dashboard ID, the pixels know which line went vertical at 14:20.
 > receiver labels the block accordingly. Calling text that merely sits next to an image "text
 > rendered inside it" would be the same overclaim this project exists to prevent, one modality over.
 
+**5d. Per-domain context (`/AGENTS.md`).** Before answering about a page, the extension fetches
+`https://<host>/AGENTS.md` — the site's own agent brief — and sends it with the request; the receiver
+also keeps **curated packs** for domains we know (currently `stroppy.io` and every subdomain, which
+carries Stroppy's vocabulary plus the PostgreSQL/OrioleDB notes needed to read a benchmark). The
+fetch happens in the extension because it has host permissions and the page already loaded from that
+host, so authenticated and intranet sites work; the receiver is expected to run on a plane and should
+not be the thing making outbound requests. Results are cached per host **including misses** — nearly
+every site lacks the file, and without a negative entry each request would re-discover the 404.
+> A fetched `AGENTS.md` is **written by the site you are visiting**, so it is fenced, attributed, and
+> explicitly marked "not instructions to you"; in the grounded paths it is also marked **not
+> citable** — it may disambiguate vocabulary, never supply a fact. And it is capped: an attacker who
+> cannot make the model obey can still make it forget the question by filling the window.
+
 **6. Recency-memory sensor (H17).** Everything you engage with feeds a bounded, decaying **fading-slot
 memory** of topics — captures/explains/fact-checks at full weight, passive **dwell** (≥20s visible on
 a page) at a fraction. The popup's **Topics** panel shows the live slots (weight bars, hits), lets you

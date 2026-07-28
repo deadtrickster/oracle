@@ -60,6 +60,10 @@ EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # oracle_vram serialises across processes and keeps availability PROBED rather than configured — a
 # flag would have to be flipped in lockstep with every swap and would lie whenever the two drifted.
 import oracle_vram
+# Per-domain context: a hardcoded pack for our own sites, otherwise the site's own /AGENTS.md as
+# fetched by the extension. Fenced and labelled at the point of use — it is text written by the
+# site being examined.
+import oracle_sitectx
 
 VL_URL = oracle_vram.VL_URL
 VL_MODEL = os.environ.get("ORACLE_VL_MODEL", "qwen3-vl")
@@ -509,7 +513,7 @@ _FACTCHECK_SYSTEM = (
     "do, you MUST use [NOT COVERED] (the corpus is silent — never guess from your own knowledge).")
 
 
-def _grounded_stream(retrieval_query: str, framing: str, system: str):
+def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str = ""):
     """Shared retrieve→rerank→stream path behind /explain, /ask, /factcheck. Emits SSE (event, data)
     pairs: ('sources',{sources,reranked}) once, then ('delta',{text})*, then ('done',{}) | ('error',…).
     `retrieval_query` drives retrieval; `framing` is the task-specific instruction wrapping the input.
@@ -541,7 +545,10 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str):
         f"[{i+1}] (source: {c.get('document_keyword','?')})\n"
         f"{c.get('content_with_weight') or c.get('content','')}"
         for i, c in enumerate(chunks))
-    user = f"{framing}\n\nExcerpts:\n{context}"
+    # Site context sits between the task and the excerpts: close enough to disambiguate the page's
+    # vocabulary, and visibly separate from the excerpts, which are the only citable material.
+    user = f"{framing}\n\n{site}\n\nExcerpts:\n{context}" if site else \
+        f"{framing}\n\nExcerpts:\n{context}"
     # Retrieval is done (CPU + embeddings); only NOW is the text model needed, so a swap — if the
     # vision model is currently resident — is paid for as late as possible.
     try:
@@ -563,20 +570,22 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str):
     yield ("done", {})
 
 
-def explain_stream(selection: str, url: str = "", title: str = ""):
+def explain_stream(selection: str, url: str = "", title: str = "", agents_md: str | None = None):
     where = f" (seen on: {title or url})" if (title or url) else ""
     return _grounded_stream(
-        selection, f'Explain this selection{where}:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_SYSTEM)
+        selection, f'Explain this selection{where}:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_SYSTEM,
+        oracle_sitectx.block(url, agents_md))
 
 
 def ask_stream(question: str):
     return _grounded_stream(question, f"Question: {question[:1000]}", _ASK_SYSTEM)
 
 
-def factcheck_stream(claim: str, url: str = "", title: str = ""):
+def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str | None = None):
     where = f" (from: {title or url})" if (title or url) else ""
     return _grounded_stream(
-        claim, f'Claim to check{where}:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM)
+        claim, f'Claim to check{where}:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM,
+        oracle_sitectx.block(url, agents_md))
 
 
 VL_CTX_CHARS = int(os.environ.get("ORACLE_VL_CTX_CHARS", "4000"))
@@ -627,7 +636,8 @@ def _summarize_for_vl(page_text: str, url: str, title: str) -> str:
 
 
 def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
-                crop_text: str = "", img: dict | None = None, source: str = "region") -> str:
+                crop_text: str = "", img: dict | None = None, source: str = "region",
+                agents_md: str | None = None) -> str:
     """Text context to put in FRONT of the screenshot.
 
     A cropped region carries almost no self-description: a Grafana panel is a line and some axis
@@ -642,6 +652,9 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
         parts.append(f"Page title: {title.strip()}")
     if url:
         parts.append(f"Page URL: {url.strip()}")
+    site = oracle_sitectx.block(url, agents_md, citable=True)
+    if site:
+        parts.append(site)
     # The image's OWN markup outranks everything else on the page: alt text, title and a
     # <figcaption> are written specifically to say what this picture is. Without them a model
     # re-derives — or invents — what the author already stated.
@@ -689,7 +702,7 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
 
 def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: str = "",
                   page_text: str = "", crop_text: str = "", img: dict | None = None,
-                  source: str = "region"):
+                  source: str = "region", agents_md: str | None = None):
     """Stream the qwen3-vl answer for a screenshotted region. NOT grounded — a direct look at the
     pixels (read this diagram / transcribe this / what is this). Emits ('delta',…)* then ('done',{}).
 
@@ -712,7 +725,7 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
         yield ("error", {"error": f"{e}\n\n{VL_DISABLED_MSG}", "reason": "vision_unavailable"})
         return
     prompt = (prompt or "").strip() or "Describe and explain what is shown in this image. Be concise."
-    ctx = _vl_context(url, title, brief or page_text, summarized, crop_text, img, source)
+    ctx = _vl_context(url, title, brief or page_text, summarized, crop_text, img, source, agents_md)
     # Order matters: context, then the image, then the question. The text frames what the pixels
     # are before the model looks at them; the question stays last so it is the most recent thing.
     content = ([{"type": "text", "text": ctx}] if ctx else []) + [
@@ -1007,7 +1020,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not sel:
                     self._send({"error": "empty selection"}, 400)
                     return
-                self._send_sse(explain_stream(sel, p.get("url", ""), p.get("title", "")))
+                self._send_sse(explain_stream(sel, p.get("url", ""), p.get("title", ""),
+                                              p.get("agents_md")))
             elif self.path.startswith("/ask"):
                 q = (p.get("question") or "").strip()
                 if not q:
@@ -1019,7 +1033,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not claim:
                     self._send({"error": "empty claim"}, 400)
                     return
-                self._send_sse(factcheck_stream(claim, p.get("url", ""), p.get("title", "")))
+                self._send_sse(factcheck_stream(claim, p.get("url", ""), p.get("title", ""),
+                                                p.get("agents_md")))
             elif self.path.startswith("/vision"):
                 img = p.get("image") or ""
                 if not img:
@@ -1032,7 +1047,7 @@ class Handler(BaseHTTPRequestHandler):
                                              p.get("crop_text", ""),
                                              {k: p.get(k, "") for k in
                                               ("image_alt", "image_title", "image_caption")},
-                                             p.get("source", "region")))
+                                             p.get("source", "region"), p.get("agents_md")))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))
