@@ -538,7 +538,7 @@ function toolType(arg) {
   return `typed into ${arg.selector}; its value is now ${JSON.stringify((el.value || "").slice(0, 200))}`;
 }
 
-async function runBrowserTool(call, tab) {
+async function runBrowserTool(call, tab, notify = () => {}) {
   const a = call.args || {};
   const exec = (func, args) => chrome.scripting
     .executeScript({ target: { tabId: tab.id }, func, args })
@@ -562,7 +562,11 @@ async function runBrowserTool(call, tab) {
       // Hand the picture back with the reading. When the model decides to look at something on its
       // own, the person supervising it should see the same thing it saw — otherwise the transcript
       // says "I looked" and shows nothing, which is a claim rather than evidence.
+      // Show it NOW, not when the reading comes back. The vision leg is a GPU swap plus a read —
+      // a minute or more — and emitting the picture at the end meant it appeared after the answer,
+      // which is precisely when it is no longer useful for following along.
       call.image = await thumbnail(shot);
+      if (call.image) notify(call.image);
       const r = await fetch(RECEIVER + "/vision", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: shot, mime: "image/png", url: tab.url, title: tab.title,
@@ -593,7 +597,8 @@ async function chatHandleTools(calls, tab, send, depth) {
   try {
     for (const c of calls) {
       send({ event: "status", data: { text: c.says + "…" } });
-      const content = await runBrowserTool(c, tab);
+      const content = await runBrowserTool(c, tab, (image) =>
+        send({ event: "tool_image", data: { id: c.id, image, says: c.says } }));
       // Report the OUTCOME of each step, not just that it was attempted. A tool that misses and a
       // model that quietly tries something else is the pair that produced "it recovered, without
       // telling me" — the prose described a plan it had already abandoned, and the only record of
@@ -971,11 +976,32 @@ async function fullPageShot(tab) {
   const run = (func, args) => chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args })
     .then(([r]) => r?.result);
 
-  const m = await run(() => ({
-    y0: window.scrollY, vh: window.innerHeight, dpr: window.devicePixelRatio || 1,
-    h: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),
-    vw: window.innerWidth,
-  }));
+  // WHAT SCROLLS is not always the document. An app shell — a fixed layout with its content in an
+  // inner div — reports scrollHeight === innerHeight, so "full page" captured exactly one screenful
+  // and looked like a bug. Find the element that actually scrolls: the document if it does,
+  // otherwise the largest scrollable box on screen.
+  const m = await run(() => {
+    const docH = Math.max(document.documentElement.scrollHeight,
+                          document.body ? document.body.scrollHeight : 0);
+    let scroller = null;
+    if (docH <= window.innerHeight + 4) {
+      let best = 0;
+      for (const el of document.querySelectorAll("div,main,section,article")) {
+        const r = el.getBoundingClientRect();
+        if (r.width < window.innerWidth * 0.4 || r.height < window.innerHeight * 0.4) continue;
+        const over = el.scrollHeight - el.clientHeight;
+        if (over > 80 && over > best) { best = over; scroller = el; }
+      }
+    }
+    if (scroller) {
+      scroller.setAttribute("data-oracle-scroller", "1");
+      return { y0: scroller.scrollTop, vh: scroller.clientHeight,
+               dpr: window.devicePixelRatio || 1, h: scroller.scrollHeight,
+               vw: window.innerWidth, inner: true };
+    }
+    return { y0: window.scrollY, vh: window.innerHeight, dpr: window.devicePixelRatio || 1,
+             h: docH, vw: window.innerWidth, inner: false };
+  });
   if (!m) throw new Error("could not measure the page");
 
   const total = Math.min(m.h, FULLPAGE_MAX_CSS_PX, m.vh * FULLPAGE_MAX_SLICES);
@@ -985,7 +1011,8 @@ async function fullPageShot(tab) {
     for (let y = 0, n = 0; y < total && n < FULLPAGE_MAX_SLICES; y += m.vh, n++) {
       // hide sticky/fixed chrome from the second slice on — it is already in the first
       const at = await run((args) => {
-        window.scrollTo(0, args.y);
+        const inner = document.querySelector("[data-oracle-scroller]");
+        if (inner) inner.scrollTop = args.y; else window.scrollTo(0, args.y);
         if (args.hide) {
           for (const el of document.querySelectorAll("body *")) {
             const p = getComputedStyle(el).position;
@@ -995,7 +1022,7 @@ async function fullPageShot(tab) {
             }
           }
         }
-        return window.scrollY;
+        return inner ? inner.scrollTop : window.scrollY;
       }, [{ y, hide: n > 0 }]);
       // give the page a beat to paint and to fire lazy-loading, and stay under the
       // captureVisibleTab rate limit
@@ -1005,6 +1032,8 @@ async function fullPageShot(tab) {
     }
   } finally {
     await run((y0) => {
+      const inner = document.querySelector("[data-oracle-scroller]");
+      if (inner) { inner.scrollTop = y0; inner.removeAttribute("data-oracle-scroller"); }
       document.querySelectorAll("[data-oracle-hidden]").forEach((el) => {
         el.style.visibility = el.getAttribute("data-oracle-hidden") || "";
         el.removeAttribute("data-oracle-hidden");

@@ -30,6 +30,7 @@
   // What the model DID this turn — read the page, clicked a tab, searched the corpus. Shown as it
   // happens, because a harness that acts silently is one you cannot supervise.
   let steps = [];
+  let stepsOpen = false;      // folded once the turn is done; click to reopen
   let actions = false;
   let debugOn = false;
   // A running clock, because "how long has this been going" is the question a blinking cursor
@@ -98,6 +99,8 @@
       .step.act { border-left-color:#b7791f; }
       .step.bad { border-left-color:#c0392b; opacity:.85; }
       .step .why { display:block; opacity:.7; font-size:10px; margin-top:2px; }
+      .step.fold { cursor:pointer; border-left-color:transparent; opacity:.55; }
+      .step.fold:hover { opacity:.9; }
       .tabs { display:flex; gap:2px; padding:0 10px; flex:none;
         border-bottom:1px solid rgba(128,128,128,.25); }
       .tab { border:0; background:transparent; color:inherit; font:inherit; font-size:11px;
@@ -321,11 +324,25 @@
 
   function render() {
     let h = turns.map(bubble).join("");
-    if (steps.length) h += steps.map((s) =>
-      `<p class="step${s.acting ? " act" : ""}${s.failed ? " bad" : ""}">` +
-      `${s.done ? (s.failed ? "✗ " : "✓ ") : "· "}${esc(s.says)}` +
-      (s.failed && s.detail ? `<span class="why">${esc(s.detail)}</span>` : "") +
-      (s.image ? `<img class="thumb" src="${esc(s.image)}">` : "") + `</p>`).join("");
+    // Steps are 11px working notes. Left expanded they pile up and push the answer off screen —
+    // "the whole conversation collapsed to the small font" is what a screenful of them looks like.
+    // So: show them while the turn is running (that IS the interesting part then), and fold them
+    // into one line once it is over, because afterwards the answer is what you came for.
+    if (steps.length) {
+      const done = steps.filter((s) => s.done).length;
+      const bad = steps.filter((s) => s.failed).length;
+      if (!streaming && !stepsOpen) {
+        h += `<p class="step fold">▸ ${done} step${done === 1 ? "" : "s"}` +
+             (bad ? ` · ${bad} failed` : "") + ` — show</p>`;
+      } else {
+        if (!streaming) h += `<p class="step fold">▾ hide steps</p>`;
+        h += steps.map((s) =>
+          `<p class="step${s.acting ? " act" : ""}${s.failed ? " bad" : ""}">` +
+          `${s.done ? (s.failed ? "✗ " : "✓ ") : "· "}${esc(s.says)}` +
+          (s.failed && s.detail ? `<span class="why">${esc(s.detail)}</span>` : "") +
+          (s.image ? `<img class="thumb" src="${esc(s.image)}">` : "") + `</p>`).join("");
+      }
+    }
     if (streaming) {
       // The status line must appear even when text has ALREADY streamed. The model says what it is
       // about to do and then calls the tool, so `acc` is non-empty exactly when the slow thing
@@ -506,11 +523,14 @@
   }
   root.addEventListener("click", (e) => {
     const t = e.target;
-    if (t instanceof Element && t.classList.contains("thumb")) {
+    if (!(t instanceof Element)) return;
+    if (t.classList.contains("thumb")) {
       e.preventDefault();
       e.stopPropagation();
       openLightbox(t.getAttribute("src"));
+      return;
     }
+    if (t.classList.contains("fold")) { stepsOpen = !stepsOpen; render(); }
   });
 
   function paintSession() {
