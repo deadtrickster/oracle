@@ -226,8 +226,10 @@
       </div>
       <div class="sesbar">
         <b>session</b>
-        <button class="pick" data-session="main">chat<span class="x" title="Clear this session">×</span></button>
-        <button class="pick" data-session="quick">quick<span class="x" title="Clear this session">×</span></button>
+        <button class="pick" data-session="main">chat<span class="x"
+          title="Clear this conversation. The tab stays — it is where typed questions always go.">×</span></button>
+        <button class="pick" data-session="quick">quick<span class="x"
+          title="Clear this conversation. The tab stays — it is where explains and regions always go.">×</span></button>
       </div>
       <div class="scroll"></div>
       <div class="dbg" hidden></div>
@@ -434,28 +436,33 @@
   function renderSessions(list, here) {
     // THIS HOST only. Conversations for every other site are somebody else's business here; they
     // are managed from the extension's own settings page, where a global list belongs.
-    if (!list.length) {
-      sesEl.innerHTML = `<p class="empty">No stored conversations for ${esc(here)} yet.
-        Other sites are listed in the Oracle popup.</p>`;
-      return;
-    }
-    sesEl.innerHTML = list.map((s) => `
+    //
+    // Both fixed sessions are always listed, even when empty, because they are always THERE: the
+    // tabs do not come and go, and a list that omitted an empty one implied it had been removed.
+    const byName = new Map(list.map((s) => [s.session, s]));
+    const rows = ["main", "quick"].map((name) =>
+      byName.get(name) || { host: here, session: name, turns: 0, at: 0, preview: "" })
+      .concat(list.filter((s) => s.session !== "main" && s.session !== "quick"));
+    sesEl.innerHTML = `<p class="empty" style="margin-bottom:6px">Conversations for
+      ${esc(here)}. Other sites are in the Oracle toolbar popup.</p>` + rows.map((s) => `
       <div class="row">
         <span class="h">${esc(s.session)}${s.session === session ? '<span class="me">open</span>' : ""}
           <span class="me">${esc(s.preview || "")}</span></span>
-        <span class="meta">${s.turns} turn${s.turns === 1 ? "" : "s"} · ${esc(ago(s.at))}</span>
-        <button class="del" data-host="${esc(s.host)}" data-session="${esc(s.session)}">delete</button>
+        <span class="meta">${s.turns ? `${s.turns} turn${s.turns === 1 ? "" : "s"} · ${esc(ago(s.at))}`
+                                     : "empty"}</span>
+        ${s.turns ? `<button class="del" data-host="${esc(s.host)}"
+                             data-session="${esc(s.session)}">clear</button>` : ""}
       </div>`).join("");
     sesEl.querySelectorAll(".del").forEach((b) => b.addEventListener("click", () => {
       // Deliberately two clicks: this is the one control here that destroys something. "New topic"
-      // (✚) keeps everything and only moves the window; delete does not.
+      // (✚) keeps everything and only moves the window; this does not.
       if (b.dataset.armed !== "1") {
         b.dataset.armed = "1";
-        b.textContent = "really delete?";
-        setTimeout(() => { b.dataset.armed = "0"; b.textContent = "delete"; }, 4000);
+        b.textContent = "really clear?";
+        setTimeout(() => { b.dataset.armed = "0"; b.textContent = "clear"; }, 4000);
         return;
       }
-      b.textContent = "deleting…";
+      b.textContent = "clearing…";
       try {
         chrome.runtime.sendMessage({ type: "oracle:chatDelete", host: b.dataset.host,
                                      session: b.dataset.session });
@@ -620,16 +627,19 @@
       render();
       try { chrome.runtime.sendMessage({ type: "oracle:chatLoad", session }); } catch (_) {}
     });
-    // Clear this session from its own tab, instead of going to the Sessions tab to find it. Two
-    // clicks, like everywhere else that destroys something — and it stays a DELETE, not a "new
-    // topic": ✚ keeps the old turns, this does not, and the two must not feel alike.
+    // CLEAR, not delete. `chat` and `quick` are fixed surfaces — typed questions always land in
+    // one, explains and regions in the other — so the tab is permanent and only its contents go.
+    // Calling this "delete" promised the tab would disappear, and then it didn't.
+    //
+    // Still two clicks, and still distinct from ✚: "new topic" keeps the old turns and only moves
+    // the window; this throws them away.
     const x = b.querySelector(".x");
     x.addEventListener("click", (e) => {
       e.stopPropagation();
       if (streaming) return;
       if (x.dataset.armed !== "1") {
         x.dataset.armed = "1";
-        x.textContent = "delete?";
+        x.textContent = "clear?";
         x.classList.add("armed");
         setTimeout(() => { x.dataset.armed = "0"; x.textContent = "×"; x.classList.remove("armed"); },
                    4000);
