@@ -158,6 +158,15 @@
       .mdh.h1 { font-size:14px; }
       .mdh.h2 { font-size:13px; }
       .mdh.h3 { font-size:12px; opacity:.85; letter-spacing:.02em; }
+      /* A comparison table in a 400px panel will not fit, and squeezing it makes it unreadable —
+         so let it keep its width and scroll sideways inside its own box, rather than forcing the
+         whole conversation to scroll. */
+      .tw { overflow-x:auto; margin:6px 0; }
+      .msg table { border-collapse:collapse; font-size:11px; line-height:1.35; }
+      .msg th, .msg td { border:1px solid rgba(128,128,128,.30); padding:3px 7px;
+        text-align:left; white-space:nowrap; vertical-align:top; }
+      .msg th { font-weight:700; background:rgba(128,128,128,.12); }
+      .msg tbody tr:nth-child(even) td { background:rgba(128,128,128,.06); }
       pre { background:#f4f4f4; padding:8px; border-radius:6px; overflow:auto; }
       code { background:#f0f0f0; padding:1px 4px; border-radius:4px; font-family:ui-monospace,monospace; }
       pre code { background:transparent; padding:0; }
@@ -277,10 +286,35 @@
     const flush = () => {
       if (list) { out.push(`<${list.tag}>${list.items.join("")}</${list.tag}>`); list = null; }
     };
+    const isRow = (l) => /^\s*\|.*\|\s*$/.test(l);
+    const isSep = (l) => /^\s*\|[\s:|-]+\|\s*$/.test(l) && l.includes("-");
+    const cells = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+
     for (const block of s.split(/\n{2,}/)) {
       const lines = block.split("\n").filter((l) => l.trim() !== "");
       for (let li = 0; li < lines.length; li++) {
         const line = lines[li];
+
+        // TABLES. A header row followed by a |---|---| separator, then rows until something that
+        // is not a row. Comparing two runs is exactly the question that produces one, and without
+        // this the answer arrived as a wall of pipes — correct markdown, rendered as literal text,
+        // so the model assumed IT had got the syntax wrong and re-emitted the same thing.
+        if (isRow(line) && li + 1 < lines.length && isSep(lines[li + 1])) {
+          flush();
+          const head = cells(line);
+          const body = [];
+          let j = li + 2;
+          for (; j < lines.length && isRow(lines[j]); j++) body.push(cells(lines[j]));
+          out.push(
+            `<div class="tw"><table><thead><tr>` +
+            head.map((c) => `<th>${inline(c)}</th>`).join("") +
+            `</tr></thead><tbody>` +
+            body.map((r) => `<tr>` +
+              head.map((_, k) => `<td>${inline(r[k] ?? "")}</td>`).join("") + `</tr>`).join("") +
+            `</tbody></table></div>`);
+          li = j - 1;
+          continue;
+        }
         const head = line.match(/^(#{1,6})\s+(.*)$/);
         const item = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.*)$/);
         if (head) {
