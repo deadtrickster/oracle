@@ -71,6 +71,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "oracle:chat") { if (sender.tab) chatSend(msg.message, sender.tab, msg.image || ""); return false; }
   if (msg.type === "oracle:chatLoad") { if (sender.tab) chatLoad(sender.tab); return false; }
   if (msg.type === "oracle:chatReset") { if (sender.tab) chatReset(sender.tab); return false; }
+  if (msg.type === "oracle:chatAllow") { if (sender.tab) chatAllow(sender.tab, msg.allow); return false; }
   if (msg.type === "openChat") {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) openChat(tab); sendResponse({ ok: true }); });
     return true;
@@ -318,7 +319,7 @@ async function chatLoad(tab) {
     const r = await fetch(`${RECEIVER}/chat/history?host=${encodeURIComponent(host)}`);
     const d = r.ok ? await r.json() : { turns: [] };
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: d.turns || [],
-                                      epoch: d.epoch }).catch(() => {});
+                                      epoch: d.epoch, actions: !!d.actions }).catch(() => {});
   } catch (_) {
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: [] }).catch(() => {});
   }
@@ -348,7 +349,7 @@ async function chatSend(message, tab, image = "") {
                              image, mime: "image/png" }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpOrFail(r.body, send);
+    await chatPump(r.body, send, tab);
   } catch (_) {
     send({ event: "error", data: { error: "Oracle receiver offline." } });
   }
@@ -385,6 +386,165 @@ async function chatRegion(msg, tab) {
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "error",
       data: { error: "Could not capture that region: " + (e.message || e) } } }).catch(() => {});
   }
+}
+
+// ---------------------------------------------------------------- browser tools
+//
+// The receiver decides WHAT to do and cannot do any of it: it has no DOM. So it ends a turn with a
+// tool_request, and this is the half that owns the hand.
+//
+// Every tool returns what ACTUALLY happened, not what was attempted — "clicked LOGS; the page is
+// now …" or "no element matches LOGS; the clickable labels are …". A tool that reports its
+// intention rather than its outcome is how a model ends up confidently narrating a click that
+// missed, which is this repo's oldest failure mode wearing gloves.
+const CHAT_MAX_HANDOFFS = 12;
+
+// injected: read the page, or one part of it
+function toolReadPage(selector) {
+  const el = selector ? document.querySelector(selector) : document.body;
+  if (!el) return `no element matches ${selector}`;
+  const t = (el.innerText || "").replace(/\s+/g, " ").trim();
+  return t ? t.slice(0, 8000) : "(that element renders no text)";
+}
+
+// injected: click by visible text, or by selector
+function toolClick(arg) {
+  const want = (arg.text || "").trim().toLowerCase();
+  let el = null;
+  if (arg.selector) el = document.querySelector(arg.selector);
+  if (!el && want) {
+    const cand = [...document.querySelectorAll(
+      "button, a, [role=tab], [role=button], input[type=submit], summary, li, div, span")];
+    const vis = (n) => n.getClientRects().length > 0;
+    // exact visible label first, then a contains-match; prefer the smallest matching element so a
+    // wrapping <div> never wins over the actual control inside it
+    const exact = cand.filter((n) => vis(n) && (n.innerText || n.value || "").trim().toLowerCase() === want);
+    const part = cand.filter((n) => vis(n) && (n.innerText || "").trim().toLowerCase().includes(want));
+    const pick = (exact.length ? exact : part).sort(
+      (a, b) => (a.innerText || "").length - (b.innerText || "").length)[0];
+    el = pick || null;
+  }
+  if (!el) {
+    const labels = [...document.querySelectorAll("button, a, [role=tab]")]
+      .filter((n) => n.getClientRects().length)
+      .map((n) => (n.innerText || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 40);
+    return `NOT CLICKED: nothing matches ${JSON.stringify(arg.text || arg.selector)}. ` +
+           `Clickable labels on this page: ${labels.join(" | ")}`;
+  }
+  const before = { url: location.href, title: document.title };
+  el.scrollIntoView({ block: "center" });
+  el.click();
+  return JSON.stringify({ clicked: (el.innerText || el.value || el.tagName).trim().slice(0, 80),
+                          before, note: "the page may still be updating; read it to see the result" });
+}
+
+// injected: type into a field
+function toolType(arg) {
+  const el = document.querySelector(arg.selector);
+  if (!el) return `NOT TYPED: no element matches ${arg.selector}`;
+  el.focus();
+  if (arg.clear !== false) el.value = "";
+  el.value = (el.value || "") + (arg.text || "");
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  return `typed into ${arg.selector}; its value is now ${JSON.stringify((el.value || "").slice(0, 200))}`;
+}
+
+async function runBrowserTool(call, tab) {
+  const a = call.args || {};
+  const exec = (func, args) => chrome.scripting
+    .executeScript({ target: { tabId: tab.id }, func, args })
+    .then(([r]) => r?.result);
+  try {
+    if (call.name === "read_page") return String(await exec(toolReadPage, [a.selector || ""]));
+    if (call.name === "click") {
+      const out = String(await exec(toolClick, [a]));
+      // Report the OUTCOME: a click that navigates or swaps a tab changes the page, and the model
+      // needs the after, not the before.
+      await new Promise((r) => setTimeout(r, 900));
+      const after = await exec(() => ({ url: location.href, title: document.title,
+                                        text: (document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1500) }));
+      return `${out}\nAFTER: ${after?.url} — ${after?.title}\n${after?.text || ""}`;
+    }
+    if (call.name === "type_text") return String(await exec(toolType, [a]));
+    if (call.name === "look_at_page") {
+      const shot = a.full_page ? (await fullPageShot(tab)).b64
+        : (await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" })).split(",")[1];
+      const r = await fetch(RECEIVER + "/vision", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: shot, mime: "image/png", url: tab.url, title: tab.title,
+                               source: a.full_page ? "fullpage" : "page", page_text: "",
+                               prompt: a.question || "Describe what this shows, with the numbers." }),
+      });
+      if (!r.ok || !r.body) return `look_at_page failed: receiver error ${r.status}`;
+      let text = "";
+      await pumpSSE(r.body, (ev) => {
+        if (ev.event === "delta") text += ev.data.text || "";
+        if (ev.event === "error") text += `\n[error: ${ev.data.error}]`;
+      });
+      return text.trim() || "the vision model returned nothing";
+    }
+    return `unknown tool ${call.name}`;
+  } catch (e) {
+    return `${call.name} failed: ${e.message || e}`;
+  }
+}
+
+async function chatHandleTools(calls, tab, send, depth) {
+  if (depth > CHAT_MAX_HANDOFFS) {
+    send({ event: "error", data: { error: "too many tool steps — stopping." } });
+    return;
+  }
+  const results = [];
+  for (const c of calls) {
+    send({ event: "status", data: { text: c.says + "…" } });
+    results.push({ id: c.id, name: c.name, content: await runBrowserTool(c, tab) });
+  }
+  let host = "";
+  try { host = new URL(tab.url).host; } catch (_) {}
+  try {
+    const r = await fetch(RECEIVER + "/chat/tool", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, results, url: tab.url, title: tab.title,
+                             debug: await debugOn() }),
+    });
+    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
+    await chatPump(r.body, send, tab, depth + 1);
+  } catch (_) {
+    send({ event: "error", data: { error: "Oracle receiver offline." } });
+  }
+}
+
+// Pump a chat stream, executing any tool request it makes and continuing the loop.
+async function chatPump(body, send, tab, depth = 0) {
+  let pending = null;
+  let terminal = false;
+  await pumpSSE(body, (ev) => {
+    if (ev.event === "tool_request") { pending = ev.data.calls || []; send(ev); return; }
+    if (ev.event === "done" || ev.event === "error") terminal = true;
+    // a `done` that only means "over to you" must not end the panel's spinner
+    if (ev.event === "done" && ev.data && ev.data.pending_tools) return;
+    send(ev);
+  });
+  if (pending && pending.length) { await chatHandleTools(pending, tab, send, depth); return; }
+  if (!terminal) {
+    send({ event: "error", data: { error:
+      "The answer was cut off — the connection to the Oracle receiver ended early." } });
+  }
+}
+
+// The per-host gate for acting tools. Stored on the RECEIVER, not in the extension, because the
+// receiver is what decides which tools to offer the model — and a gate enforced only in the UI is
+// not a gate.
+async function chatAllow(tab, allow) {
+  let host = "";
+  try { host = new URL(tab.url).host; } catch (_) {}
+  try {
+    await fetch(RECEIVER + "/chat/allow", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, allow: !!allow }),
+    });
+  } catch (_) {}
 }
 
 async function chatReset(tab) {

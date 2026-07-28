@@ -23,6 +23,10 @@
   let cites = null, sources = null;
   let dbgEvents = [];
   let status = "";
+  // What the model DID this turn — read the page, clicked a tab, searched the corpus. Shown as it
+  // happens, because a harness that acts silently is one you cannot supervise.
+  let steps = [];
+  let actions = false;
 
   root.innerHTML = `
     <style>
@@ -43,7 +47,11 @@
       .bar b { font-size:12px; flex:1; letter-spacing:.02em; }
       .bar .h { font-weight:400; opacity:.6; font-size:11px; }
       .ico { cursor:pointer; border:0; background:transparent; color:inherit; font-size:14px;
-        opacity:.6; padding:2px 4px; } .ico:hover { opacity:1; }
+        opacity:.35; padding:2px 4px; } .ico:hover { opacity:1; }
+      .ico.on { opacity:1; }
+      .step { font-size:11px; opacity:.7; margin:0 0 6px; padding-left:8px;
+        border-left:2px solid rgba(128,128,128,.35); }
+      .step.act { border-left-color:#b7791f; }
       .tabs { display:flex; gap:2px; padding:0 10px; flex:none;
         border-bottom:1px solid rgba(128,128,128,.25); }
       .tab { border:0; background:transparent; color:inherit; font:inherit; font-size:11px;
@@ -87,6 +95,7 @@
     <div class="panel">
       <div class="bar">
         <b>Oracle · chat <span class="h"></span></b>
+        <button class="ico act" title="Allow Oracle to click and type on this site">🖐</button>
         <button class="ico newt" title="New topic (keeps the old one)">⎌</button>
         <button class="ico min" title="Hide">–</button>
       </div>
@@ -132,6 +141,8 @@
 
   function render() {
     let h = turns.map(bubble).join("");
+    if (steps.length) h += steps.map((s) =>
+      `<p class="step${s.acting ? " act" : ""}">${esc(s.says)}</p>`).join("");
     if (streaming) {
       h += `<div class="msg"><div class="who">oracle</div><div class="bub">` +
         (acc ? md(acc) + `<span class="caret"></span>`
@@ -190,7 +201,7 @@
     if (preset === undefined) input.value = "";
     turns.push({ role: "user", content: q || "(region sent)", thumb });
     streaming = true; acc = ""; status = ""; cites = null; sources = null;
-    dbgEvents = []; renderDbg(); render();
+    steps = []; dbgEvents = []; renderDbg(); render();
     go.disabled = true;
     try { chrome.runtime.sendMessage({ type: "oracle:chat", message: q, image }); } catch (_) {}
   }
@@ -205,6 +216,18 @@
   go.addEventListener("click", () => send());
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  function paintAct() {
+    const b = $(".act");
+    b.classList.toggle("on", actions);
+    b.title = actions
+      ? "Oracle MAY click and type on this site — click to revoke"
+      : "Oracle can look but not touch on this site — click to allow clicking and typing";
+  }
+  $(".act").addEventListener("click", () => {
+    actions = !actions;
+    paintAct();
+    try { chrome.runtime.sendMessage({ type: "oracle:chatAllow", allow: actions }); } catch (_) {}
   });
   $(".min").addEventListener("click", () => { host.style.display = "none"; });
   $(".newt").addEventListener("click", () => {
@@ -237,6 +260,8 @@
     if (msg.type === "oracle:chatHistory") {
       turns = (msg.turns || []).map((t) => ({ role: t.role, content: t.content }));
       root.querySelector(".bar .h").textContent = msg.host ? `· ${msg.host}` : "";
+      actions = !!msg.actions;
+      paintAct();
       render();
       return;
     }
@@ -245,6 +270,11 @@
     const { event, data } = msg.ev || {};
     if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }
     if (event === "status") { status = data.text || ""; render(); return; }
+    if (event === "tool_request") {
+      (data.calls || []).forEach((c) => steps.push({ says: c.says, acting: c.acting }));
+      render();
+      return;
+    }
     if (event === "sources") { sources = data.sources || []; cites = data.citations || []; return; }
     if (event === "delta") { acc += data.text || ""; render(); return; }
     if (event === "done") {
