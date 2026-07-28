@@ -29,7 +29,7 @@
   let status = "";
   // What the model DID this turn — read the page, clicked a tab, searched the corpus. Shown as it
   // happens, because a harness that acts silently is one you cannot supervise.
-  let steps = [];
+  let live = [];              // prose and steps, in the order they happened
   let stepsOpen = false;      // folded once the turn is done; click to reopen
   let turnFailed = false;     // ...but never folded when it ended badly
   let actions = false;
@@ -347,6 +347,13 @@
     // an answer about an image you cannot see is an answer you cannot check.
     const img = t.image ? `<img class="thumb" src="${esc(t.image)}">` : "";
 
+    // A step committed from the live view keeps looking exactly like it did while it ran.
+    if (t.role === "livestep") {
+      return `<p class="step${t.acting ? " act" : ""}${t.failed ? " bad" : ""}">` +
+        `${t.done ? (t.failed ? "✗ " : "✓ ") : "· "}${esc(t.says || "")}` +
+        (t.failed && t.detail ? `<span class="why">${esc(t.detail)}</span>` : "") +
+        (t.image ? `<img class="thumb" src="${esc(t.image)}">` : "") + `</p>`;
+    }
     // A tool RESULT is a machine payload — a JSON blob, a page dump — and pasting it into the
     // conversation is how a reloaded panel turned into a wall of URLs and nav text. It gets the
     // same one-line treatment as a live step, with the raw output one click away for when the
@@ -372,27 +379,19 @@
 
   function render() {
     let h = turns.map(bubble).join("");
-    // Steps are 11px working notes. Left expanded they pile up and push the answer off screen —
-    // "the whole conversation collapsed to the small font" is what a screenful of them looks like.
-    // So: show them while the turn is running (that IS the interesting part then), and fold them
-    // into one line once it is over, because afterwards the answer is what you came for.
-    if (steps.length) {
-      const done = steps.filter((s) => s.done).length;
-      const bad = steps.filter((s) => s.failed).length;
-      // NEVER fold after a failed turn. Folding on completion is right — the answer is what you
-      // came for — but when the turn died the steps are the only record of what happened, and
-      // hiding them is how "the screenshot and tool log disappeared" the instant the error landed.
-      const hideOk = !streaming && !stepsOpen && !turnFailed;
-      if (hideOk) {
-        h += `<p class="step fold">▸ ${done} step${done === 1 ? "" : "s"}` +
-             (bad ? ` · ${bad} failed` : "") + ` — show</p>`;
+    // LIVE ITEMS, in the order they happened. Prose used to accumulate into one bubble at the
+    // bottom while every step rendered above it, so a turn that went text → click → text → look
+    // came out as [all the steps][all the prose] — the transcript had it right and the live view
+    // did not, which is why a reload "fixed" the order.
+    for (const it of live) {
+      if (it.t === "text") {
+        if (it.s.trim()) h += `<div class="msg"><div class="who">oracle</div>
+          <div class="bub">${md(it.s)}</div></div>`;
       } else {
-        if (!streaming) h += `<p class="step fold">▾ hide steps</p>`;
-        h += steps.map((s) =>
-          `<p class="step${s.acting ? " act" : ""}${s.failed ? " bad" : ""}">` +
-          `${s.done ? (s.failed ? "✗ " : "✓ ") : "· "}${esc(s.says)}` +
-          (s.failed && s.detail ? `<span class="why">${esc(s.detail)}</span>` : "") +
-          (s.image ? `<img class="thumb" src="${esc(s.image)}">` : "") + `</p>`).join("");
+        h += `<p class="step${it.acting ? " act" : ""}${it.failed ? " bad" : ""}">` +
+          `${it.done ? (it.failed ? "✗ " : "✓ ") : "· "}${esc(it.says)}` +
+          (it.failed && it.detail ? `<span class="why">${esc(it.detail)}</span>` : "") +
+          (it.image ? `<img class="thumb" src="${esc(it.image)}">` : "") + `</p>`;
       }
     }
     if (streaming) {
@@ -510,7 +509,7 @@
     if (preset === undefined) input.value = "";
     turns.push({ role: "user", content: q || "(region sent)", image: thumb });
     streaming = true; acc = ""; status = ""; cites = null; sources = null;
-    steps = []; turnFailed = false; stepsOpen = false; dbgEvents = []; renderDbg();
+    live = []; turnFailed = false; stepsOpen = false; dbgEvents = []; renderDbg();
     startedAt = Date.now();
     lastEventAt = Date.now();
     clearInterval(ticker);
@@ -622,7 +621,7 @@
       streaming = false;
       go.disabled = false;
       clearInterval(ticker); ticker = null; startedAt = 0;
-      turns = []; steps = []; acc = ""; status = "";
+      turns = []; live = []; acc = ""; status = "";
       paintSession();
       render();
       try { chrome.runtime.sendMessage({ type: "oracle:chatLoad", session }); } catch (_) {}
@@ -646,7 +645,7 @@
         return;
       }
       x.dataset.armed = "0"; x.textContent = "×"; x.classList.remove("armed");
-      turns = []; steps = []; acc = ""; render();
+      turns = []; live = []; acc = ""; render();
       try {
         chrome.runtime.sendMessage({ type: "oracle:chatDelete", host: currentHost,
                                      session: b.dataset.session });
@@ -795,22 +794,39 @@
     if (msg.session && msg.session !== session) return;
     lastEventAt = Date.now();
     const { event, data } = msg.ev || {};
+
+    // An event arriving for THIS session means a turn is running, whatever the panel currently
+    // thinks. Switching sessions clears `streaming` — correctly, the panel stopped showing that
+    // turn — but coming back to a session whose turn never stopped left it marked idle while
+    // events kept landing: steps piled up unrendered, the fold engaged, and it read as a stale
+    // conversation with "0 steps". Events are the evidence; trust them over the flag.
+    if (!streaming && event !== "done" && event !== "error" && event !== "debug") {
+      streaming = true;
+      go.disabled = true;
+      turnFailed = false;
+      stepsOpen = false;
+      if (!startedAt) startedAt = Date.now();
+      clearInterval(ticker);
+      ticker = setInterval(tick, 1000);
+    }
     if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }
     if (event === "status") { status = data.text || ""; render(); return; }
     if (event === "tool_request") {
-      (data.calls || []).forEach((c) => steps.push({ id: c.id, says: c.says, acting: c.acting }));
+      (data.calls || []).forEach((c) =>
+        live.push({ t: "step", id: c.id, says: c.says, acting: c.acting }));
+      acc = "";                       // the next prose starts a new block, after these steps
       render();
       return;
     }
     if (event === "tool_image") {
       // The screenshot a tool took on its own initiative, shown next to the step that took it.
-      const s = steps.find((x) => x.id === data.id);
-      if (s) s.image = data.image; else steps.push({ says: data.says, image: data.image });
+      const s = live.find((x) => x.t === "step" && x.id === data.id);
+      if (s) s.image = data.image; else live.push({ t: "step", says: data.says, image: data.image });
       render();
       return;
     }
     if (event === "tool_done") {
-      const s = steps.find((x) => x.id === data.id);
+      const s = live.find((x) => x.t === "step" && x.id === data.id);
       if (s) { s.done = true; s.failed = data.failed; s.detail = data.detail; }
       // A finished tool means the model is thinking again, not that the turn stalled. Say so, or
       // the panel sits on the last tool's label while nothing appears to happen.
@@ -819,12 +835,29 @@
       return;
     }
     if (event === "sources") { sources = data.sources || []; cites = data.citations || []; return; }
-    if (event === "delta") { acc += data.text || ""; render(); return; }
+    if (event === "delta") {
+      // Prose goes into the ordered list at the position it arrived, not into one bucket that
+      // renders after every step.
+      acc += data.text || "";
+      const last = live[live.length - 1];
+      if (last && last.t === "text") last.s = acc; else live.push({ t: "text", s: acc });
+      render();
+      return;
+    }
     if (event === "done") {
       streaming = false; go.disabled = false;
       clearInterval(ticker); ticker = null; startedAt = 0;
-      if (acc.trim()) turns.push({ role: "assistant", content: acc, cites });
-      acc = ""; render();
+      // Commit the live items into the transcript IN ORDER, so what you were watching is what
+      // stays on screen. Flattening them into one assistant turn is what reordered them.
+      for (const it of live) {
+        if (it.t === "text") {
+          if (it.s.trim()) turns.push({ role: "assistant", content: it.s, cites });
+        } else {
+          turns.push({ role: "livestep", says: it.says, acting: it.acting, done: it.done,
+                       failed: it.failed, detail: it.detail, image: it.image });
+        }
+      }
+      live = []; acc = ""; render();
       return;
     }
     if (event === "error") {
