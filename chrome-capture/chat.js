@@ -37,6 +37,7 @@
   // Separate because "what does this phrase mean" and "explain this whole run" are not one thread,
   // and interleaving them would make both harder to read.
   let session = "main";
+  let currentHost = "";
 
   // Last sign of life from the receiver. A turn is legitimately slow — a GPU swap and a vision read
   // are minutes — but SILENT for minutes is different, and the panel used to be unable to tell the
@@ -119,8 +120,15 @@
         border-bottom:1px solid rgba(128,128,128,.18); }
       .sesbar b { font-weight:600; }
       .sesbar .pick { border:0; background:rgba(128,128,128,.16); color:inherit; font:inherit;
-        border-radius:10px; padding:2px 9px; cursor:pointer; opacity:.65; }
+        border-radius:10px; padding:2px 9px; cursor:pointer; opacity:.65; display:inline-flex;
+        align-items:center; gap:5px; }
       .sesbar .pick.on { opacity:1; background:#128a86; color:#fff; }
+      /* The × only appears on the session you are looking at, and only once it has something to
+         clear. An always-visible destructive control on every tab invites the accident. */
+      .sesbar .pick .x { display:none; opacity:.7; font-size:12px; line-height:1; }
+      .sesbar .pick.on .x { display:inline; }
+      .sesbar .pick .x:hover { opacity:1; }
+      .sesbar .pick .x.armed { color:#ffd7d0; font-weight:700; }
       .msg p { margin:0 0 6px; } .msg p:last-child { margin:0; }
       /* Tight: these are short factual bullets in a narrow panel, not prose. The default list
          spacing plus a paragraph margin made every item look like its own section. */
@@ -167,7 +175,8 @@
         <button class="ico dbgt" title="Record every tool call and the full prompt">🐞</button>
         <button class="ico act" title="Allow Oracle to click and type on this site">🖐</button>
         <button class="ico newt" title="New topic (keeps the old one)">✚</button>
-        <button class="ico min" title="Hide">–</button>
+        <button class="ico min" title="Hide (keeps this panel loaded)">–</button>
+        <button class="ico close" title="Close">×</button>
       </div>
       <div class="tabs">
         <button class="tab on" data-pane="chat">Conversation</button>
@@ -176,8 +185,8 @@
       </div>
       <div class="sesbar">
         <b>session</b>
-        <button class="pick" data-session="main">chat</button>
-        <button class="pick" data-session="quick">quick (explain · regions)</button>
+        <button class="pick" data-session="main">chat<span class="x" title="Clear this session">×</span></button>
+        <button class="pick" data-session="quick">quick<span class="x" title="Clear this session">×</span></button>
       </div>
       <div class="scroll"></div>
       <div class="dbg" hidden></div>
@@ -457,16 +466,54 @@
     root.querySelectorAll(".pick").forEach(
       (b) => b.classList.toggle("on", b.dataset.session === session));
   }
-  root.querySelectorAll(".pick").forEach((b) => b.addEventListener("click", () => {
-    if (streaming || b.dataset.session === session) return;
-    session = b.dataset.session;
-    turns = []; steps = []; acc = "";
-    paintSession();
-    render();
-    try { chrome.runtime.sendMessage({ type: "oracle:chatLoad", session }); } catch (_) {}
-  }));
+  root.querySelectorAll(".pick").forEach((b) => {
+    b.addEventListener("click", () => {
+      if (b.dataset.session === session) return;
+      // Deliberately NOT blocked while a turn is in flight. It was, and one stuck turn made the
+      // whole switcher dead — you could not even go and look at the other conversation. The turn
+      // keeps running on the receiver and is recorded in the session it started in; switching just
+      // changes what this panel is showing.
+      session = b.dataset.session;
+      streaming = false;
+      go.disabled = false;
+      clearInterval(ticker); ticker = null; startedAt = 0;
+      turns = []; steps = []; acc = ""; status = "";
+      paintSession();
+      render();
+      try { chrome.runtime.sendMessage({ type: "oracle:chatLoad", session }); } catch (_) {}
+    });
+    // Clear this session from its own tab, instead of going to the Sessions tab to find it. Two
+    // clicks, like everywhere else that destroys something — and it stays a DELETE, not a "new
+    // topic": ✚ keeps the old turns, this does not, and the two must not feel alike.
+    const x = b.querySelector(".x");
+    x.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (streaming) return;
+      if (x.dataset.armed !== "1") {
+        x.dataset.armed = "1";
+        x.textContent = "delete?";
+        x.classList.add("armed");
+        setTimeout(() => { x.dataset.armed = "0"; x.textContent = "×"; x.classList.remove("armed"); },
+                   4000);
+        return;
+      }
+      x.dataset.armed = "0"; x.textContent = "×"; x.classList.remove("armed");
+      turns = []; steps = []; acc = ""; render();
+      try {
+        chrome.runtime.sendMessage({ type: "oracle:chatDelete", host: currentHost,
+                                     session: b.dataset.session });
+      } catch (_) {}
+    });
+  });
 
   $(".min").addEventListener("click", () => { host.style.display = "none"; });
+  // Close removes the panel; the CONVERSATION is untouched, because it lives on the receiver and
+  // reopening must show it again. Closing a window is not the same as ending a thought.
+  $(".close").addEventListener("click", () => {
+    clearInterval(ticker);
+    host.remove();
+    window.__oracleChat = null;
+  });
   $(".newt").addEventListener("click", () => {
     if (streaming) return;
     turns = []; render();
@@ -499,6 +546,7 @@
                                               image: t.image || "", tool: t.tool || "" }));
       if (msg.session) session = msg.session;
       paintSession();
+      currentHost = msg.host || "";
       root.querySelector(".bar .h").textContent = msg.host ? `· ${msg.host}` : "";
       actions = !!msg.actions;
       debugOn = !!msg.debug;
@@ -522,6 +570,10 @@
       return;
     }
     if (msg.type !== "oracle:chatEvent") return;
+    // Events from a turn that belongs to a session you have since switched away from must not be
+    // painted into the one you are looking at. The background worker keeps running it; the
+    // transcript will show it when you switch back.
+    if (msg.session && msg.session !== session) return;
     lastEventAt = Date.now();
     const { event, data } = msg.ev || {};
     if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }

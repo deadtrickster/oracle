@@ -367,7 +367,11 @@ async function chatLoad(tab, session) {
 
 async function chatSend(message, tab, image = "", session = null, source = "") {
   if (session) chatSession = session;
-  const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev }).catch(() => {});
+  // Stamp every event with the session it belongs to, so the panel can ignore ones for a
+  // conversation it is no longer showing.
+  const forSession = chatSession;
+  const send = (ev) => chrome.tabs
+    .sendMessage(tab.id, { type: "oracle:chatEvent", ev, session: forSession }).catch(() => {});
   let host = "";
   try { host = new URL(tab.url).host; } catch (_) {}
   const debug = await debugOn();
@@ -379,12 +383,11 @@ async function chatSend(message, tab, image = "", session = null, source = "") {
   } catch (_) { /* injection refused; the question still works */ }
   // Always emit one, so an empty Debug tab can never mean two different things. The overlay card
   // got this fix; the chat panel did not, and it looked broken for exactly the same reason.
-  chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "debug", data: debug
+  send({ event: "debug", data: debug
     ? { side: "extension", stage: "chat send", host, around_chars: where.around.length,
         headings: where.headings, page_fallback_chars: where.page.length }
-    : { side: "extension", stage: "debug is OFF — tick “debug” in the Oracle popup and ask " +
-                                  "again to see every tool call and the full prompt" } } })
-    .catch(() => {});
+    : { side: "extension", stage: "debug is OFF — click the 🐞 in the panel's title bar (or tick " +
+                                  "“debug” in the Oracle popup) and ask again" } });
   // Keepalive for the WHOLE turn, not just the tool steps. A first model call with tools, history
   // and a possible GPU swap runs well past the ~30s idle timeout, and a worker killed here leaves
   // the receiver's turn recorded, the panel spinning, and nothing to explain either — which is
