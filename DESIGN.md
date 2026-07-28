@@ -1204,6 +1204,120 @@ appeared in a transcript.
    more usefully, the UI shows each step's outcome (`✓`/`✗` with the reason) so the prose is
    checkable against what happened.
 
+### 6.3.1 Site tools: what a website can offer an agent that its UI cannot
+
+Driving a human UI is a re-derivation of state that already exists one layer down, and every
+re-derivation is a place to be silently wrong. The evidence for that is one-sided: every bug in this
+area came from the human-interface path — React's value tracker swallowing a typed run name, a
+disabled button accepting a silent click, guessed CSS selectors, a percentile read off a legend that
+does not show it, a full page reload destroying the chat panel. The machine path — the site's own
+API — produced none.
+
+So a site pack may now ship **executable** knowledge next to its prose: `site-packs/<domain>.js`,
+discovered by the same suffix rule as the `.md`. It defines named functions that run in the page's
+own world, and the model calls them **by name**. It never writes or supplies JavaScript.
+
+That distinction is the whole safety argument. "Let the model run JS in an authenticated session" is
+unbounded: one generated line reaches every mutating endpoint on the origin and nothing reviews it
+first. "Let the model call `run_report({runId})`, which we wrote" is bounded by code we can read,
+diff and test. Same reach for the questions users actually ask; a fraction of the blast radius. The
+model chooses which arm to move, not what the arm is made of.
+
+**The allowlist is generated, not written.** `scripts/gen-readonly-api.py` reads the site's OpenAPI
+spec and keeps an operation only when three independent signals agree: the spec marks it
+`x-idempotency-level: NO_SIDE_EFFECTS`, it is a GET, and the Connect procedure it maps to exists in
+the generated client code (`--verify`). 60 of the panel's 143 methods survive; `StartTestRun`,
+`DeleteTestRun` and `AgentShell/OpenShell` do not. Who decides what is safe matters more than the
+mechanism: not us reading endpoint names, not the model at request time, but the people who wrote
+the handlers, in a marker a machine can read.
+
+Two things that only appeared by building it:
+
+- **The REST paths in that spec are not callable from a browser at all.** ogen decodes a JSON body
+  on GET, and both `fetch` and `XMLHttpRequest` drop bodies on GET by specification. The same
+  handlers are reachable over Connect (POST + JSON), which is what the site's own app speaks. So the
+  spec supplies the safety property, the generated code supplies the callable address, and the
+  allowlist is keyed by **the string that actually goes on the wire**. An allowlist keyed by
+  something adjacent to the call is one you can satisfy while calling something else.
+- **The first version of the generator read the marker off the wrong operation.** A path item holds
+  several operations, and `/api/v1/system/settings` carries both `get: getSystemSettings
+  [NO_SIDE_EFFECTS]` and `put: updateSystemSettings [IDEMPOTENT]`. Scanning with regexes attributed
+  the marker to the last method seen on that path. Parsing the document *as a document* — and
+  requiring method and marker to come from the same operation — is what makes the marker mean
+  anything.
+
+**Enforcement is on the receiver, never in the page.** `check_site_call` refuses a disallowed call
+before it leaves; a check living inside the code being asked to run is a check the caller can be
+talked out of. A standing test asserts that every procedure the helper source calls is on the
+generated list, so a typo fails at build time rather than becoming a runtime refusal that looks like
+a permissions bug.
+
+**What the helpers are for** is the interesting part, and it is not "wrap each endpoint". They are
+one function per *question a user actually asks* — `run_report` (identity, status, config, metrics
+and quota in one call), `design_context` (the workloads a stroppy binary embeds, the tenant's
+presets, quota headroom), `promql` (a metric over time, scoped server-side to one run), `form_state`
+(the form as data: labels, values, options, which choice is selected, and a selector that resolved a
+moment ago). Bundling is not sugar: each round trip is another chance to emit a malformed tool call,
+and five calls fail five times as often as one. The composition lives in code where it can be
+corrected, instead of being re-derived from prose every turn.
+
+**Move with the app's own router.** `navigate` sets the tab's URL, which reloads the whole SPA — the
+page flickers, and the chat panel, injected into that document, is destroyed. `goto` pushes state
+and dispatches `popstate`, which the panel's `BrowserRouter` handles itself: same destination, no
+reload, panel untouched. Reading the app's source is what makes that available; the difference is
+invisible in the URL bar and total in how it feels.
+
+### 6.3.2 Safe click: the model proposes, the human commits
+
+Per-host acting was a binary, and it was wrong in both directions. `off` is safe and useless — the
+model can see the button, know it is the answer, and be unable to press it. `allow` is useful and
+unbounded — in a mail client, Archive, Delete and Send are one click apart, in a session the model
+never authenticated.
+
+The middle setting splits the decision along its natural seam. Under **`confirm`**, the model picks
+the target — the part it is good at, having just read the page — the harness outlines that element
+on the actual page, and the human presses Enter. Doing nothing skips it: the safe outcome is the one
+requiring no decision, and the worker's timeout counts as declined. A skip is reported to the model
+as a *result*, not an error, so it continues rather than retrying.
+
+It also changes *when* you find out. Allow-all records an action as a line of text afterwards; this
+shows the real element, before anything happens.
+
+**Removing a tool is necessary and not sufficient.** Asked to open an email on a host where acting
+was off, the model spent six steps announcing clicks it could not perform — "I need to click", "let
+me try a CSS selector", "I'll click now" — each time reaching for the only tools it had and
+re-screenshotting the same inbox. An absent tool is indistinguishable from one that never existed,
+so it read its own inability as a failure to find the right approach and kept trying approaches. The
+gate still enforces; the prompt now supplies the one thing removal cannot — the reason, and the
+remedy — so a refusal becomes an answer the user can act on instead of a loop they watch.
+
+**Repetition means stuck only when nothing happened in between.** The first repeat-detector counted
+identical calls since the last user message, and blocked a model that had opened a wizard, gone to
+another page to look something up, and navigated *back* — telling it "the result did not change"
+when it was on a different page by then. Anything that alters where we are or what the page contains
+now resets the count. What remains guarded is the real failure: re-reading an unchanged page.
+
+### 6.3.3 Budgets, and the cost of a silent cut
+
+Three limits were set by feel rather than by the slot size, and all three cost a turn.
+
+`design_context` returns JSON from six endpoints; it came back **cut at exactly 20,000 characters,
+mid-object, with nothing to indicate anything was missing**. The model received invalid JSON whose
+visible part looked like a complete answer, concluded the workload presets were not in the response,
+and called the same helper twice more. A cut that leaves no mark is indistinguishable from a short
+answer, and no reasoning recovers from it. Truncation now says what was dropped, that it was the
+*end*, and that calling again returns the same thing.
+
+The numbers themselves were the deeper problem. The server runs 262,144 tokens across two slots —
+**131,072 per conversation** — and a whole conversation was capped at ~16% of that. Axiom 1 argues
+against *dumping* junk into context; it does not argue for withholding data the model explicitly
+asked for. Raised: epoch 60k → 200k chars, tool result 20k → 60k, `read_page` 8k → 24k.
+
+**A turn carries two documents.** The transcript stored one string for both the model and the
+reader, so a `quick` explain showed the user their own question buried under framing instructions
+and a paragraph of transcribed pixels. `content` stays authoritative for the model; `display` is
+what a person sees. The model still receives the full vision reading; the panel shows the question.
+
 ### 6.4 One queue for the GPU: batching, and vision first
 
 `oracle_vram` answers "make this model resident, one swapper at a time". It does not answer what

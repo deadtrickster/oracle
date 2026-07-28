@@ -951,10 +951,17 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
         # The image rides along on the turn for the UI only — the model gets the READING. A
         # transcript that says "the region you selected" and cannot show it is one you cannot audit.
         roll = oracle_chat.append(host, "user", stored, session=session,
-                                  image=(data_url if image else ""))
+                                  image=(data_url if image else ""),
+                                  display=message if reading else "")
         if roll["rolled"]:
-            yield ("status", {"text": f"previous conversation was full — started a new topic "
-                                      f"(epoch {roll['epoch']}); nothing was deleted"})
+            # Say WHAT filled it. "Conversation is full" after three questions reads as a bug or as
+            # a scolding, and it is usually neither: on a heavy page a couple of read_page dumps
+            # spend the whole allowance before anyone has said much. Naming the real consumer makes
+            # the roll explicable, and points at the lever (ask a narrower question, or read a
+            # selector rather than the whole page).
+            yield ("status", {"text": "started a new topic — the previous one was full"
+                                      + _rolled_because(host, session, roll["epoch"])
+                                      + "; nothing was deleted"})
     yield from _chat_loop(host, url, title, agents_md, where, debug, session)
 
 
@@ -1018,17 +1025,77 @@ def _run_local_tool(name: str, args: dict, debug: bool, helpers: dict | None = N
     return out
 
 
+def _rolled_because(host: str, session: str, new_epoch: int) -> str:
+    """" (mostly N page reads)" — what actually consumed the epoch that just ended, or ""."""
+    try:
+        prev = [t for t in oracle_chat.all_turns(host, session)
+                if t.get("epoch", 1) == new_epoch - 1]
+    except Exception:
+        return ""
+    if not prev:
+        return ""
+    total = sum(len(t.get("content") or "") for t in prev)
+    if not total:
+        return ""
+    by_tool = {}
+    for t in prev:
+        if t.get("role") == "tool":
+            by_tool[t.get("name") or "tool"] = (by_tool.get(t.get("name") or "tool", 0)
+                                                + len(t.get("content") or ""))
+    if not by_tool:
+        return ""
+    name, chars = max(by_tool.items(), key=lambda kv: kv[1])
+    share = round(100 * chars / total)
+    if share < 40:
+        return ""
+    n = sum(1 for t in prev if t.get("role") == "tool" and (t.get("name") or "tool") == name)
+    return f" — {share}% of it was {n} {name} result{'s' if n != 1 else ''}, not the conversation"
+
+
 def _call_signatures(turns) -> list:
-    """(tool, arguments) for every call already made in this exchange — i.e. since the last user
-    message. Earlier topics do not count: asking about a page, then asking again after navigating
-    somewhere else, is a legitimate repeat and must not be blocked."""
+    """(tool, arguments) for calls made since the last user message OR the last change of state.
+
+    Two boundaries, both load-bearing.
+
+    The user message: asking about a page, then asking again later, is a legitimate repeat.
+
+    The state change is the one the first version got wrong, and it broke a real turn. The model was
+    building a test run: it opened the wizard, went to the presets library to look something up, and
+    then navigated BACK to the wizard — the obviously correct move. The guard refused it, because
+    the same navigation had been issued before the detour, and told it "the result did not change".
+    The result had every reason to change; it was on a different page by then. It tried once more,
+    was refused again, and gave up with a summary instead of a run.
+
+    So repetition only means "stuck" when NOTHING happened in between. Anything that alters where we
+    are or what the page contains — navigate, goto, click, type_text — resets the count, because
+    after it the same call is a different question. What remains guarded is the actual failure mode:
+    re-reading or re-screenshotting an unchanged page, over and over."""
     sigs = []
     for t in reversed(turns):
         if t.get("role") == "user":
             break
         for c in (t.get("tool_calls") or []):
-            sigs.append((c["function"]["name"], (c["function"].get("arguments") or "").strip()))
+            name = c["function"]["name"]
+            args = (c["function"].get("arguments") or "").strip()
+            if _changes_state(name, args):
+                return sigs                # everything before this happened on a different page
+            sigs.append((name, args))
     return sigs
+
+
+def _changes_state(name: str, args: str) -> bool:
+    """Did this call alter where we are or what is on screen?"""
+    if oracle_tools.is_acting(name):
+        return True
+    if name != "site_call":
+        return False
+    return bool(_try_json(args).get("fn") in _STATEFUL_SITE_FNS)
+
+
+# Site helpers that move or change the page. Kept as a name set rather than read from the manifest's
+# `acts` flag so that a pack author who forgets the flag still gets correct loop detection; the flag
+# governs PERMISSION, this governs whether a repeat is suspicious.
+_STATEFUL_SITE_FNS = {"goto", "navigate", "click", "submit"}
 
 
 def _acting_note(can_act, act_mode: str = "") -> str:
@@ -1110,6 +1177,33 @@ def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool,
             return
         yield from _chat_steps(host, session, system, page, tools, can_act, debug, helpers,
                                act_mode)
+
+
+# ~15k tokens. The slot holds 131,072 (262,144 across 2 slots), so one tool result the model
+# deliberately asked for can afford this easily. The previous 20,000 was set by feel, not by the
+# budget: it capped a whole conversation at ~16% of the slot and cut `design_context` mid-JSON.
+TOOL_RESULT_CHARS = int(os.environ.get("ORACLE_TOOL_RESULT_CHARS", "60000"))
+
+
+def _clip_tool_result(text: str, name: str = "") -> str:
+    """Cap a tool result, and SAY SO when it is cut.
+
+    The silent version of this cost a whole turn. `design_context` returns JSON from six endpoints;
+    it came back at exactly 20000 characters, sliced mid-object, with nothing to indicate anything
+    was missing. The model received invalid JSON whose visible part was a complete-looking list of
+    database presets, concluded the workload presets simply were not in the response, and called the
+    same helper twice more hoping for a different answer.
+
+    Every part of that is the harness's fault, not the model's. A cut that leaves no mark is
+    indistinguishable from a short answer, and there is no reasoning that recovers from it."""
+    if len(text) <= TOOL_RESULT_CHARS:
+        return text
+    kept = text[:TOOL_RESULT_CHARS]
+    return (kept + f"\n\n…[CUT: this result was {len(text)} characters and only the first "
+                   f"{TOOL_RESULT_CHARS} are above, so it is incomplete and — if it was JSON — no "
+                   f"longer parseable. What is missing is the END of the result, not the middle. "
+                   f"Calling {name or 'the same tool'} again will return exactly the same thing; "
+                   f"ask for less instead (a filter, a narrower page, one section at a time).]")
 
 
 def _site_call_is_browser(name: str, args: dict, helpers: dict) -> bool:
@@ -1304,7 +1398,8 @@ def chat_tool_results(host: str, results: list, url: str = "", title: str = "",
             continue                      # a stale reply from an abandoned loop
         # A tool that took a screenshot sends it back too, so the conversation can SHOW what it
         # looked at. The model still only ever sees the reading.
-        oracle_chat.append(host, "tool", str(r.get("content", ""))[:20000],
+        oracle_chat.append(host, "tool", _clip_tool_result(str(r.get("content", "")),
+                                                           r.get("name", "")),
                            tool_call_id=cid, name=r.get("name", ""), session=session,
                            image=str(r.get("image", ""))[:2_000_000])
     still = oracle_chat.pending_tools(host, session)
@@ -1785,7 +1880,8 @@ class Handler(BaseHTTPRequestHandler):
             s = (q.get("session", [oracle_chat.MAIN])[0] or oracle_chat.MAIN).strip()
             self._send({"host": h, "session": s, "epoch": oracle_chat.epoch(h, s),
                         "actions": oracle_chat.actions_allowed(h),
-                        "turns": [{"role": t["role"], "content": t.get("content", ""),
+                        "turns": [{"role": t["role"],
+                                   "content": t.get("display") or t.get("content", ""),
                                    "at": t.get("at", 0),
                                    "tool": t.get("name", ""),
                                    "image": t.get("image", ""),

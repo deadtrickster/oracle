@@ -32,7 +32,19 @@ CHAT_DIR = Path(os.environ.get(
     str(Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "oracle" / "chat")))
 # Budget for ONE epoch, in characters of transcript. Crossing it starts a new epoch rather than
 # rewriting history (see above).
-CHAT_MAX_CHARS = int(os.environ.get("ORACLE_CHAT_MAX_CHARS", "24000"))
+# Raised from 24k after a real conversation rolled after THREE questions. The turns were not the
+# problem: three read_page calls on Gmail, each capped at 8k, were 24k on their own — the whole
+# budget — before anyone had said anything. A page dump is transient evidence and it competes with
+# the conversation for the same allowance, so on a heavy page the allowance is spent by the tools.
+#
+# 60k chars is ~15k tokens. Against a 128k-token slot carrying a ~6k-token prefix that is still
+# conservative, and growth inside an epoch is incremental anyway — the prefix cache means only the
+# new turns get processed, so a longer epoch costs prompt processing once per turn, not per epoch.
+# ~50k tokens of transcript, against a 131,072-token slot carrying a ~6k-token prefix. That leaves
+# ample room for the answer and still bounds a runaway conversation. 24k, then 60k, were both chosen
+# without reference to the actual slot size — the first rolled a real conversation after three
+# questions, and neither used more than a sixth of what was available.
+CHAT_MAX_CHARS = int(os.environ.get("ORACLE_CHAT_MAX_CHARS", "200000"))
 CHAT_MAX_TURNS = int(os.environ.get("ORACLE_CHAT_MAX_TURNS", "40"))
 
 _locks: dict = {}
@@ -105,7 +117,7 @@ def epoch(host: str, session: str = MAIN) -> int:
 
 def append(host: str, role: str, content: str, tool_calls: list | None = None,
            tool_call_id: str = "", name: str = "", session: str = MAIN,
-           image: str = "") -> dict:
+           image: str = "", display: str = "") -> dict:
     """Add a turn. Returns {"epoch": n, "rolled": bool} — `rolled` means this turn began a new
     epoch because the previous one was full.
 
@@ -142,6 +154,14 @@ def append(host: str, role: str, content: str, tool_calls: list | None = None,
         # transcript you cannot audit, so the UI keeps the image.
         if image:
             turn["image"] = image[:2_000_000]
+        # What a PERSON should see, when that differs from what the model is given. A turn carries
+        # both because they are genuinely different documents: the model needs the framing and the
+        # vision model's full reading; the user needs to recognise the thing they just asked for.
+        # Showing them the composed prompt — instructions, provenance caveats, a paragraph of
+        # transcribed pixels — makes their own message unreadable and buries the picture it is
+        # about. `content` stays authoritative for the model; `display` is only ever cosmetic.
+        if display and display != content:
+            turn["display"] = display[:4000]
         d["turns"].append(turn)
         _write(host, d, session)
         return {"epoch": ep, "rolled": rolled}

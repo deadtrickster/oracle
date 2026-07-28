@@ -12,6 +12,7 @@ Claim 2 is the one that would be embarrassing to get wrong, so it is tested from
 attacker-ish model would take it: a plausible-looking procedure that simply is not on the list.
 """
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -57,8 +58,20 @@ def main():
           "click" not in names and "navigate" not in names, str(names))
     site = [t for t in tools if t["function"]["name"] == "site_call"][0]
     enum = site["function"]["parameters"]["properties"]["fn"]["enum"]
-    check("enum lists exactly the manifest's functions", set(enum) == set(h["functions"]),
-          f"{sorted(enum)} vs {sorted(h['functions'])}")
+    reading = {n for n, s in h["functions"].items() if not s.get("acts")}
+    acting = {n for n, s in h["functions"].items() if s.get("acts")}
+    check("there ARE acting helpers to gate", bool(acting), "otherwise this proves nothing")
+    # A site helper must not be a way around the per-host gate. If `acts: true` did not remove a
+    # function from the enum, a pack author could hand the model a click by another name.
+    check("read-only helpers are offered when actions are off", set(enum) == reading,
+          f"{sorted(enum)} vs {sorted(reading)}")
+    check("acting helpers are ABSENT when actions are off", not (set(enum) & acting),
+          f"leaked: {sorted(set(enum) & acting)}")
+    enum_on = [t for t in oracle_tools.for_host(True, h)
+               if t["function"]["name"] == "site_call"][0][
+        "function"]["parameters"]["properties"]["fn"]["enum"]
+    check("acting helpers appear once the host is enabled", set(enum_on) == set(h["functions"]),
+          f"{sorted(enum_on)}")
 
     # --- the gate ----------------------------------------------------------------------
     allowed = "/cloud.v1.api.TestRunService/ListTestRuns"
@@ -94,6 +107,16 @@ def main():
     check("no mutating-looking procedure survived generation", not muties, str(muties))
     check("every entry carries a request schema",
           all("request" in v for v in ops.values()))
+
+    # Every procedure the helper source calls must be on the generated allowlist. Without this a
+    # helper compiles, ships, and is refused at runtime by our own gate — a failure that looks like
+    # a permissions bug and is actually a typo. It also fires when the API drops an operation and
+    # the allowlist is regenerated: the helper that used it becomes dead on the next generation,
+    # and this says so at build time rather than mid-conversation.
+    used = set(re.findall(r'"(/cloud\.v1\.api\.[A-Za-z]+Service/[A-Za-z]+)"', h["code"]))
+    check("helpers call at least a few procedures", len(used) > 5, str(len(used)))
+    check("every procedure a helper calls is allowlisted",
+          not (used - gate["values"]), f"refused at runtime: {sorted(used - gate['values'])}")
 
     # --- the local branch: list_operations must not need a browser ---------------------
     import importlib.util

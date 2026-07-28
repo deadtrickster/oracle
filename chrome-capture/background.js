@@ -53,6 +53,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       ([tab]) => capture(tab, { note: msg.note }).then(sendResponse));
     return true;
   }
+  if (msg.type === "oracle:chatClosed") {
+    if (sender.tab) markChatTab(sender.tab.id, false);
+    return false;
+  }
   if (msg.type === "chatConfirm") {
     const finish = pendingConfirms.get(msg.id);
     if (finish) finish(Boolean(msg.ok));
@@ -341,10 +345,61 @@ async function groundOnce(tab, mode, selection) {
 
 // ---------------------------------------------------------------- per-host chat
 
+// Tabs the panel is open in, so a navigation can put it back.
+//
+// The panel is injected into the page, so ANY navigation destroys it — including the model's own
+// `navigate`. That produced the worst possible moment for it to vanish: mid-turn, on a step the
+// model took deliberately, with the answer still coming. The conversation itself was never lost
+// (it lives on the receiver), but you had to know that, and reopening by hand to discover the turn
+// had continued without you is not a thing a user should have to learn.
+//
+// chrome.storage.session, not a module variable: MV3 kills the worker whenever it feels like it,
+// and a Set in memory would forget which tabs mattered exactly when a slow turn needed it most. It
+// clears on browser restart, which is the right lifetime — a panel open yesterday should not
+// reappear on a tab you opened today.
+const CHAT_TABS = "oracleChatTabs";
+
+async function chatTabs() {
+  try {
+    return (await chrome.storage.session.get(CHAT_TABS))[CHAT_TABS] || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function markChatTab(tabId, open) {
+  try {
+    const t = await chatTabs();
+    if (open) t[tabId] = true; else delete t[tabId];
+    await chrome.storage.session.set({ [CHAT_TABS]: t });
+  } catch (_) { /* reopening is a convenience; never break the chat over it */ }
+}
+
 async function openChat(tab) {
   if (!scriptableTab(tab)) { notify("Chat needs an http/https page."); return; }
   await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "chat.js"] });
+  await markChatTab(tab.id, true);
 }
+
+// Put the panel back after the page underneath it was replaced, and restore the transcript so it
+// returns showing the conversation rather than an empty box.
+async function reopenChat(tab) {
+  if (!scriptableTab(tab)) return;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id },
+                                           files: ["cite.js", "chat.js"] });
+    await chatLoad(tab);
+  } catch (_) { /* the tab may have gone again already */ }
+}
+
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  // "complete" only: injecting into a document that is still being replaced loses the panel again.
+  if (info.status !== "complete") return;
+  const open = await chatTabs();
+  if (open[tabId]) await reopenChat(tab);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => { markChatTab(tabId, false); });
 
 // Which conversation the panel is showing. "main" is the chat you type in; "quick" is where
 // explain / fact-check / a region sent to vision land, so those stop being cards that vanish and
@@ -487,6 +542,25 @@ function keepaliveStop() {
 
 // injected: read the page, or one part of it
 function toolReadPage(selector) {
+  // Hide Oracle's own UI for the duration of the read, exactly as a screenshot does.
+  //
+  // The panel normally hangs off <html> rather than <body>, so a plain read never saw it — but the
+  // model has used `read_page` with `:root`, which does, and since the panel is now restored after
+  // every navigation it is reliably present. Reading its own transcript back in as page content is
+  // the worst kind of context pollution: it is plausible, it is about the right topic, and it
+  // rewards the model for describing what it already said.
+  // Inlined deliberately: this function is serialised and injected on its own, so a call to a
+  // sibling defined here in the worker would be a ReferenceError in the page.
+  // Declared INSIDE the function: this is serialised and injected on its own, so a
+  // module-scope constant would be a ReferenceError in the page. ~6k tokens against a
+  // 131,072-token slot; the old 8,000 was ~1.5% of it and made a heavy page unreadable in
+  // one go, pushing the model toward a screenshot for text it could have been handed.
+  const READ_PAGE_CHARS = 24000;
+  const ours = [...document.querySelectorAll("[data-oracle-ui]")];
+  const prev = ours.map((n) => n.style.display);
+  ours.forEach((n) => { n.style.display = "none"; });
+  const restore = () => ours.forEach((n, i) => { n.style.display = prev[i]; });
+
   const el = selector ? document.querySelector(selector) : document.body;
   if (!el) {
     // A miss must be as useful as a hit, or the model just guesses another selector — which is
@@ -494,12 +568,14 @@ function toolReadPage(selector) {
     // matches", and had nothing to correct itself with. Selectors are GUESSES about a page nobody
     // showed it; the reply should make the next attempt unnecessary rather than merely possible.
     const text = (document.body.innerText || "").replace(/\s+/g, " ").trim();
+    restore();
     return `no element matches ${selector} — that selector was a guess and the page does not have ` +
            `it. Call read_page with NO selector to get the whole page, which is usually what you ` +
-           `want. Here it is anyway:\n${text.slice(0, 8000)}`;
+           `want. Here it is anyway:\n${text.slice(0, READ_PAGE_CHARS)}`;
   }
   const t = (el.innerText || "").replace(/\s+/g, " ").trim();
-  return t ? t.slice(0, 8000) : "(that element renders no text)";
+  restore();
+  return t ? t.slice(0, READ_PAGE_CHARS) : "(that element renders no text)";
 }
 
 // injected: click by visible text, or by selector
@@ -526,6 +602,18 @@ function toolClick(arg) {
     return `NOT CLICKED: nothing matches ${JSON.stringify(arg.text || arg.selector)}. ` +
            `Clickable labels on this page: ${labels.join(" | ")}`;
   }
+  // A disabled control accepts .click() silently and does nothing, which reads to the model as "I
+  // clicked it and the page ignored me" — and it responded to that by clicking Start a second time
+  // and then deciding the page was stuck. Whether a button is disabled is the single most useful
+  // fact about a click that appears to do nothing, and it is knowable before clicking.
+  const off = el.disabled || el.getAttribute("aria-disabled") === "true" ||
+              el.closest("[disabled], [aria-disabled=true]");
+  if (off) {
+    return `NOT CLICKED: ${JSON.stringify((el.innerText || el.value || el.tagName).trim().slice(0, 60))} ` +
+           `is DISABLED, so clicking it does nothing. This is not a stuck page — the form is not ` +
+           `satisfied yet. Find what it is still missing (required fields, an unfinished step) ` +
+           `rather than clicking again.`;
+  }
   const before = { url: location.href, title: document.title };
   el.scrollIntoView({ block: "center" });
   el.click();
@@ -534,15 +622,60 @@ function toolClick(arg) {
 }
 
 // injected: type into a field
-function toolType(arg) {
+//
+// Setting `el.value` does not type into a React input, and this cost a real run.
+//
+// Observed on the new-run wizard: the model filled in the run name, the tool replied "its value is
+// now 'orioledb tpcc baseline'", it clicked Start, and nothing happened — twice, after which it
+// concluded the page was stuck. It was not stuck. React replaces `value` on the node with its own
+// setter that also updates an internal `_valueTracker`; assigning through it updates the tracker
+// too, so when the input event arrives React compares tracker against value, sees no change, and
+// never dispatches onChange. The DOM said one thing and the application state said another, and the
+// form submitted the state.
+//
+// So write through the NATIVE prototype setter, which React did not override. The tracker keeps the
+// old value, the input event looks like a real change, onChange fires, state updates. Same trick
+// works for Vue and Svelte, which track values the same way.
+//
+// The second bug is worse than the first: the old version "verified" by reading back the property
+// it had just assigned, which cannot disagree. It reported success for an edit the application
+// never saw. Verification now happens AFTER a tick, so a framework that re-renders and reverts the
+// field is caught and reported — the tool tells you it failed instead of letting the model spend
+// three steps discovering it.
+async function toolType(arg) {
   const el = document.querySelector(arg.selector);
-  if (!el) return `NOT TYPED: no element matches ${arg.selector}`;
+  if (!el) {
+    const fields = [...document.querySelectorAll("input, textarea, select")]
+      .filter((n) => n.getClientRects().length)
+      .map((n) => n.getAttribute("placeholder") || n.getAttribute("name") || n.id || n.tagName)
+      .filter(Boolean).slice(0, 25);
+    return `NOT TYPED: no element matches ${arg.selector}. Fields on this page: ${fields.join(" | ")}`;
+  }
+  if (el.disabled || el.getAttribute("aria-disabled") === "true") {
+    return `NOT TYPED: ${arg.selector} is disabled. Something earlier in the form probably has to ` +
+           `be set first — read the form's state rather than retrying this.`;
+  }
+  const want = arg.clear === false ? (el.value || "") + (arg.text || "") : (arg.text || "");
   el.focus();
-  if (arg.clear !== false) el.value = "";
-  el.value = (el.value || "") + (arg.text || "");
+  const proto = el instanceof HTMLTextAreaElement
+    ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const native = Object.getOwnPropertyDescriptor(proto, "value");
+  if (native && native.set) native.set.call(el, want);
+  else el.value = want;
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
-  return `typed into ${arg.selector}; its value is now ${JSON.stringify((el.value || "").slice(0, 200))}`;
+
+  // Let the framework re-render, then look at what is actually there.
+  await new Promise((r) => setTimeout(r, 120));
+  const got = el.value || "";
+  if (got !== want) {
+    return `NOT TYPED: the field did not keep the text — it now reads ${JSON.stringify(got.slice(0, 80))} ` +
+           `instead of ${JSON.stringify(want.slice(0, 80))}. The page is controlling this input and ` +
+           `rejected or rewrote the value. Do NOT retry the same way; check the form's state and ` +
+           `whether some other field has to be set first.`;
+  }
+  return `typed into ${arg.selector}; the field now reads ${JSON.stringify(got.slice(0, 200))} ` +
+         `and the page accepted it (verified after re-render)`;
 }
 
 // ---------------------------------------------------------------- confirmed actions
@@ -677,7 +810,7 @@ async function runSiteCall(call, tab) {
   // Returned as JSON text, because that is the point of the whole exercise: the model reads exact
   // values rather than transcribing them off a rendering of the same values.
   const text = JSON.stringify(out, null, 1);
-  const LIMIT = 24000;
+  const LIMIT = 60000;
   return text.length > LIMIT
     ? text.slice(0, LIMIT) + `\n…[truncated at ${LIMIT} chars of ${text.length}. Narrow the ` +
       `request — most list operations take a page size and a filter.]`

@@ -798,6 +798,9 @@
     clearInterval(ticker);
     host.remove();
     window.__oracleChat = null;
+    // Closing is a decision, and it has to outlive the page: without this the worker would restore
+    // the panel on the next navigation and closing it would look broken.
+    try { chrome.runtime.sendMessage({ type: "oracle:chatClosed" }); } catch (_) {}
   });
   $(".newt").addEventListener("click", () => {
     if (streaming) return;

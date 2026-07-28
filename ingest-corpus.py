@@ -118,6 +118,21 @@ KBS = [
                          "prob-ds/papers/*.pdf"]),   # HLL, count-min, xor/fuse, minhash
     ("books", "book", ["books/*.md", "books/*.txt", "books_raw/*.pdf", "books_raw/*.PDF",
                        "books_raw/*.epub"]),
+    # TPC benchmark specifications (fetch-tpc-specs.sh, 2026-07-29). Their own KB rather than a
+    # corner of `papers`, because they answer a different KIND of question: a paper argues, a spec
+    # DEFINES — what a transaction must do, which mix ratio is required, how tpmC is computed. When
+    # someone asks "does this run conform to TPC-C", the answer has to come from the normative text,
+    # and it should be obvious in the citation that it did.
+    #
+    # `book`, not `paper`: the paper parser is tuned for two-column academic PDFs, and these are
+    # 100-500 page single-column standards with numbered clauses — closer to a manual. The book
+    # parser also keeps page positions, which matter when the answer is "clause 5.2.3" and the
+    # reader wants to open it.
+    #
+    # Includes TPC-B, which is formally obsolete: pgbench is a TPC-B implementation, so it is the
+    # reference for a workload still being run daily. The other retired specs are deliberately not
+    # here — see fetch-tpc-specs.sh.
+    ("tpc", "book", ["tpc_raw/*.pdf", "tpc_raw/*.PDF"]),
     # ML shelf, English born-digital half (~/Documents/Books/ml, symlinked into corpus/ml_raw with
     # clean names). Real text layers -> DeepDoc book parser (positions + figures).
     ("ml-books", "book", ["ml_raw/*.pdf"]),

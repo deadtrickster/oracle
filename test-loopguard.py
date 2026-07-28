@@ -86,6 +86,55 @@ s = recv._call_signatures(varied)
 check("clicking through different tabs is never blocked",
       all(s.count(x) < 2 for x in s), str(s))
 
+# --- the regression that broke a real turn ------------------------------------------
+# From stage.cloud.stroppy.io, 2026-07-28: the model opened the new-run wizard, went to the presets
+# library to look something up, then navigated BACK to the wizard — obviously correct. The guard
+# refused it as a repeat and told it "the result did not change", when it was on a different page
+# by then. It retried once, was refused again, and gave up with a summary instead of a run.
+GOTO_NEW = '{"fn":"goto","args":{"path": "/t/default/runs/new"}}'
+detour = [
+    {"role": "user", "content": "i want to start a new orioledb tpcc test"},
+    {"role": "assistant", "tool_calls": [call("site_call", GOTO_NEW)]},
+    {"role": "tool", "content": "routed"},
+    {"role": "assistant", "tool_calls": [call("site_call", '{"fn":"form_state"}')]},
+    {"role": "tool", "content": "…"},
+    # the detour
+    {"role": "assistant",
+     "tool_calls": [call("site_call", '{"fn":"goto","args":{"path": "/t/default/presets/workload"}}')]},
+    {"role": "tool", "content": "routed"},
+    {"role": "assistant", "tool_calls": [call("read_page", "{}")]},
+    {"role": "tool", "content": "…presets…"},
+]
+sigs = recv._call_signatures(detour)
+check("going BACK after a detour is not a repeat", sigs.count(("site_call", GOTO_NEW)) == 0,
+      f"{sigs} — the earlier goto is on the far side of a navigation")
+
+# ...but re-reading the SAME page with nothing in between still counts.
+stuck = [
+    {"role": "user", "content": "what does this say?"},
+    {"role": "assistant", "tool_calls": [call("read_page", "{}")]},
+    {"role": "tool", "content": "…"},
+    {"role": "assistant", "tool_calls": [call("read_page", "{}")]},
+    {"role": "tool", "content": "…identical…"},
+]
+check("re-reading an unchanged page is still caught",
+      recv._call_signatures(stuck).count(("read_page", "{}")) >= 2,
+      str(recv._call_signatures(stuck)))
+
+check("goto counts as a state change", recv._changes_state("site_call", GOTO_NEW))
+check("form_state does NOT count as a state change",
+      not recv._changes_state("site_call", '{"fn":"form_state"}'))
+check("click counts as a state change", recv._changes_state("click", '{"text":"X"}'))
+check("read_page does not", not recv._changes_state("read_page", "{}"))
+
+# --- truncation must announce itself ------------------------------------------------
+short = recv._clip_tool_result("x" * 100, "design_context")
+check("a result under the cap is untouched", short == "x" * 100)
+long = recv._clip_tool_result("y" * (recv.TOOL_RESULT_CHARS + 5000), "design_context")
+check("an over-long result is marked as CUT", "[CUT:" in long, long[-120:])
+check("the mark names the tool so a retry is not tempting", "design_context" in long)
+check("and says retrying returns the same thing", "same thing" in long)
+
 print()
 print(f"{len(FAIL)} failed" if FAIL else "all passed")
 sys.exit(1 if FAIL else 0)

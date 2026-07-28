@@ -57,4 +57,15 @@ else
 	fail=1
 fi
 
+# Injected functions are serialised and run in the PAGE, so they cannot reference anything in this
+# file's module scope. Syntax checking cannot see that — the failure is a runtime ReferenceError
+# inside the page, where nothing here is watching.
+if node check-injected.mjs >/dev/null 2>&1; then
+	printf '  ok    %-20s (injected scope)\n' background.js
+else
+	node check-injected.mjs | grep -E '^(FAIL|      )' || true
+	printf '  FAIL  %-20s (injected scope)\n' background.js
+	fail=1
+fi
+
 exit "$fail"

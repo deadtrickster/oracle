@@ -48,6 +48,23 @@ tabs and carried on. A failing tool that only says "not found" leaves a model wi
 itself with, so it guesses again. Every step shows `✓`/`✗` with its reason, so the model's prose can
 be checked against what actually happened.
 
+On a site we know, it stops clicking and starts **asking**. A site pack can ship named functions
+that run in the page — so instead of screenshotting a dashboard and reading numbers off pixels, the
+model calls the site's own read-only API and gets the values, or runs a PromQL query scoped
+server-side to one benchmark run. The allowlist is *generated* from the site's OpenAPI spec, keeping
+only operations the spec itself marks side-effect-free, that are GETs, and that exist in its
+generated client: 60 of 143 methods, with `StartTestRun` and `OpenShell` firmly outside. The model
+picks which function to call; it never writes the code.
+
+That matters because transcription is where confident answers go wrong: the same run has been
+reported at three different throughputs from three different tabs, and a `p95` read off a legend
+that only shows p50/p90/p99. A number from the API does not have that failure mode.
+
+For actions there is a middle setting between "look but don't touch" and "do whatever you like":
+**ask me**. The model picks the target, the page outlines that element, and you press Enter. It
+chooses *which* — the part it is good at, having just read the page — and you decide *whether*,
+which is the part that carries the consequence.
+
 The same detour runs inside a **local Claude Code chat**. Paste a screenshot, or `Read` a `.png`,
 and the shim swaps the vision model in, has it read the picture, swaps the text model back, and
 continues with the reading in context — the text model answers about an image it cannot see, and

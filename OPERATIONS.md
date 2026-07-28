@@ -175,6 +175,7 @@ then re-queue the docs. This is why early ingests took hours.
 | oracle-meta | THIS file, PLAN.md, the operation scripts | corpus/meta |
 | go | official Go docs (effective_go, spec, doc/), Go 101, Go by Example, Little Go Book, astaxie web book | corpus/go |
 | papers / books / links | user's PDFs, books, bookmarked pages | corpus/{papers,books,links} |
+| tpc | TPC benchmark specifications — the 12 current ones plus TPC-B (pgbench is a TPC-B implementation, so it is the reference for a workload still run daily). Obsolete specs and TPC governance documents are deliberately excluded. | corpus/tpc_raw → ~/Documents/Books/TPC |
 
 ## How to ingest new material (tell the user this when asked)
 1. Put files in the right corpus dir:
@@ -218,6 +219,21 @@ then re-queue the docs. This is why early ingests took hours.
 - `ingest-corpus.py` — create KBs + bulk upload + parse + heal. The one command to ingest.
 - `setup-ollama.sh` / `pull-models.sh` — Ollama install/config, model pulls.
 - `setup-nvidia-docker.sh` — NVIDIA container toolkit (already applied).
+- `fetch-tpc-specs.sh` — downloads the current TPC specifications. Online, idempotent, wires the
+  symlink farm. Scrapes the index rather than hardcoding URLs (versions are in the filenames), and
+  splits the page POSITIONALLY at the "Obsolete" heading — the marker is a section header, not a
+  per-row attribute, so grepping the page for `.pdf` silently returns both halves. `--list` to see
+  what it would fetch, `--all` to include the governance documents.
+- `patch-ragflow.sh` — reapplies our fixes inside the pinned RAGFlow container. **Run after any
+  `docker compose down`/`up` or image pull**: container edits survive `docker restart` but not a
+  recreate, and ingestion then starts failing the same way with nobody remembering why it worked.
+  Idempotent, `--check` to report without changing, and it verifies by *executing* the patched code
+  — a `sed` that matched nothing and one that worked look identical to `grep`. Currently: tiktoken
+  `disallowed_special` (a document that merely mentions `<|endoftext|>` killed the task) and NUL →
+  OCR fallback (a damaged text layer must be re-read, never stripped). Both are written up for
+  upstreaming in `~/Projects/ragflow/stories/oracle-container-patches.md`.
+- `ingest-status.py` — per-KB progress, chunk counts, and what failed. Use this rather than hand-
+  rolled SQL against RAGFlow's MySQL.
 
 ## Offline drill (before flying)
 1. Disable networking.

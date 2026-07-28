@@ -120,6 +120,133 @@ check("downsampling preserves WHEN it fell over", cliff > 0.5 && cliff < 0.7, `a
 check("the scope is reused, not re-minted per query",
   !calls.some((c) => c.url.endsWith("/GrafanaSession")), JSON.stringify(calls.map((c) => c.url)));
 
+// --- bundled questions: one call, several endpoints, failures reported per part -----
+calls.length = 0;
+const report = await run("run_report", {});
+check("run_report gathers the whole run in one call",
+  report.overview && report.metrics && report.run && report.quota,
+  JSON.stringify(Object.keys(report)));
+const hit = calls.map((c) => c.url.split("/").pop());
+check("it asks for overview, metrics, run and quota",
+  ["GetTestRunOverview", "GetRunMetrics", "GetTestRun", "GetRunQuotaUsage"]
+    .every((p) => hit.includes(p)), JSON.stringify(hit));
+check("it resolves the tenant once and reuses it",
+  hit.filter((p) => p === "GetTenant").length === 0, "tenant should already be cached");
+
+// One endpoint failing must not lose the three that worked — the common real case is a permission
+// the user lacks on ONE of these, and losing the whole report to it would be a bad trade.
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  if (String(url).endsWith("/GetRunQuotaUsage")) {
+    return { ok: false, status: 403, text: async () => JSON.stringify({ code: "permission_denied" }) };
+  }
+  return realFetch(url, init);
+};
+const partial = await run("run_report", {});
+check("a failing part does not sink the others",
+  Boolean(partial.overview && partial.metrics), JSON.stringify(Object.keys(partial)));
+check("and the failing part says so", Boolean(partial.quota?.error),
+  JSON.stringify(partial.quota));
+globalThis.fetch = realFetch;
+
+calls.length = 0;
+const design = await run("design_context", {});
+check("design_context gathers what a run is configured FROM",
+  design.workloads && design.databasePresets && design.quotas && design.stroppyVersions,
+  JSON.stringify(Object.keys(design)));
+const dhit = calls.map((c) => c.url.split("/").pop());
+check("it asks the stroppy BINARY what it can run", dhit.includes("ProbeCatalog"),
+  JSON.stringify(dhit));
+
+// --- goto: must move the app WITHOUT reloading it ---------------------------------
+// A stub that behaves like react-router's BrowserRouter: it listens for popstate and re-renders
+// from window.location. If goto only set the URL, `routed` would stay false — which is exactly the
+// failure that looks like success, because the address bar would be right and the view stale.
+let routed = false;
+globalThis.PopStateEvent = class { constructor(t, o) { this.type = t; Object.assign(this, o); } };
+const routerListeners = [];
+globalThis.addEventListener = (t, fn) => { if (t === "popstate") routerListeners.push(fn); };
+globalThis.dispatchEvent = (e) => { routerListeners.forEach((fn) => fn(e)); return true; };
+globalThis.addEventListener("popstate", () => { routed = true; });
+globalThis.history = {
+  pushState: (_s, _t, url) => {
+    const u = new URL(url, "https://cloud.stroppy.io");
+    globalThis.location.pathname = u.pathname;
+    globalThis.location.search = u.search;
+    globalThis.location.href = "https://cloud.stroppy.io" + u.pathname + u.search;
+  },
+};
+globalThis.document.querySelector = () => ({ innerText: "Runs" });
+
+let reloaded = false;
+globalThis.location.assign = () => { reloaded = true; };
+globalThis.location.reload = () => { reloaded = true; };
+
+const nav = await run("goto", { path: "/t/default/runs?db=orioledb", wait: 100 });
+check("goto reports the new location", nav.url?.includes("/t/default/runs?db=orioledb"),
+  JSON.stringify(nav));
+check("goto drives the app's router", routed === true, "popstate never reached the router");
+check("goto does NOT reload the document", reloaded === false, "it triggered a full page load");
+check("goto reports whether the view actually changed", nav.changed === true, JSON.stringify(nav));
+
+const off = await run("goto", { path: "https://evil.example/x" });
+check("goto refuses to leave the site", Boolean(off.error), JSON.stringify(off));
+const rel = await run("goto", { path: "runs" });
+check("goto refuses a path that is not absolute", Boolean(rel.error), JSON.stringify(rel));
+
+// --- form_state: the FORM, not the site furniture ---------------------------------
+// Reproduces the wizard from the failed transcript: a nav sidebar full of links, and a form whose
+// database choice is a <button> card carrying aria-pressed rather than a <select>.
+const mk = (tag, props = {}) => ({
+  tagName: tag.toUpperCase(),
+  attrs: props.attrs || {},
+  innerText: props.text || "",
+  value: props.value,
+  disabled: props.disabled || false,
+  options: props.options,
+  _chrome: props.chrome || false,
+  getClientRects: () => ({ length: 1 }),
+  getAttribute(a) { return this.attrs[a] ?? null; },
+  closest(sel) {
+    if (sel.includes("nav") && this._chrome) return { tag: "nav" };
+    return null;
+  },
+});
+const navLinks = ["stroppy-cloud", "default", "Test Runs", "admin", "Dashboard", "Quotas"]
+  .map((t) => mk("a", { text: t, chrome: true, attrs: { href: "/x" } }));
+const nameField = mk("input", { attrs: { placeholder: "e.g. pg16 tpcc baseline", type: "text" }, value: "" });
+const dbCards = [
+  mk("button", { text: "OrioleDB single", attrs: { "aria-pressed": "true" } }),
+  mk("button", { text: "OrioleDB HA", attrs: { "aria-pressed": "false" } }),
+  mk("button", { text: "Postgres 17", attrs: { "aria-pressed": "false" } }),
+];
+const main = {
+  querySelectorAll: (sel) => {
+    if (sel.includes("input")) return [nameField];
+    if (sel.includes("button")) return dbCards;
+    return [];
+  },
+};
+globalThis.document.querySelector = (sel) =>
+  (sel.includes("main") ? main : null);
+globalThis.document.querySelectorAll = (sel) => (sel === "a[href]" ? navLinks : []);
+globalThis.CSS = { escape: (s) => s };
+
+const form = await run("form_state", {});
+check("form_state finds the text field", form.controls?.length === 1, JSON.stringify(form.controls));
+check("it reports the choice CARDS, not just inputs", form.choices?.length === 3,
+  JSON.stringify(form.choices));
+check("it says which choice is already selected",
+  form.choices?.find((c) => c.text === "OrioleDB single")?.selected === true,
+  JSON.stringify(form.choices));
+check("and which are not",
+  form.choices?.find((c) => c.text === "OrioleDB HA")?.selected === false);
+check("navigation is kept OUT of the form", !form.choices.some((c) => c.text === "Dashboard"),
+  JSON.stringify(form.choices.map((c) => c.text)));
+check("navigation is still available, listed separately", form.links?.length === 6,
+  String(form.links?.length));
+check("it says which region it read", form.region === "main content", form.region);
+
 const bad = await run("no_such_function", {});
 check("an unknown function name is refused, not evaluated",
   /no such site function/.test(bad.error || ""), JSON.stringify(bad));

@@ -820,6 +820,43 @@ the number. (Protocol §5: a new idea goes to §H, not §G — the freeze is the
 - **Retire retrieval-by-default:** retrieve when the question is about the corpus, look when it is
   about the page. The model is what knows which.
 
+### G6.1 — SITE TOOLS: the website's own API as a tool surface ✅ (DESIGN §6.3.1–6.3.3, 2026-07-29)
+
+His framing: *"we are free to look at panel code and instruct the model to use javascript and
+internal routings"*, and later *"site-pack does all the dirty tricks here while we work with my
+local qwen"* — the panel will host the chat itself once the model moves to Claude, so per-site
+scripting is the product, not overspecialisation.
+
+- **`site-packs/<domain>.js`** — named functions, run in the page's MAIN world (where the app's
+  credentials and client live), called BY NAME. The model never writes JavaScript. Source ships with
+  each tool request from the receiver, so editing a helper needs no extension reload.
+- **Generated allowlist** — `scripts/gen-readonly-api.py`: `NO_SIDE_EFFECTS` ∩ GET ∩ exists-in-
+  generated-Connect-code. 60 of 143 methods; `StartTestRun`/`DeleteTestRun`/`OpenShell` excluded.
+  Enforced on the RECEIVER, before the call leaves. A standing test asserts every procedure the
+  helper source calls is on the list.
+- **PromQL** — `/public/metrics/` scopes every query server-side to one run. The model controls the
+  question, never the scope. This is the fix for numbers read off pixels (2.36K/841/1.8K tx/s for
+  one run; a "p95" read off a legend showing p50/p90/p99).
+- **Safe click (his idea)** — per-host acting is now `off | confirm | allow`. Under confirm the model
+  picks the element, the page outlines it, the human presses Enter; declining is reported as a
+  result, not an error.
+- **Harness bugs this surfaced**, each of which had produced a wrong answer that looked right:
+  `type_text` wrote `el.value`, which React's value tracker swallows — the field showed the text,
+  React state stayed empty, Start did nothing, and the tool reported success by reading back the
+  property it had just assigned; a disabled button accepted a silent click; a repeat-guard blocked
+  a legitimate navigate-back; a 20,000-char cut landed mid-JSON with no marker; context caps were
+  set at ~16% of a 131,072-token slot; injected functions cannot see module scope (now checked by
+  `chrome-capture/check-injected.mjs`, wired into `check.sh`).
+
+### G7 — TPC specifications ingested (2026-07-29)
+
+`fetch-tpc-specs.sh` → `~/Documents/Books/TPC` → `corpus/tpc_raw` → KB `tpc` (book parser). 13
+specs: the 12 current ones plus TPC-B, because **pgbench is a TPC-B implementation** (his call) and
+is therefore the reference for a workload still run daily. The index page has a second, obsolete
+table whose marker is a section HEADING — grepping the page for `.pdf` silently returns both halves,
+so the split is positional. Governance documents (bylaws, CLA, membership, policies, procedures,
+fair use) excluded: they answer no technical question and only dilute retrieval.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy
@@ -1285,12 +1322,20 @@ Root cause (verified 2026-07-25): NUL is NOT real content — this PDF has a bro
 (`pdftotext` yields NUL on 29,720 lines too), so it's **extraction corruption**, and the fix belongs
 in the PARSER, not the storage adapter (a DB-layer strip would leave the garbage in the embeddings +
 displayed page). NOT a DeepDoc-specific bug — any extractor hits it on this PDF.
-- [ ] **POLICY (his call 2026-07-25): a broken text layer must trigger OCR FALLBACK, not a strip.**
+- [x] **POLICY (his call 2026-07-25): a broken text layer must trigger OCR FALLBACK, not a strip.**
       Stripping garbled chars *deletes* real content (leaves holes/gibberish where text should be);
       OCR *recovers* it from the page image, which is already rendered. NUL/control chars cannot be
       legitimate content, so their presence is a hard signal that pdfminer's CID→Unicode mapping
       failed for that region → re-OCR that region and use the OCR text, discarding the corrupt
       text-layer chars. Consistent with "reocr is the way" (G3.9).
+- [x] **DONE 2026-07-29 (Python side).** Applied as patch 2 of `patch-ragflow.sh`, exactly as
+      specified below: an absolute `any('\x00' in c['text'])` check inserted BEFORE the existing
+      strategies, setting `self.page_chars[pi] = []` so the OCR path supplies the text. Absolute and
+      not a ratio, for the reason recorded here — the existing strategies sample 200 chars and
+      compare against 0.3, and a single NUL trips no ratio while being enough to fail the insert.
+      Verified by executing the patched module in the container. **Go `internal/deepdoc` still
+      needs the mirror** (`util/garbled.go`, `IsGarbledText` is ratio-based there too) before G4.3;
+      written up for upstreaming in `~/Projects/ragflow/stories/oracle-container-patches.md`.
 - [ ] **Mechanism in `deepdoc/parser/pdf_parser.py`:** the OCR-fallback machinery already exists —
       `_is_garbled_text` decides "this block is garbled → OCR it." The bug is the trigger is a **soft
       0.5 ratio**: a block with a few scattered NULs stays under threshold, never falls back, and the
@@ -1301,6 +1346,11 @@ displayed page). NOT a DeepDoc-specific bug — any extractor hits it on this PD
 - [ ] Sequencing: apply, then container restart to reload the parser — the restart re-queues the ~104
       docs still parsing, so **do it after the bulk parse drains**, then re-parse the FAIL(s).
       Deterministic: re-parsing WITHOUT the fix fails again on the same NUL.
+      **State 2026-07-29:** patch applied, restart NOT yet done (13 TPC specs + 1 book were parsing).
+      Restart, then re-parse the one remaining FAIL. NOTE: re-parse is FULL cost here — RAGFlow's
+      page-level reuse is keyed on a digest over the whole chunking config, and ours no longer
+      matches what was stored (`005be96cdb6f0162` vs `e11ca2f17b35f4bb`), so every page-task re-runs
+      and the previous chunks are deleted first. Do not promise "only the failed pages".
 
 ### G4.3 — Switch to the native Go SereneDB engine after ingestion (his plan 2026-07-24)
 
