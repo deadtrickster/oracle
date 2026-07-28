@@ -196,6 +196,12 @@ $("page-vl").addEventListener("click", () => {
 $("exclude-site").addEventListener("click", excludeSite);
 $("refresh-topics").addEventListener("click", loadTopics);
 
+// Debug is OFF by default and deliberately sticky: it echoes the entire composed prompt back into
+// the page, which on a logged-in site is that site's own content.
+const DEBUG_KEY = "oracleDebug";
+chrome.storage.local.get(DEBUG_KEY).then((v) => { $("debug").checked = v[DEBUG_KEY] === true; });
+$("debug").addEventListener("change", (e) => chrome.storage.local.set({ [DEBUG_KEY]: e.target.checked }));
+
 chrome.storage.local.get(PDF_KEY).then((v) => { $("pdf").checked = v[PDF_KEY] !== false; });
 $("pdf").addEventListener("change", (e) => chrome.storage.local.set({ [PDF_KEY]: e.target.checked }));
 

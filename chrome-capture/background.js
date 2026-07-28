@@ -208,9 +208,10 @@ async function ground(tab, mode, selection) {
   observe(selection, OBS[mode] || 0.8, tab.url, tab.title);
   const endpoint = mode === "factcheck" ? "/factcheck" : "/explain";
   const agents_md = await agentsMd(tab.url);
+  const debug = await debugOn();
   const body = mode === "factcheck"
-    ? { claim: selection, url: tab.url, title: tab.title, agents_md }
-    : { selection, url: tab.url, title: tab.title, agents_md };
+    ? { claim: selection, url: tab.url, title: tab.title, agents_md, debug }
+    : { selection, url: tab.url, title: tab.title, agents_md, debug };
   const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode, ev }).catch(() => {});
   try {
     const r = await fetch(RECEIVER + endpoint, {
@@ -236,6 +237,19 @@ async function ground(tab, mode, selection) {
 // Cached in chrome.storage, INCLUDING MISSES. Nearly every site lacks the file, and without a
 // negative entry every explain/vision would re-request a 404 before it could answer.
 const SITE_TTL = 24 * 3600 * 1000;
+const DEBUG_KEY = "oracleDebug";
+
+// "I'm not sure it ever injects page context" should be answerable by looking, not by reading code.
+// With debugging on, both sides report what they did: the extension says what it captured and sent,
+// the receiver says what it composed. Same event stream, one tab in the card.
+async function debugOn() {
+  return (await chrome.storage.local.get(DEBUG_KEY))[DEBUG_KEY] === true;
+}
+function dbg(tab, data) {
+  chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode: "vision",
+                                    ev: { event: "debug", data: { side: "extension", ...data } } })
+    .catch(() => {});
+}
 
 async function agentsMd(url) {
   let host;
@@ -363,7 +377,7 @@ async function visionRegion(msg, tab) {
       body: JSON.stringify({
         image: b64, mime: "image/png", prompt,
         url: tab.url, title: tab.title, page_text: pageText, crop_text: cropText,
-        source: "region", agents_md: await agentsMd(tab.url),
+        source: "region", agents_md: await agentsMd(tab.url), debug: await debugOn(),
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
@@ -386,6 +400,84 @@ async function visionRegion(msg, tab) {
 // the datasource and dashboard ID, the pixels know which line went vertical at 14:20.
 //
 // Capture BEFORE injecting the card, or the overlay ends up inside the screenshot it is about.
+// Capture the WHOLE page, not just the viewport: scroll, shoot, stitch.
+//
+// captureVisibleTab only ever returns the visible rectangle, so a full page means driving the
+// scroll ourselves. Three things this has to get right, none of them optional:
+//
+//   * A CAP. An infinite-scroll feed has no bottom; scrollHeight grows as you approach it. Bounded
+//     by slice count AND by pixels, so "explain this page" on Twitter terminates.
+//   * STICKY CHROME. A fixed nav bar is painted into every single slice, so a naive stitch shows
+//     the same header six times and the model dutifully describes a page with six headers. Hidden
+//     after the first slice, restored afterwards.
+//   * PUTTING THE SCROLL BACK. The user did not ask to be moved to the bottom of the page.
+const FULLPAGE_MAX_SLICES = 6;
+const FULLPAGE_MAX_CSS_PX = 12000;
+const FULLPAGE_MAX_DEVICE_PX = 9000;   // beyond this the image costs more tokens than it informs
+
+async function fullPageShot(tab) {
+  const run = (func, args) => chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args })
+    .then(([r]) => r?.result);
+
+  const m = await run(() => ({
+    y0: window.scrollY, vh: window.innerHeight, dpr: window.devicePixelRatio || 1,
+    h: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),
+    vw: window.innerWidth,
+  }));
+  if (!m) throw new Error("could not measure the page");
+
+  const total = Math.min(m.h, FULLPAGE_MAX_CSS_PX, m.vh * FULLPAGE_MAX_SLICES);
+  const capped = total < m.h;
+  const shots = [];
+  try {
+    for (let y = 0, n = 0; y < total && n < FULLPAGE_MAX_SLICES; y += m.vh, n++) {
+      // hide sticky/fixed chrome from the second slice on — it is already in the first
+      const at = await run((args) => {
+        window.scrollTo(0, args.y);
+        if (args.hide) {
+          for (const el of document.querySelectorAll("body *")) {
+            const p = getComputedStyle(el).position;
+            if ((p === "fixed" || p === "sticky") && el.getClientRects().length) {
+              el.setAttribute("data-oracle-hidden", el.style.visibility || "");
+              el.style.visibility = "hidden";
+            }
+          }
+        }
+        return window.scrollY;
+      }, [{ y, hide: n > 0 }]);
+      // give the page a beat to paint and to fire lazy-loading, and stay under the
+      // captureVisibleTab rate limit
+      await new Promise((r) => setTimeout(r, 260));
+      shots.push({ y: at ?? y, data: await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" }) });
+      if (at !== null && at + m.vh >= m.h - 1) break;      // hit the bottom
+    }
+  } finally {
+    await run((y0) => {
+      document.querySelectorAll("[data-oracle-hidden]").forEach((el) => {
+        el.style.visibility = el.getAttribute("data-oracle-hidden") || "";
+        el.removeAttribute("data-oracle-hidden");
+      });
+      window.scrollTo(0, y0);
+    }, [m.y0]).catch(() => {});
+  }
+  if (!shots.length) throw new Error("no slices captured");
+
+  const bmps = await Promise.all(shots.map(async (s) =>
+    createImageBitmap(await (await fetch(s.data)).blob())));
+  const w = bmps[0].width;
+  const lastBottom = shots[shots.length - 1].y * m.dpr + bmps[bmps.length - 1].height;
+  let h = Math.min(Math.round(lastBottom), FULLPAGE_MAX_DEVICE_PX);
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext("2d");
+  shots.forEach((s, i) => ctx.drawImage(bmps[i], 0, Math.round(s.y * m.dpr)));
+  const b64 = await blobToB64(await canvas.convertToBlob({ type: "image/png" }));
+  return {
+    b64, slices: shots.length,
+    capped: capped || h >= FULLPAGE_MAX_DEVICE_PX,
+    pageCssHeight: m.h, capturedCssHeight: Math.round(h / m.dpr),
+  };
+}
+
 async function visionPage(tab) {
   if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
   const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode: "vision", ev }).catch(() => {});
@@ -400,17 +492,25 @@ async function visionPage(tab) {
       pageText = pt?.result || "";
     } catch (_) { /* some pages refuse injection; the pixels still work */ }
 
-    const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    thumb = shot;
+    const debug = await debugOn();
+    const shot = await fullPageShot(tab);
+    thumb = "data:image/png;base64," + shot.b64;
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
     await chrome.tabs.sendMessage(tab.id, { type: "oracle:loading", mode: "vision", thumb });
+    if (debug) {
+      dbg(tab, { stage: "full-page screenshot", slices: shot.slices, capped: shot.capped,
+                 page_css_height: shot.pageCssHeight, captured_css_height: shot.capturedCssHeight,
+                 png_kb: Math.round(shot.b64.length * 0.75 / 1024) });
+      dbg(tab, { stage: "sent to receiver", page_text_chars: pageText.length, source: "fullpage",
+                 text: pageText.slice(0, 4000) });
+    }
     const r = await fetch(RECEIVER + "/vision", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        image: shot.split(",")[1], mime: "image/png",
+        image: shot.b64, mime: "image/png",
         prompt: "Explain this page: what is it, what is it showing, and what should I notice?",
-        url: tab.url, title: tab.title, page_text: pageText, crop_text: "", source: "page",
-        agents_md: await agentsMd(tab.url),
+        url: tab.url, title: tab.title, page_text: pageText, crop_text: "", source: "fullpage",
+        agents_md: await agentsMd(tab.url), debug,
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
@@ -496,7 +596,7 @@ async function visionImage(srcUrl, tab) {
         // `near` is prose AROUND the image, not text inside it — `source` tells the receiver to
         // label it as such instead of claiming it was rendered inside a cropped rectangle.
         crop_text: meta.near, page_text: meta.page || "", source: "image",
-        agents_md: await agentsMd(tab.url),
+        agents_md: await agentsMd(tab.url), debug: await debugOn(),
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }

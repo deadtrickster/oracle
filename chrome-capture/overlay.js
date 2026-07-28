@@ -42,7 +42,11 @@
     return "<p>" + s + "</p>";
   }
 
-  let bodyEl = null;
+  let bodyEl = null, dbgEl = null;
+  // Every debug event, in arrival order, from BOTH sides — the extension says what it captured and
+  // sent, the receiver says what it composed. Kept raw: a debug view that summarises is a debug
+  // view you cannot trust to answer "was the page text actually in there?".
+  let dbgEvents = [];
 
   // build the card shell ONCE (at loading) so streamed deltas only repaint .body — position,
   // scroll, and drag state survive token-by-token updates.
@@ -87,14 +91,43 @@
         .ground-btn { margin-top:10px; width:100%; padding:6px; border:0; border-radius:7px;
           background:#128a86; color:#fff; font:inherit; font-weight:600; cursor:pointer; }
         .ground-btn:hover { filter:brightness(1.08); }
+        .tabs { display:flex; gap:2px; padding:0 10px; border-bottom:1px solid rgba(128,128,128,.25);
+          position:sticky; top:33px; background:inherit; }
+        .tab { border:0; background:transparent; color:inherit; font:inherit; font-size:11px;
+          padding:5px 9px; cursor:pointer; opacity:.55; border-bottom:2px solid transparent; }
+        .tab:hover { opacity:.85; }
+        .tab.on { opacity:1; border-bottom-color:#128a86; font-weight:600; }
+        .tab .n { font-size:9px; opacity:.7; margin-left:3px; }
+        .dbg { padding:8px 12px; font:11px/1.45 ui-monospace,monospace; }
+        .dbg .ev { border-top:1px solid rgba(128,128,128,.2); padding:6px 0; }
+        .dbg .ev:first-child { border-top:0; }
+        .dbg .hd { cursor:pointer; display:flex; gap:6px; align-items:baseline; }
+        .dbg .side { font-size:9px; padding:0 4px; border-radius:6px; background:rgba(128,128,128,.22); }
+        .dbg .st { font-weight:700; }
+        .dbg .meta { opacity:.65; font-size:10px; }
+        .dbg pre { white-space:pre-wrap; word-break:break-word; max-height:340px; overflow:auto;
+          margin:6px 0 0; font-size:10.5px; }
+        .dbg .empty { opacity:.6; font-family:inherit; }
         .gsec { margin-top:12px; padding-top:10px; border-top:1px dashed rgba(128,128,128,.4); }
         .ghdr { font-size:11px; font-weight:700; opacity:.7; margin-bottom:6px; }
       </style>
       <div class="card">
         <div class="bar"><b class="ttl">Oracle</b><span class="verdict" hidden></span><button class="x" title="Close">×</button></div>
+        <div class="tabs" hidden>
+          <button class="tab on" data-pane="body">Answer</button>
+          <button class="tab" data-pane="dbg">Debug<span class="n"></span></button>
+        </div>
         <div class="body"></div>
+        <div class="dbg" hidden></div>
       </div>`;
     bodyEl = root.querySelector(".body");
+    dbgEl = root.querySelector(".dbg");
+    root.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
+      root.querySelectorAll(".tab").forEach((o) => o.classList.toggle("on", o === t));
+      const wantDbg = t.dataset.pane === "dbg";
+      bodyEl.hidden = wantDbg;
+      dbgEl.hidden = !wantDbg;
+    }));
     root.querySelector(".x").addEventListener("click", () => host.remove());
     makeDraggable(root.querySelector(".bar"));
   }
@@ -202,11 +235,41 @@
     });
   }
 
+  function renderDbg() {
+    if (!dbgEl) return;
+    const n = root.querySelector(".tab .n");
+    if (n) n.textContent = dbgEvents.length ? `(${dbgEvents.length})` : "";
+    root.querySelector(".tabs").hidden = dbgEvents.length === 0;
+    if (!dbgEvents.length) {
+      dbgEl.innerHTML = `<p class="empty">Nothing recorded. Turn on <b>Debug</b> in the Oracle
+        popup, then run this again — every event and every block of injected context shows up
+        here.</p>`;
+      return;
+    }
+    dbgEl.innerHTML = dbgEvents.map((e, i) => {
+      const { side, stage, text, sections, ...rest } = e;
+      const meta = Object.entries(rest).filter(([, v]) => v !== undefined && v !== null && v !== "")
+        .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
+      const detail = text != null ? `<pre hidden data-i="${i}">${esc(String(text))}</pre>` : "";
+      const secs = sections ? `<div class="meta">${esc(sections.map((x) =>
+        `${x.section} ${x.chars}c`).join(" · "))}</div>` : "";
+      return `<div class="ev"><div class="hd" data-i="${i}">
+          <span class="side">${esc(side || "receiver")}</span>
+          <span class="st">${esc(stage || "?")}</span>
+          ${text != null ? `<span class="meta">▸ ${String(text).length}c</span>` : ""}
+        </div><div class="meta">${esc(meta)}</div>${secs}${detail}</div>`;
+    }).join("");
+    dbgEl.querySelectorAll(".hd").forEach((h) => h.addEventListener("click", () => {
+      const pre = dbgEl.querySelector(`pre[data-i="${h.dataset.i}"]`);
+      if (pre) pre.hidden = !pre.hidden;
+    }));
+  }
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "oracle:loading") {
       acc = ""; sources = null; reranked = true; curMode = msg.mode || "explain"; thumb = msg.thumb || null;
       primaryDone = false; gStarted = false; gStreaming = false; gDone = false; gAcc = ""; gSources = null; gReranked = true;
-      cites = null; gCites = null;
+      cites = null; gCites = null; dbgEvents = [];
       open();
       root.querySelector(".ttl").textContent =
         curMode === "factcheck" ? "Oracle · fact-check" : curMode === "vision" ? "Oracle · vision" : "Oracle";
@@ -217,6 +280,7 @@
     }
     if (msg.type !== "oracle:event") return;
     const { event, data } = msg.ev || {};
+    if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }
     if (msg.mode === "ground") {                              // grounded sub-stream
       if (event === "status") { setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;${esc(data.text||"")}</p>`); return; }
     if (event === "sources") { gSources = data.sources || []; gCites = data.citations || []; gReranked = data.reranked !== false; render(); }
@@ -225,6 +289,7 @@
       else if (event === "error") { gStreaming = false; gDone = true; gAcc += "\n\n_" + (data.error || "error") + "_"; render(); }
       return;
     }
+    if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }
     // a GPU swap takes 30-60s; say so, or it is indistinguishable from a hang
     if (event === "status") { setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;${esc(data.text||"")}</p>`); return; }
     if (event === "sources") { sources = data.sources || []; cites = data.citations || []; reranked = data.reranked !== false; if (acc) render(); }

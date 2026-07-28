@@ -513,7 +513,41 @@ _FACTCHECK_SYSTEM = (
     "do, you MUST use [NOT COVERED] (the corpus is silent — never guess from your own knowledge).")
 
 
-def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str = ""):
+
+# ------------------------------------------------------------------ debug channel
+# "I'm not sure it ever injects page context" is a fair thing to wonder, and it should not need a
+# code read to answer. When a request asks for it, the receiver reports what it actually composed —
+# the sections, their sizes, and the verbatim text — as `debug` SSE events the widget shows in its
+# own tab. Off by default: it echoes the whole prompt back, which is large and, on a logged-in page,
+# is the page's own content.
+def _dbg(enabled: bool, stage: str, **fields):
+    """A ('debug', {...}) event, or nothing when debugging is off."""
+    if not enabled:
+        return []
+    return [("debug", {"stage": stage, **fields})]
+
+
+def _sections(text: str) -> list:
+    """Split a composed context into labelled sections with sizes, so the debug tab can show what
+    went in without the reader having to diff two 6 KB blobs by eye."""
+    out, cur, buf = [], "preamble", []
+    for line in (text or "").splitlines():
+        m = re.match(r"^(Page title:|Page URL:|About [^ ]+ —|What [^ ]+ publishes|How the page itself|"
+                     r"Text on the page|Text rendered INSIDE|Text visible on the page|"
+                     r"What this page describes)", line)
+        if m:
+            if buf:
+                out.append({"section": cur, "chars": len("\n".join(buf))})
+            cur, buf = m.group(1).rstrip(" —"), [line]
+        else:
+            buf.append(line)
+    if buf:
+        out.append({"section": cur, "chars": len("\n".join(buf))})
+    return out
+
+
+def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str = "",
+                     debug: bool = False):
     """Shared retrieve→rerank→stream path behind /explain, /ask, /factcheck. Emits SSE (event, data)
     pairs: ('sources',{sources,reranked}) once, then ('delta',{text})*, then ('done',{}) | ('error',…).
     `retrieval_query` drives retrieval; `framing` is the task-specific instruction wrapping the input.
@@ -549,6 +583,9 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str 
     # vocabulary, and visibly separate from the excerpts, which are the only citable material.
     user = f"{framing}\n\n{site}\n\nExcerpts:\n{context}" if site else \
         f"{framing}\n\nExcerpts:\n{context}"
+    yield from _dbg(debug, "prompt sent to the text model", chars=len(user),
+                    site_context_chars=len(site), excerpt_count=len(chunks),
+                    reranked=reranked, system=system, text=user)
     # Retrieval is done (CPU + embeddings); only NOW is the text model needed, so a swap — if the
     # vision model is currently resident — is paid for as late as possible.
     try:
@@ -570,22 +607,24 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str 
     yield ("done", {})
 
 
-def explain_stream(selection: str, url: str = "", title: str = "", agents_md: str | None = None):
+def explain_stream(selection: str, url: str = "", title: str = "", agents_md: str | None = None,
+                   debug: bool = False):
     where = f" (seen on: {title or url})" if (title or url) else ""
     return _grounded_stream(
         selection, f'Explain this selection{where}:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_SYSTEM,
-        oracle_sitectx.block(url, agents_md))
+        oracle_sitectx.block(url, agents_md), debug)
 
 
 def ask_stream(question: str):
     return _grounded_stream(question, f"Question: {question[:1000]}", _ASK_SYSTEM)
 
 
-def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str | None = None):
+def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str | None = None,
+                     debug: bool = False):
     where = f" (from: {title or url})" if (title or url) else ""
     return _grounded_stream(
         claim, f'Claim to check{where}:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM,
-        oracle_sitectx.block(url, agents_md))
+        oracle_sitectx.block(url, agents_md), debug)
 
 
 VL_CTX_CHARS = int(os.environ.get("ORACLE_VL_CTX_CHARS", "4000"))
@@ -693,6 +732,14 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
         return ""
     came_from = {"image": "it was taken from this page",
                  "page": "it is a screenshot of this page's entire visible area",
+                 # Say "scrolled and stitched" rather than letting the model assume one screenful.
+                 # A stitched capture can contain content that was never on screen together, and a
+                 # model told it is looking at "the visible area" would reason about layout and
+                 # adjacency that never existed.
+                 "fullpage": ("it is a FULL-PAGE screenshot: the page was scrolled from the top and "
+                              "the screenfuls stitched vertically into one tall image, so content "
+                              "far apart in it was never visible at the same time (and a very long "
+                              "page may be cut off at the bottom)"),
                  }.get(source, "the region was screenshotted from this page")
     return (f"Context for the image below — {came_from}. Use it to identify what is being shown "
             "(system, dashboard, metric names, units, time range) instead of guessing, but "
@@ -702,7 +749,7 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
 
 def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: str = "",
                   page_text: str = "", crop_text: str = "", img: dict | None = None,
-                  source: str = "region", agents_md: str | None = None):
+                  source: str = "region", agents_md: str | None = None, debug: bool = False):
     """Stream the qwen3-vl answer for a screenshotted region. NOT grounded — a direct look at the
     pixels (read this diagram / transcribe this / what is this). Emits ('delta',…)* then ('done',{}).
 
@@ -712,10 +759,22 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
     # STEP 1, before any swap: if the page is long and the text model is still resident, have it
     # write the briefing now. This is the only moment it is free.
     brief, summarized = "", False
+    yield from _dbg(debug, "input", source=source, url=url, title=title,
+                    page_text_chars=len(page_text or ""), crop_text_chars=len(crop_text or ""),
+                    image_alt=(img or {}).get("image_alt", ""),
+                    agents_md_chars=len(agents_md or "") if agents_md is not None else None,
+                    summarise_threshold=VL_SUMMARIZE_OVER)
     if page_text and len(page_text) >= VL_SUMMARIZE_OVER and text_available():
         yield ("status", {"text": "summarising the page with the text model…"})
         brief = _summarize_for_vl(page_text, url, title)
         summarized = bool(brief)
+        yield from _dbg(debug, "summarised", ok=summarized, in_chars=len(page_text),
+                        out_chars=len(brief), text=brief)
+    else:
+        yield from _dbg(debug, "summarise skipped",
+                        why=("no page text" if not page_text else
+                             f"{len(page_text)} < {VL_SUMMARIZE_OVER} chars" if len(page_text) < VL_SUMMARIZE_OVER
+                             else "text model not resident (it would have to be swapped in)"))
 
     # STEP 2: now swap to vision.
     try:
@@ -728,6 +787,8 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
     ctx = _vl_context(url, title, brief or page_text, summarized, crop_text, img, source, agents_md)
     # Order matters: context, then the image, then the question. The text frames what the pixels
     # are before the model looks at them; the question stays last so it is the most recent thing.
+    yield from _dbg(debug, "context sent to qwen3-vl", chars=len(ctx),
+                    sections=_sections(ctx), prompt=prompt, text=ctx)
     content = ([{"type": "text", "text": ctx}] if ctx else []) + [
         {"type": "image_url", "image_url": {"url": image_data_url}},
         {"type": "text", "text": prompt}]
@@ -1021,7 +1082,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send({"error": "empty selection"}, 400)
                     return
                 self._send_sse(explain_stream(sel, p.get("url", ""), p.get("title", ""),
-                                              p.get("agents_md")))
+                                              p.get("agents_md"), bool(p.get("debug"))))
             elif self.path.startswith("/ask"):
                 q = (p.get("question") or "").strip()
                 if not q:
@@ -1034,7 +1095,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send({"error": "empty claim"}, 400)
                     return
                 self._send_sse(factcheck_stream(claim, p.get("url", ""), p.get("title", ""),
-                                                p.get("agents_md")))
+                                                p.get("agents_md"), bool(p.get("debug"))))
             elif self.path.startswith("/vision"):
                 img = p.get("image") or ""
                 if not img:
@@ -1047,7 +1108,8 @@ class Handler(BaseHTTPRequestHandler):
                                              p.get("crop_text", ""),
                                              {k: p.get(k, "") for k in
                                               ("image_alt", "image_title", "image_caption")},
-                                             p.get("source", "region"), p.get("agents_md")))
+                                             p.get("source", "region"), p.get("agents_md"),
+                                             bool(p.get("debug"))))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))
