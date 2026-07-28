@@ -32,7 +32,7 @@ that owns the hand does the moving, and reports what actually happened.
 LOCAL = {"search_corpus"}
 
 # Tools that need a browser. The extension executes these and posts the result back.
-BROWSER = {"read_page", "look_at_page", "click", "type_text"}
+BROWSER = {"read_page", "look_at_page", "click", "type_text", "wait"}
 
 # Tools that change the user's session. Only offered for hosts the user has enabled.
 ACTING = {"click", "type_text"}
@@ -54,9 +54,16 @@ READ_TOOLS = [
         ["query"]),
     _fn("read_page",
         "Read the rendered text of the page the user is looking at. Use this before guessing what "
-        "the page says. Cheap and instant.",
+        "the page says. Cheap and instant. It CANNOT see inside an iframe — an embedded dashboard "
+        "reads as 'Loading…' no matter how long you wait, so use look_at_page for those: the "
+        "screenshot shows what is actually rendered.",
         {"selector": {"type": "string", "description": "Optional CSS selector to read only part of "
                                                        "the page. Omit for the whole page."}}),
+    _fn("wait",
+        "Pause before looking again, for content that loads asynchronously. Use after a click that "
+        "starts a load, instead of reading the same half-rendered page twice.",
+        {"seconds": {"type": "number", "description": "1-15."}},
+        ["seconds"]),
     _fn("look_at_page",
         "Take a screenshot and have the vision model read it. Use for charts, diagrams, colours, "
         "layout, or anything read_page cannot express as text — a dashboard's numbers are usually "
@@ -109,6 +116,8 @@ def describe(name: str, args: dict) -> str:
         return f"searched the corpus for “{a.get('query', '')}”"
     if name == "read_page":
         return "read the page" + (f" ({a['selector']})" if a.get("selector") else "")
+    if name == "wait":
+        return f"waited {a.get('seconds', 0)}s for the page to load"
     if name == "look_at_page":
         return ("looked at the whole page" if a.get("full_page") else "looked at the screen") + \
                (f" — {a['question']}" if a.get("question") else "")

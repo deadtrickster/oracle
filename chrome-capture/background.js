@@ -547,15 +547,37 @@ async function runBrowserTool(call, tab, notify = () => {}) {
   try {
     if (call.name === "read_page") return String(await exec(toolReadPage, [a.selector || ""]));
     if (call.name === "click") {
+      // Watch for a NEW TAB. A link with target=_blank succeeds, this tab does not change, and the
+      // model concluded "the dashboard link appears to be broken" — a false statement caused
+      // entirely by the harness seeing one tab. If a click opens another one, say so.
+      const opened = [];
+      const onCreated = (t) => opened.push(t);
+      chrome.tabs.onCreated.addListener(onCreated);
       const out = String(await exec(toolClick, [a]));
       // Report the OUTCOME: a click that navigates or swaps a tab changes the page, and the model
       // needs the after, not the before.
       await new Promise((r) => setTimeout(r, 900));
+      chrome.tabs.onCreated.removeListener(onCreated);
+      if (opened.length) {
+        const t = opened[opened.length - 1];
+        return `${out}\nA NEW TAB OPENED: ${t.pendingUrl || t.url || "(url not yet known)"}\n` +
+               `Your tools only act on the page you started from, so you cannot read or screenshot ` +
+               `that tab. Do NOT conclude the link is broken — it worked. Say that it opened in a ` +
+               `new tab and continue with what is visible here, or ask the user to switch to it.`;
+      }
       const after = await exec(() => ({ url: location.href, title: document.title,
                                         text: (document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1500) }));
       return `${out}\nAFTER: ${after?.url} — ${after?.title}\n${after?.text || ""}`;
     }
     if (call.name === "type_text") return String(await exec(toolType, [a]));
+    if (call.name === "wait") {
+      const s = Math.max(1, Math.min(15, Number(a.seconds) || 3));
+      await new Promise((r) => setTimeout(r, s * 1000));
+      const after = await exec(() => ({ url: location.href, title: document.title }));
+      return `waited ${s}s. The page is now ${after?.url} — ${after?.title}. ` +
+             `Look again; if an embedded dashboard still reads as "Loading", it is in an iframe ` +
+             `and read_page will never see it — use look_at_page.`;
+    }
     if (call.name === "look_at_page") {
       const shot = await withOracleHidden(tab, async () => (
         a.full_page ? (await fullPageShot(tab)).b64
