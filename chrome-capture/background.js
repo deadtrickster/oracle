@@ -385,6 +385,11 @@ async function chatSend(message, tab, image = "", session = null, source = "") {
     : { side: "extension", stage: "debug is OFF — tick “debug” in the Oracle popup and ask " +
                                   "again to see every tool call and the full prompt" } } })
     .catch(() => {});
+  // Keepalive for the WHOLE turn, not just the tool steps. A first model call with tools, history
+  // and a possible GPU swap runs well past the ~30s idle timeout, and a worker killed here leaves
+  // the receiver's turn recorded, the panel spinning, and nothing to explain either — which is
+  // exactly what "thinking for 7 minutes" was.
+  keepaliveStart();
   try {
     const r = await fetch(RECEIVER + "/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -395,8 +400,10 @@ async function chatSend(message, tab, image = "", session = null, source = "") {
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
     await chatPump(r.body, send, tab);
-  } catch (_) {
-    send({ event: "error", data: { error: "Oracle receiver offline." } });
+  } catch (e) {
+    send({ event: "error", data: { error: "Lost the connection to Oracle: " + (e.message || e) } });
+  } finally {
+    keepaliveStop();
   }
   observe(message, OBS.explain, tab.url, tab.title);
 }

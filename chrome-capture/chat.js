@@ -38,11 +38,33 @@
   // and interleaving them would make both harder to read.
   let session = "main";
 
+  // Last sign of life from the receiver. A turn is legitimately slow — a GPU swap and a vision read
+  // are minutes — but SILENT for minutes is different, and the panel used to be unable to tell the
+  // difference. If the service worker is killed mid-turn nothing ever arrives, and without this the
+  // spinner runs until the tab is closed.
+  let lastEventAt = 0;
+  const STALL_WARN_MS = 150000;
+  const STALL_GIVEUP_MS = 420000;
+
   function tick() {
     const el = root.querySelector(".elapsed");
     if (!el || !startedAt) return;
     const s = Math.round((Date.now() - startedAt) / 1000);
     el.textContent = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+    const quiet = Date.now() - (lastEventAt || startedAt);
+    if (streaming && quiet > STALL_GIVEUP_MS) {
+      streaming = false;
+      go.disabled = false;
+      clearInterval(ticker); ticker = null; startedAt = 0;
+      turns.push({ role: "assistant", content:
+        "_No response for " + Math.round(quiet / 60000) + " minutes. The browser most likely " +
+        "dropped the connection to the receiver (Chrome can stop the extension's background " +
+        "worker during a long request). Your question was recorded — ask again to continue._" });
+      acc = ""; render();
+    } else if (streaming && quiet > STALL_WARN_MS && !status.startsWith("still working")) {
+      status = `still working — nothing heard for ${Math.round(quiet / 1000)}s`;
+      render();
+    }
   }
 
   root.innerHTML = `
@@ -100,7 +122,18 @@
         border-radius:10px; padding:2px 9px; cursor:pointer; opacity:.65; }
       .sesbar .pick.on { opacity:1; background:#128a86; color:#fff; }
       .msg p { margin:0 0 6px; } .msg p:last-child { margin:0; }
-      .msg ul { margin:5px 0; padding-left:18px; }
+      /* Tight: these are short factual bullets in a narrow panel, not prose. The default list
+         spacing plus a paragraph margin made every item look like its own section. */
+      .msg ul, .msg ol { margin:4px 0; padding-left:17px; }
+      .msg li { margin:1px 0; }
+      .msg li > p { margin:0; }
+      /* Headings, sized for a 400px panel: the point is hierarchy, not scale. A model's "###" in
+         here is a section label, and rendering it at document sizes would shout. */
+      .mdh { font-weight:700; margin:9px 0 4px; line-height:1.3; }
+      .mdh:first-child { margin-top:0; }
+      .mdh.h1 { font-size:14px; }
+      .mdh.h2 { font-size:13px; }
+      .mdh.h3 { font-size:12px; opacity:.85; letter-spacing:.02em; }
       pre { background:#f4f4f4; padding:8px; border-radius:6px; overflow:auto; }
       code { background:#f0f0f0; padding:1px 4px; border-radius:4px; font-family:ui-monospace,monospace; }
       pre code { background:transparent; padding:0; }
@@ -160,14 +193,75 @@
         input = $(".in"), go = $(".go");
   const esc = (s) => String(s).replace(/</g, "&lt;");
 
+  // Block-aware, because the line-by-line version could not grow a header without breaking.
+  // The old one turned every blank line into </p><p> and wrapped the lot in one <p>, so any block
+  // element added to it — a heading, a list, a code fence — ended up illegally nested inside a
+  // paragraph and rendered wherever the browser decided to close it. `### Foo` simply came out as
+  // literal hashes. Split into blocks first, then decide what each block IS.
   function md(text) {
     let s = esc(text);
-    s = s.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, l, c) => `<pre><code>${c}</code></pre>`);
-    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
-    s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-    s = s.replace(/^\s*[-*]\s+(.*)$/gm, "<li>$1</li>").replace(/(<li>[\s\S]*?<\/li>)/g, "<ul>$1</ul>");
-    s = s.replace(/\n{2,}/g, "</p><p>").replace(/\n/g, "<br>");
-    return "<p>" + s + "</p>";
+    // Fenced code is lifted out before anything else touches it, so a `#` or `*` inside a code
+    // sample is never mistaken for markup, and put back at the end.
+    // A VISIBLE sentinel. The first version used NUL bytes, which worked and was a bad idea in a
+    // repo that has an entire design note about NULs surviving into places that cannot hold them —
+    // and which are invisible in every editor, so the mistake is undiscoverable by reading. The
+    // text is already HTML-escaped here, so `<` cannot appear in it and this cannot collide.
+    const fenced = [];
+    s = s.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+      fenced.push(`<pre><code>${code.replace(/\n$/, "")}</code></pre>`);
+      return `<<FENCE${fenced.length - 1}>>`;
+    });
+    const inline = (t) => t
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>");
+
+    // `out` and `list` live ACROSS blocks, not within one. Models write bullets separated by blank
+    // lines, and closing the list at every blank line produced a separate <ul> per item — two
+    // margins between every bullet, which is exactly why a list read like a run of paragraphs. A
+    // list now continues through blank lines and is closed by something that is not a list item.
+    const out = [];
+    let list = null;
+    const flush = () => {
+      if (list) { out.push(`<${list.tag}>${list.items.join("")}</${list.tag}>`); list = null; }
+    };
+    for (const block of s.split(/\n{2,}/)) {
+      const lines = block.split("\n").filter((l) => l.trim() !== "");
+      for (let li = 0; li < lines.length; li++) {
+        const line = lines[li];
+        const head = line.match(/^(#{1,6})\s+(.*)$/);
+        const item = line.match(/^\s*(?:[-*+]|\d+[.)])\s+(.*)$/);
+        if (head) {
+          flush();
+          out.push(`<div class="mdh h${Math.min(head[1].length, 3)}">${inline(head[2])}</div>`);
+        } else if (item) {
+          const tag = /^\s*\d/.test(line) ? "ol" : "ul";
+          if (list && list.tag !== tag) flush();
+          list = list || { tag, items: [] };
+          list.items.push(`<li>${inline(item[1])}</li>`);
+        } else if (/^<<FENCE\d+>>$/.test(line)) {
+          flush();
+          out.push(line);
+        } else if (list && li > 0) {
+          // A plain line DIRECTLY under a bullet — same block, no blank line — continues that
+          // bullet. Across a blank line it is a new paragraph instead, which is what markdown
+          // means and what stopped "And then prose." being swallowed into the last item.
+          list.items[list.items.length - 1] =
+            list.items[list.items.length - 1].slice(0, -5) + " " + inline(line) + "</li>";
+        } else {
+          flush();
+          const prev = out[out.length - 1];
+          if (prev && prev.startsWith("<p>") && li > 0) {
+            out[out.length - 1] = prev.slice(0, -4) + "<br>" + inline(line) + "</p>";
+          } else {
+            out.push(`<p>${inline(line)}</p>`);
+          }
+        }
+      }
+    }
+    flush();
+
+    return out.join("").replace(/<<FENCE(\d+)>>/g, (_, i) => fenced[Number(i)]);
   }
 
   function bubble(t, i) {
@@ -304,6 +398,7 @@
     streaming = true; acc = ""; status = ""; cites = null; sources = null;
     steps = []; dbgEvents = []; renderDbg();
     startedAt = Date.now();
+    lastEventAt = Date.now();
     clearInterval(ticker);
     ticker = setInterval(tick, 1000);
     render(); tick();
@@ -427,6 +522,7 @@
       return;
     }
     if (msg.type !== "oracle:chatEvent") return;
+    lastEventAt = Date.now();
     const { event, data } = msg.ev || {};
     if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }
     if (event === "status") { status = data.text || ""; render(); return; }
