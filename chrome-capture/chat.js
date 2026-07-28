@@ -76,7 +76,7 @@
     <style>
       ${OracleCite.CSS}
       .oc-fn.oc-hit { background: rgba(255,220,80,.35); border-radius:3px; }
-      .panel { width:400px; max-width:94vw; height:520px; max-height:78vh; display:flex;
+      .panel { width:400px; max-width:94vw; height:520px; max-height:88vh; display:flex;
         flex-direction:column; font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
         background:#fff; color:#1a1a1a; border:1px solid #d0d0d0; border-radius:12px;
         box-shadow:0 10px 40px rgba(0,0,0,.28); overflow:hidden; }
@@ -158,6 +158,23 @@
       .go { border:0; border-radius:8px; padding:0 13px; background:#128a86; color:#fff;
         font:inherit; font-weight:600; cursor:pointer; }
       .go[disabled] { opacity:.5; cursor:default; }
+      /* Grips on the two corners that make sense for a panel anchored bottom-right: the top-left
+         one grows it up and to the left (where the space is), the bottom-right one is the corner
+         everyone reaches for. */
+      .grip { position:absolute; width:14px; height:14px; z-index:2; }
+      .grip.tl { left:0; top:0; cursor:nwse-resize; }
+      .grip.br { right:0; bottom:0; cursor:nwse-resize; }
+      .grip.br::after { content:""; position:absolute; right:3px; bottom:3px; width:6px; height:6px;
+        border-right:2px solid rgba(128,128,128,.6); border-bottom:2px solid rgba(128,128,128,.6); }
+      /* Clicking a screenshot opens it full-size. The panel is 400px wide by default and a
+         full-page stitch is unreadable at that scale, so an inline thumbnail can only ever say
+         "a picture was taken" — this is where you actually check what it looked at. */
+      .lb { position:fixed; inset:0; background:rgba(0,0,0,.88); z-index:2147483647;
+        overflow:auto; padding:24px; box-sizing:border-box; cursor:zoom-out; }
+      .lb img { display:block; margin:0 auto; max-width:100%; height:auto;
+        box-shadow:0 4px 40px rgba(0,0,0,.6); }
+      .lb .hint { position:fixed; top:8px; left:0; right:0; text-align:center; color:#fff;
+        font:11px sans-serif; opacity:.65; }
       .spin { display:inline-block; width:11px; height:11px; border:2px solid rgba(128,128,128,.4);
         border-top-color:#888; border-radius:50%; animation:sp .8s linear infinite; }
       @keyframes sp { to { transform:rotate(360deg); } }
@@ -176,6 +193,8 @@
         margin:6px 0 0; font-size:10.5px; }
     </style>
     <div class="panel">
+      <div class="grip tl"></div>
+      <div class="grip br"></div>
       <div class="bar">
         <b>Oracle · chat <span class="h"></span></b>
         <button class="ico dbgt" title="Record every tool call and the full prompt">🐞</button>
@@ -470,6 +489,30 @@
     try { chrome.runtime.sendMessage({ type: "oracle:setDebug", on: debugOn }); } catch (_) {}
     renderDbg();
   });
+  // Click any screenshot to see it full size. Delegated, because thumbnails are re-rendered on
+  // every token and per-element listeners would be re-attached hundreds of times a turn.
+  function openLightbox(src) {
+    const lb = document.createElement("div");
+    lb.className = "lb";
+    lb.innerHTML = `<div class="hint">click anywhere, or press Esc, to close</div>`;
+    const img = document.createElement("img");
+    img.src = src;
+    lb.appendChild(img);
+    const close = () => { lb.remove(); window.removeEventListener("keydown", onKey, true); };
+    const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+    lb.addEventListener("click", close);
+    window.addEventListener("keydown", onKey, true);
+    root.appendChild(lb);
+  }
+  root.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t instanceof Element && t.classList.contains("thumb")) {
+      e.preventDefault();
+      e.stopPropagation();
+      openLightbox(t.getAttribute("src"));
+    }
+  });
+
   function paintSession() {
     root.querySelectorAll(".pick").forEach(
       (b) => b.classList.toggle("on", b.dataset.session === session));
@@ -528,24 +571,94 @@
     try { chrome.runtime.sendMessage({ type: "oracle:chatReset" }); } catch (_) {}
   });
 
-  // drag by the title bar
+  // ---------------------------------------------------------------- geometry: drag, resize, remember
+  //
+  // Where the panel sits and how big it is are the user's decisions, and a panel that forgets them
+  // on every page is one that has to be re-arranged before it can be used. Stored once, applied
+  // everywhere, clamped to the viewport on restore — a saved position from a 4K monitor must not
+  // put the panel off-screen on a laptop.
+  const GEOM_KEY = "oracleChatGeom";
+  const MIN_W = 300, MIN_H = 240;
+  const panel = $(".panel");
+  let geom = null;                       // {left, top, w, h} once the user has touched it
+
+  const clamp = (g) => ({
+    w: Math.max(MIN_W, Math.min(g.w, window.innerWidth - 16)),
+    h: Math.max(MIN_H, Math.min(g.h, window.innerHeight - 16)),
+    left: Math.max(0, Math.min(g.left, window.innerWidth - Math.max(MIN_W, Math.min(g.w, window.innerWidth - 16)) - 8)),
+    top: Math.max(0, Math.min(g.top, window.innerHeight - 60)),
+  });
+
+  function applyGeom() {
+    if (!geom) return;
+    const g = clamp(geom);
+    host.style.right = "auto";
+    host.style.bottom = "auto";
+    host.style.left = g.left + "px";
+    host.style.top = g.top + "px";
+    panel.style.width = g.w + "px";
+    panel.style.height = g.h + "px";
+    panel.style.maxWidth = "none";
+    panel.style.maxHeight = "none";
+  }
+
+  function saveGeom() {
+    if (!geom) return;
+    try { chrome.storage.local.set({ [GEOM_KEY]: clamp(geom) }); } catch (_) {}
+  }
+
+  // Turn whatever the CSS is doing into explicit numbers, so drag and resize have something to
+  // work from. Until this runs the panel is anchored bottom-right by stylesheet.
+  function pin() {
+    if (geom) return;
+    const r = panel.getBoundingClientRect();
+    geom = { left: r.left, top: r.top, w: r.width, h: r.height };
+    applyGeom();
+  }
+
+  try {
+    chrome.storage.local.get(GEOM_KEY).then((v) => {
+      if (v && v[GEOM_KEY]) { geom = v[GEOM_KEY]; applyGeom(); }
+    }).catch(() => {});
+  } catch (_) {}
+
+  // One handler for both gestures: a drag moves, a grip resizes, and the only difference is which
+  // numbers the delta is added to.
   (() => {
-    const bar = $(".bar");
-    let sx, sy, ox, oy, on = false;
-    bar.addEventListener("mousedown", (e) => {
-      if (e.target.classList.contains("ico")) return;
-      on = true; sx = e.clientX; sy = e.clientY;
-      const r = host.getBoundingClientRect(); ox = r.left; oy = r.top;
-      host.style.right = "auto"; host.style.bottom = "auto";
-      host.style.left = ox + "px"; host.style.top = oy + "px";
+    let mode = null, sx = 0, sy = 0, start = null;
+
+    const begin = (m) => (e) => {
+      if (m === "move" && e.target.classList.contains("ico")) return;
+      pin();
+      mode = m; sx = e.clientX; sy = e.clientY; start = { ...geom };
       e.preventDefault();
-    });
+      e.stopPropagation();
+    };
+    $(".bar").addEventListener("mousedown", begin("move"));
+    $(".grip.tl").addEventListener("mousedown", begin("tl"));
+    $(".grip.br").addEventListener("mousedown", begin("br"));
+
     window.addEventListener("mousemove", (e) => {
-      if (!on) return;
-      host.style.left = ox + e.clientX - sx + "px";
-      host.style.top = oy + e.clientY - sy + "px";
+      if (!mode) return;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
+      if (mode === "move") {
+        geom = { ...start, left: start.left + dx, top: start.top + dy };
+      } else if (mode === "br") {
+        geom = { ...start, w: start.w + dx, h: start.h + dy };
+      } else {
+        // Top-left: the far corner must stay put, so width grows as left shrinks.
+        const w = Math.max(MIN_W, start.w - dx), h = Math.max(MIN_H, start.h - dy);
+        geom = { left: start.left + (start.w - w), top: start.top + (start.h - h), w, h };
+      }
+      applyGeom();
     });
-    window.addEventListener("mouseup", () => { on = false; });
+    window.addEventListener("mouseup", () => {
+      if (!mode) return;
+      mode = null;
+      saveGeom();
+    });
+    // A window that shrinks under a saved geometry would strand the panel off-screen.
+    window.addEventListener("resize", () => { if (geom) applyGeom(); });
   })();
 
   chrome.runtime.onMessage.addListener((msg) => {

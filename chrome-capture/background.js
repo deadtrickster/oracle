@@ -435,7 +435,7 @@ async function chatRegion(msg, tab) {
     canvas.getContext("2d").drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
     const b64 = await blobToB64(await canvas.convertToBlob({ type: "image/png" }));
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatAsk", message: (prompt || "").trim(),
-                                      image: b64, thumb: "data:image/png;base64," + b64,
+                                      image: b64, thumb: await thumbnail(b64),
                                       session: QUICK })
       .catch(() => {});
   } catch (e) {
@@ -562,7 +562,7 @@ async function runBrowserTool(call, tab) {
       // Hand the picture back with the reading. When the model decides to look at something on its
       // own, the person supervising it should see the same thing it saw — otherwise the transcript
       // says "I looked" and shows nothing, which is a claim rather than evidence.
-      call.image = "data:image/png;base64," + shot;
+      call.image = await thumbnail(shot);
       const r = await fetch(RECEIVER + "/vision", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: shot, mime: "image/png", url: tab.url, title: tab.title,
@@ -788,6 +788,26 @@ async function pumpOrFail(body, send, what = "The answer") {
     send({ event: "error", data: { error:
       `${what} was cut off — the connection to the Oracle receiver ended early (it may have been ` +
       `restarted). Nothing was lost; ask again.` } });
+  }
+}
+
+// A full-page stitch is ~800 KB of base64. That is fine to POST to the receiver and NOT fine to
+// push through chrome.tabs.sendMessage, which drops oversized messages — and the drop is silent, so
+// the screenshot simply never appeared in the panel while everything else looked correct. It is
+// also more than a transcript needs: this is for a human to check what the model looked at, not for
+// the model, which only ever gets the reading.
+async function thumbnail(b64, maxW = 1100) {
+  try {
+    const bmp = await createImageBitmap(await (await fetch("data:image/png;base64," + b64)).blob());
+    const scale = Math.min(1, maxW / bmp.width);
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    const c = new OffscreenCanvas(w, h);
+    c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    const out = await blobToB64(await c.convertToBlob({ type: "image/jpeg", quality: 0.72 }));
+    return "data:image/jpeg;base64," + out;
+  } catch (_) {
+    return "";            // no thumbnail is better than a broken one; the reading still lands
   }
 }
 
@@ -1023,7 +1043,7 @@ async function visionPage(tab) {
     }
     chrome.tabs.sendMessage(tab.id, {
       type: "oracle:chatAsk", session: QUICK, image: shot.b64,
-      thumb: "data:image/png;base64," + shot.b64, source: "fullpage",
+      thumb: await thumbnail(shot.b64), source: "fullpage",
       message: "Explain this page: what is it, what is it showing, and what should I notice?",
     }).catch(() => {});
   } catch (e) {
@@ -1099,7 +1119,8 @@ async function visionImage(srcUrl, tab) {
     const described = [["alt", meta.alt], ["title", meta.title], ["caption", meta.caption]]
       .filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join("\n");
     chrome.tabs.sendMessage(tab.id, {
-      type: "oracle:chatAsk", session: QUICK, image: b64, thumb, source: "image",
+      type: "oracle:chatAsk", session: QUICK, image: b64, thumb: await thumbnail(b64),
+      source: "image",
       message: "Explain this image from the page." +
         (described ? `\n\nThe page describes it as:\n${described}` : "") +
         (meta.near ? `\n\nText around it: ${meta.near.slice(0, 600)}` : ""),
