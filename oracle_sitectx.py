@@ -164,9 +164,17 @@ def block(url: str, fetched: str | None = None, citable: bool = False) -> str:
 
     pack, path = _pack_for(host)
     if pack:
+        # Observed live (2026-07-28): the model cited the pack the way it cites corpus excerpts —
+        # "From the Stroppy docs ([stroppy.io.md](source: stroppy.io.md))". Trustworthy content, but
+        # the WRONG SHAPE: numbered citations in these answers are links into the corpus browser,
+        # and a pack has no page to open. A reader following it would find nothing. So the pack is
+        # background the model may rely on and name in prose, never a numbered source.
+        cite = ("Rely on it freely and say so in prose if you use it (\"the site's reference "
+                "material says…\"), but do NOT give it a bracketed number — those belong to the "
+                "corpus excerpts, and each one has to resolve to a page a reader can open.")
         return (f"About {host} — reference material we maintain for this site "
-                f"(source: {Path(path).name}):\n{_clip(_strip_meta(pack), PACK_CHARS)}\n"
-                f"[end of site reference]")
+                f"(source: {Path(path).name}). {cite}\n"
+                f"{_clip(_strip_meta(pack), PACK_CHARS)}\n[end of site reference]")
 
     text = fetched if fetched else cached(host)
     if not text:

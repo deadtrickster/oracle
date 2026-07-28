@@ -79,6 +79,10 @@ check("fits whole, uncut", "truncated" not in b, f"{len(b)} chars")
 check("carries the engine notes", "OrioleDB" in b and "WalSync" in b)
 check("maintenance notes are stripped", "MAINTENANCE NOTES" not in b)
 check("packs may exceed the AGENTS.md budget", len(b) > sc.SITE_CTX_CHARS)
+# Observed live: the model gave the pack a bracketed number, as if it were a corpus excerpt. Those
+# numbers are links into the corpus browser and a pack has no page to open, so a reader following
+# one finds nothing.
+check("pack is not offered as a numbered source", "do NOT give it a bracketed number" in b)
 
 print("\n6. it actually reaches the prompt the model sees (receiver wiring)")
 import importlib.util  # noqa: E402
