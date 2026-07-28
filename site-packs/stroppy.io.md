@@ -30,6 +30,8 @@ Repo: `github.com/stroppy-io/stroppy`.
 
 - **VU — virtual user.** k6's unit of concurrency: each VU runs the test script independently. "50
   VUs" means 50 concurrent scripted clients, not 50 connections or 50 threads.
+- **`pool=N`** — the driver's connection-pool size. NOT the VU count: they are set separately, and
+  the interesting case is precisely when they differ (VUs above pool means queueing).
 - **Scenario** — how load changes over time: constant VUs, ramping VUs, shared iterations, per-VU
   iterations.
 - **Threshold** — a pass/fail criterion on a metric ("p95 < 200 ms"). A run that breaches a
@@ -95,15 +97,27 @@ benchmark page should be read; the mechanisms behind them are in the upstream do
 The user runs these benchmarks; they know what Grafana is. Answer about the DATABASE, not about the
 dashboard.
 
+- **Open with the run, in one line:** engine, workload, scale and pool, nodes, duration — then the
+  finding. "OrioleDB, tpcc/tx at scale=5000 pool=400 on 2 nodes, 2h48m: sustained 2.5K tx/s, but…"
 - **Lead with the finding.** "PostgreSQL is bottlenecked on WAL flush" — then the evidence. Never
   open by describing the page ("this is a Grafana dashboard showing several panels…").
+- **Read the percentile SPREAD, not just the level.** p99 an order of magnitude above p50 is a tail
+  problem (contention, flushes, GC pauses) even when the average looks healthy.
+- **Check the transaction mix against the workload's spec** when per-transaction rates are shown.
+  TPC-C should be ~45% new_order, ~43% payment, ~4% each for delivery / order_status / stock_level;
+  a mix that does not match means the run did not do what its name says.
 - **Spend no words** explaining what Grafana is, that a panel is a time series, that green means
   good, or that the legend lists metrics. Reading the chart is a means, not the answer.
 - **Name the mechanism.** Not "throughput dropped" but *why*: row-lock contention on a hot key,
   pool starvation, WAL sync, checkpoint flush, autovacuum I/O, buffer eviction, replication lag.
   The engine notes above say which numbers point at which mechanism — use them.
-- **Say what to change.** A concrete next step: a parameter, a workload knob, a comparison worth
-  running. "Raise POOL_SIZE to at least the VU count" beats "consider tuning the connection pool".
+- **Say what to change, and match it to the ENGINE.** A concrete next step: a parameter, a workload
+  knob, a comparison worth running. "Raise POOL_SIZE to at least the VU count" beats "consider
+  tuning the connection pool". For `kind: orioledb`, reason from OrioleDB's mechanisms — undo-log
+  MVCC, copy-on-write checkpoints, row-level WAL — not from PostgreSQL's vacuum, full-page-image
+  and `checkpoint_timeout` knobs, most of which do not apply.
+- **An axis maximum is not capacity.** A chart scaled to 50K ops/s says nothing about headroom;
+  never infer "well below its limit" from where a line sits on an axis.
 - **Distinguish client from server.** Stroppy's report is the client's view (VUs, iterations, k6
   latency); a Grafana/pg_exporter dashboard is the server's (buffers, WAL, locks, vacuum). When
   both are present, say which one a number came from.

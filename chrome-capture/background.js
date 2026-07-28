@@ -290,7 +290,7 @@ async function ground(tab, mode, selection) {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpSSE(r.body, send);
+    await pumpOrFail(r.body, send);
   } catch (_) {
     send({ event: "error", data: { error: "Oracle receiver offline — start oracle-capture-receiver.py." } });
   }
@@ -342,7 +342,7 @@ async function chatSend(message, tab, image = "") {
                              image, mime: "image/png" }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpSSE(r.body, send);
+    await pumpOrFail(r.body, send);
   } catch (_) {
     send({ event: "error", data: { error: "Oracle receiver offline." } });
   }
@@ -467,6 +467,23 @@ async function screenshotRegion(tab, target = "vision") {
   } catch (e) { notify("Region select failed: " + e.message); }
 }
 
+// A stream that ends without `done` or `error` is a stream that DIED — the receiver restarted, the
+// socket dropped, the service worker was recycled. pumpSSE returns normally either way, so the card
+// simply stopped updating and showed a half-answer or nothing at all, with no way to tell that from
+// "still thinking". Say it instead.
+async function pumpOrFail(body, send, what = "The answer") {
+  let terminal = false;
+  await pumpSSE(body, (ev) => {
+    if (ev.event === "done" || ev.event === "error") terminal = true;
+    send(ev);
+  });
+  if (!terminal) {
+    send({ event: "error", data: { error:
+      `${what} was cut off — the connection to the Oracle receiver ended early (it may have been ` +
+      `restarted). Nothing was lost; ask again.` } });
+  }
+}
+
 async function blobToB64(blob) {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let s = "";
@@ -560,7 +577,7 @@ async function visionRegion(msg, tab) {
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpSSE(r.body, send);
+    await pumpOrFail(r.body, send);
   } catch (e) {
     // make sure the card exists to show the error
     try {
@@ -693,7 +710,7 @@ async function visionPage(tab) {
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpSSE(r.body, send);
+    await pumpOrFail(r.body, send);
   } catch (e) {
     try {
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
@@ -779,7 +796,7 @@ async function visionImage(srcUrl, tab) {
       }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpSSE(r.body, send);
+    await pumpOrFail(r.body, send);
   } catch (e) {
     try {
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["cite.js", "overlay.js"] });
@@ -803,7 +820,7 @@ async function groundVision(text, tab) {
                              agents_md: await agentsMd(tab.url) }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
-    await pumpSSE(r.body, send);
+    await pumpOrFail(r.body, send);
   } catch (_) {
     send({ event: "error", data: { error: "Oracle receiver offline." } });
   }

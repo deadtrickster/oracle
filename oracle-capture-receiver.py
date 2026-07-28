@@ -1021,6 +1021,17 @@ def _vl_context(url: str, title: str, page_text: str, summarized: bool = False,
             + "\n".join(parts))
 
 
+_VISION_SYSTEM = (
+    "You are looking at a screenshot for a user who built or runs the thing in it. They know what "
+    "the tool is; do not explain it, and never open by describing the page ('this is a dashboard "
+    "showing…'). Lead with what the DATA says.\n"
+    "Quote numbers and labels verbatim; say 'illegible' rather than approximating one you cannot "
+    "read. Colour is information: a panel drawn red or amber has crossed a threshold — say which "
+    "and that it is flagged, and never conclude that nothing is wrong while one is. Report only "
+    "what is present, and say plainly when the screenshot does not settle a question."
+)
+
+
 def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: str = "",
                   page_text: str = "", crop_text: str = "", img: dict | None = None,
                   source: str = "region", agents_md: str | None = None, debug: bool = False):
@@ -1066,7 +1077,13 @@ def vision_stream(image_data_url: str, prompt: str = "", url: str = "", title: s
     content = ([{"type": "text", "text": ctx}] if ctx else []) + [
         {"type": "image_url", "image_url": {"url": image_data_url}},
         {"type": "text", "text": prompt}]
-    msgs = [{"role": "user", "content": content}]
+    # A SYSTEM message, which this path did not have. Everything used to arrive as one user blob,
+    # so a site pack's "how to answer" section read as background prose rather than as a standing
+    # instruction — and the model duly opened every answer by explaining what Grafana is. The site
+    # pack rides along here for the same reason it does everywhere else.
+    msgs = [{"role": "system", "content": _VISION_SYSTEM + (
+                "\n\n" + oracle_sitectx.block(url, agents_md) if url else "")},
+            {"role": "user", "content": content}]
     try:
         for delta in _chat_stream(msgs, url=VL_URL, model=VL_MODEL, timeout=420, max_tokens=1500):
             yield ("delta", {"text": delta})
