@@ -58,10 +58,32 @@ favourites-first).
 3. `navigate` to `/t/{slug}/compare?runIds={newest},{second}` and read the result.
 Compare needs at least two ids and refuses fewer — do not send one and hope.
 
-**"How did this run go?"** — you are probably already on it. `?view=overview` has the config and
-identity; `?view=metrics` has the numbers as text; `?view=grafana` is an EMBEDDED DASHBOARD, so
-`read_page` will only ever say "Loading" — use `look_at_page` there. Its **Open** button launches
-Grafana in a NEW TAB, which these tools cannot reach; it is not broken, it is elsewhere.
+**"How did this run go?" / "tell me about this test" — LOOK AT EVERYTHING.** An open question about
+a run means the whole run, and a partial look produces a confident partial answer, which is worse
+than a slow one. The default is: `?view=overview` for config and identity, `?view=metrics` for the
+numbers as text, then EVERY Grafana sub-dashboard (below). Only narrow this when the user narrows
+it — "briefly", "just the throughput", "did it crash?" — and then say what you skipped.
+
+**The Grafana tab is several dashboards, not one.** `?view=grafana` shows sub-tabs, and each
+answers a different question. One of them alone cannot tell you whether the client or the server was
+the limit:
+
+| sub-tab | whose view | what only it can tell you |
+|---|---|---|
+| **WORKLOAD** | the client (k6/stroppy) | tx/s, latency percentiles, per-transaction rates, errors |
+| **SYSTEM** | the host (node_exporter) | CPU, memory, disk I/O, network — whether the machine was saturated |
+| **ORIOLEDB** / **POSTGRES** / *engine* | the database | buffers, WAL, locks, vacuum, engine internals |
+
+Throughput without CPU and disk cannot distinguish "the database was slow" from "the client or the
+box ran out". Latency without the engine view cannot tell a lock from a flush. So for an open
+question, click through all of them.
+
+Do it in ONE reply: `click` a sub-tab, `look_at_page`, `click` the next, `look_at_page` — tool calls
+in the same reply run back-to-back without the text model in between, so three views cost one GPU
+swap rather than three. Asking for one look per turn is what makes surveying a run feel expensive.
+
+`read_page` will only ever say "Loading" on these — they are iframes. The **Open** button launches
+Grafana in a NEW TAB, which these tools cannot reach; that is not a broken link, it is elsewhere.
 
 **"Why did it fail?"** — `?view=logs&q=error`, then `?view=pipeline` for which stage stopped, then
 `?view=agents` if the agents were offline.

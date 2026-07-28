@@ -30,6 +30,7 @@
   // What the model DID this turn — read the page, clicked a tab, searched the corpus. Shown as it
   // happens, because a harness that acts silently is one you cannot supervise.
   let live = [];              // prose and steps, in the order they happened
+  let queued = [];            // questions typed while a turn was still running
   let stepsOpen = false;      // folded once the turn is done; click to reopen
   let turnFailed = false;     // ...but never folded when it ended badly
   let actions = false;
@@ -128,6 +129,7 @@
       .msg .who { font-size:10px; opacity:.5; margin-bottom:2px; }
       .msg .bub { padding:7px 10px; border-radius:9px; background:rgba(128,128,128,.10); }
       .msg.me .bub { background:#e8f3f2; }
+      .bub.queued { opacity:.55; border:1px dashed rgba(128,128,128,.5); }
       .thumb { display:block; max-width:100%; max-height:180px; border-radius:6px; margin-bottom:6px;
         border:1px solid rgba(128,128,128,.35); cursor:zoom-in; }
       .bub.tool { font:11px/1.45 ui-monospace,monospace; opacity:.8; white-space:pre-wrap;
@@ -447,6 +449,12 @@
         ? `<div class="step">${busy}</div>`
         : `<div class="msg"><div class="who">oracle</div><div class="bub">${busy}</div></div>`;
     }
+    // Questions typed while this turn was running. Shown so they are visibly WAITING rather than
+    // apparently lost — the alternative was refusing to accept them at all.
+    for (const q of queued) {
+      h += `<div class="msg me"><div class="who">you · queued</div>` +
+        `<div class="bub queued">${esc(q.q || "(image)")}</div></div>`;
+    }
     if (!h) h = `<p class="empty">Ask anything about this site. Answers are grounded in your
       offline corpus and cited; the page you are on is used as context, not as evidence.
       The conversation is kept per site and survives restarts.</p>`;
@@ -544,7 +552,16 @@
     const q = preset !== undefined ? preset : input.value.trim();
     // A region with no typed question is a legitimate turn — the picture IS the question — so only
     // a typed-and-empty send is a no-op.
-    if (streaming || (!q && !image)) return;
+    if (!q && !image) return;
+    // QUEUE instead of refusing. A turn can run for minutes, and being unable to type the obvious
+    // follow-up while watching it work means either losing the thought or interrupting. The
+    // question is recorded now and asked when the current turn finishes.
+    if (streaming) {
+      if (preset === undefined) input.value = "";
+      queued.push({ q, image, thumb, source });
+      render();
+      return;
+    }
     if (preset === undefined) input.value = "";
     turns.push({ role: "user", content: q || "(region sent)", image: thumb });
     streaming = true; acc = ""; status = ""; cites = null; sources = null;
@@ -554,7 +571,7 @@
     clearInterval(ticker);
     ticker = setInterval(tick, 1000);
     render(); tick();
-    go.disabled = true;
+    // Ask stays ENABLED: the next question queues rather than being refused.
     try {
       chrome.runtime.sendMessage({ type: "oracle:chat", message: q, image, session, source });
     } catch (_) {}
@@ -573,6 +590,13 @@
       try { chrome.runtime.sendMessage({ type: "oracle:chatSessions" }); } catch (_) {}
     }
   }));
+
+  function flushQueued() {
+    if (streaming || !queued.length) return;
+    const next = queued.shift();
+    // Straight back through send(), so a queued question is indistinguishable from one typed now.
+    send(next.q, next.image, next.thumb, next.source);
+  }
 
   go.addEventListener("click", () => send());
   input.addEventListener("keydown", (e) => {
@@ -632,7 +656,7 @@
     if (t.classList.contains("fold")) { stepsOpen = !stepsOpen; render(); return; }
     if (t.classList.contains("resume")) {
       turns = turns.filter((x) => !x.resume);          // drop the error we are answering
-      streaming = true; go.disabled = true; status = "picking up where it stopped…";
+      streaming = true; status = "picking up where it stopped…";
       turnFailed = false; startedAt = Date.now(); lastEventAt = Date.now();
       clearInterval(ticker); ticker = setInterval(tick, 1000);
       render();
@@ -846,7 +870,6 @@
     // conversation with "0 steps". Events are the evidence; trust them over the flag.
     if (!streaming && event !== "done" && event !== "error" && event !== "debug") {
       streaming = true;
-      go.disabled = true;
       turnFailed = false;
       stepsOpen = false;
       if (!startedAt) startedAt = Date.now();
@@ -902,6 +925,7 @@
         }
       }
       live = []; acc = ""; render();
+      flushQueued();
       return;
     }
     if (event === "error") {

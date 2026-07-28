@@ -67,9 +67,13 @@ READ_TOOLS = [
     _fn("look_at_page",
         "Take a screenshot and have the vision model read it. Use for charts, diagrams, colours, "
         "layout, or anything read_page cannot express as text — a dashboard's numbers are usually "
-        "in the pixels, so for 'what do these metrics show' this is the right tool. Costs about a "
-        "minute (the GPU swaps to the vision model and back), so prefer read_page when the answer "
-        "is text.",
+        "in the pixels, so for 'what do these metrics show' this is the right tool.\n"
+        "COST, precisely, because it changes what is worth doing: the GPU holds one model at a "
+        "time, so a look costs a swap to vision and a swap back — about a minute. BUT tool calls "
+        "you request TOGETHER in one reply run back-to-back without the text model in between, so "
+        "several looks in one reply cost ONE swap, not one each. If you need to survey three views, "
+        "ask for click, look, click, look, click, look in a SINGLE reply rather than one per turn. "
+        "Prefer read_page when the answer is text.",
         {"full_page": {"type": "boolean", "description": "true scrolls and stitches the whole page; "
                                                          "false (default) captures the viewport."},
          "question": {"type": "string", "description": "What to look for, so the reading is focused "
