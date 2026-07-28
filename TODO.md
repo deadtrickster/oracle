@@ -733,6 +733,60 @@ the number. (Protocol §5: a new idea goes to §H, not §G — the freeze is the
   into the preamble moves the boundary to token zero — which breaks caching **while still producing
   correct answers**, visible only as latency.
 
+### 2026-07-28 (evening) — per-host chat, site packs, and four self-inflicted regressions 🔴→✅
+- **Per-host chat** (`oracle_chat.py`, `chrome-capture/chat.js`, `POST /chat`): one continued
+  conversation per HOST, append-only with epochs, transcript on the receiver so it survives the tab
+  and a restart. Selection and region can be sent into it; a region is read by qwen3-vl and the
+  **reading** enters the transcript, not the pixels. Verified live: turn 2 answered "what did I just
+  ask you about?" from turn 1.
+- **Per-domain context** (`oracle_sitectx.py`): curated packs for hosts we own (stroppy.io + every
+  subdomain — vocabulary, the PostgreSQL/OrioleDB engine notes taken verbatim from stroppy-mcp, and
+  a "how to answer about this site" section), otherwise the site's own `/AGENTS.md` fetched by the
+  extension. Untrusted files are fenced, non-citable and explicitly never instructions; curated
+  packs may instruct, because they are ours.
+- **Debug tab**: a checkbox turns on `debug` SSE events from BOTH sides — what the extension
+  captured and sent, what the receiver composed, section by section, verbatim. A SKIPPED step
+  reports itself with the reason, because a debug view that only shows what happened reads as "the
+  other thing never happens".
+- **Full-page screenshots**: scroll + stitch, capped (6 slices / 12000 CSS px / 9000 device px),
+  sticky chrome hidden after the first slice, scroll restored, and labelled to the model as
+  *stitched* — content far apart in that image was never on screen together.
+- **🔴 Four regressions, three of them mine, all found by him testing:**
+  1. the shared preamble lumped curated packs in with untrusted AGENTS.md → every stroppy question
+     answered "The corpus doesn't cover this" while the material that covered it sat in the prompt;
+  2. an empty retrieval short-circuited before the model ran, so a pack could never rescue it;
+  3. the page-context block ended with "say so even when this page appears to" — written pre-packs,
+     now sitting above "Excerpts: NONE" as an order to refuse;
+  4. no timeout on the `/AGENTS.md` fetch → any unresponsive host hung every request *before the
+     receiver was contacted* ("stuck on Consulting the corpus…"). 2.5 s deadline now.
+  Plus: a dead SSE stream (my ~15 receiver restarts during his testing) left the card frozen on a
+  half-answer, indistinguishable from thinking. Streams that end without done/error now say so.
+- **Vision prompt iterated against a REAL screenshot** (his stroppy-cloud run page). Root cause of
+  "it explains Grafana to me": the vision path had **no system message at all**, so the pack's
+  answering rules read as background prose. Three further fixes, each from an actual error: `pool=400`
+  called "400 VUs"; "well below the peak of 50K ops/s" (that is the axis maximum, not capacity);
+  PostgreSQL `checkpoint_timeout` advice for an OrioleDB run. Final answer opens with the run
+  identity, flags the 11x p50→p99 spread, and verifies the transaction mix against the TPC-C spec.
+
+### G6 — THE CHAT AS A HARNESS: tools, not just context 📐 (DESIGN §6.3)
+- **The prompt that exposes the ceiling (his):** *"what do you think about this page?"* goes to
+  corpus retrieval, because retrieval is the only thing a turn knows how to do — and the corpus has
+  nothing to say about a page it has never seen. The honest answer requires LOOKING, so the model
+  needs to act, not just be fed.
+- **Tools:** `look_at_page` (screenshot → qwen3-vl → reading as the tool result), `read_page`,
+  `search_corpus` (what every turn does unconditionally today, made explicit and optional),
+  then `click` / `type`.
+- **The extension drives the loop.** The receiver cannot execute a browser action, only ask for one:
+  a turn ends with a `tool_request`, the extension performs it and posts the result back as the next
+  turn. Same closed-loop rule as Axiom 2 — the model decides "move the right hand", the harness must
+  actually move it, verified.
+- **Acting is not retrieval.** `click`/`type` run inside a logged-in session where a wrong action is
+  a wrong DEED, not a wrong answer — a deleted run, a triggered rerun, a submitted form. Reading
+  tools can be automatic; acting tools need a gate, and the gate belongs in the harness, not in a
+  prompt asking the model to be careful.
+- **Retire retrieval-by-default:** retrieve when the question is about the corpus, look when it is
+  about the page. The model is what knows which.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy

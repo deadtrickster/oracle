@@ -1066,6 +1066,102 @@ audited and never expires. Which gives a rule sharp enough to actually apply: **
 describe how to use a tool. It must never describe what the data contains.** The data is allowed to
 change. The sentence about it never does.
 
+## Act 23 — The assistant couldn't see, so it answered anyway
+
+The shim that lets Claude Code run on a local qwen had one line in it I'd written months earlier and
+never thought about again: when a message contained an image, it replaced it with
+`[image omitted — model is text-only]` and carried on.
+
+Which is true of the text model, and useless to me. I'd paste a screenshot of a dashboard, ask what
+was wrong with it, and get a fluent answer built from the filename and the surrounding conversation.
+Not a refusal. An *answer*. The picture I was asking about had been dropped on the floor between
+Claude Code and the model, and nothing in the transcript said so.
+
+The machine is not text-only. It has a 30B vision model sitting right there. What it can't do is run
+both at once: the card is 24 GB, the text model is 20.6, qwen3-vl is 17. They're mutually exclusive
+by arithmetic, not by policy.
+
+So the shim takes the detour. An image in a message means: swap the vision model in, have it *read*
+the picture, swap back, and put the reading in the prompt. The conversation resumes with the image
+described in context. It costs minutes and it's completely visible while it happens, because a
+silent four-minute pause is indistinguishable from a hang — I know, because the first version was
+reported to me as one.
+
+Two details turned out to be load-bearing.
+
+The first is that **the cache is not an optimisation.** Claude Code re-sends the entire transcript
+on every turn, so an image pasted once is present in every subsequent request. Without a
+content-addressed cache, each turn would swap the GPU twice — out and back, minutes each way — to
+re-read a picture that hadn't changed. The readings are keyed by `sha256` of the bytes, so the same
+image in another session under another filename is one read, forever.
+
+The second is **who is allowed to conclude.** The obvious design is to let the vision model answer
+the question — it can see, after all. That's exactly wrong. It would take a weaker model's
+conclusion and hand it to a stronger one wearing the clothes of an observation, and everything
+downstream would treat "what the image says" as fact. So the vision model is prompted to *report*:
+transcribe verbatim, describe structure, say "illegible" rather than approximate, and explicitly
+**not** answer the question. The block that lands in the text model's context is labelled as one
+model's reading, not as the image.
+
+I measured it on a Grafana screenshot. The text model came back quoting 17.6.0, 4.19 GB, 40.9 MB —
+numbers that exist only in those pixels — and volunteered, unprompted, that it had not seen the
+image and these came from the vision model's report. That last clause is the whole design working. A
+system that can't see should say so *while* using what it was told.
+
+## Act 24 — I moved 2,500 tokens and the assistant stopped answering
+
+Prompt processing on this box runs at 300–500 tokens per second. That number is boring right up
+until you notice that the same 2,500-token block of reference material was being re-processed on
+every single request — six seconds, every time, to re-read text that hadn't changed.
+
+llama.cpp will happily skip it. It routes each request to whichever slot has the best matching
+prompt **prefix** and only processes what comes after. I had simply never given it a prefix to
+match: each feature's system message *was* its task instruction, so "explain this" and "fact-check
+this" and the chat panel differed at token zero and shared nothing.
+
+So I restructured. Everything constant went into the system message — a preamble, then the site's
+reference material — and every task instruction moved down into the user message, below the
+boundary. Measured with the server's own tokenizer against its own timing log: an identical request
+went from 9,325 tokens processed to **4**. A *different* question on the same site reused 2,533. It
+worked exactly as advertised.
+
+And it broke every answer in the product.
+
+Because in the act of writing that shared preamble, I described all the context uniformly: page
+context, the site's own published file, our curated reference material — all of it "not evidence,
+never licenses a claim the excerpts don't support". Which is right for two of those three and
+catastrophically wrong for the third. The curated pack is material *we wrote*, for exactly that
+site, precisely so it could answer questions the corpus can't. I had just forbidden the model from
+using it.
+
+The report came back as four words: *nothing works actually now*. Not chat, not explain. Every
+question about a benchmark dashboard answered with "The corpus doesn't cover this" — while the
+material that covered it sat in the prompt, marked unusable.
+
+Then it got funnier. Fixing the preamble wasn't enough, because two *other* places encoded the same
+stale assumption. An empty retrieval short-circuited and returned "the corpus doesn't cover this"
+before the model was ever called — written back when excerpts were the only possible source. And the
+page-context block ended with a sentence I'd been proud of: *"if the excerpts do not answer the
+question, say so even when this page appears to."* Written to stop the thing becoming a web
+summariser. Now sitting directly above the words "Excerpts: NONE", where it read as an order to
+refuse.
+
+Three separate vetoes on the same answer, each individually defensible, each written before the
+thing it was now blocking existed.
+
+The lesson isn't "be careful when refactoring prompts", which is useless. It's that **a rule written
+against one failure mode outlives the assumption that made it correct**, and prompts have no type
+system to tell you. The excerpt-only rule was right when excerpts were the only source. It survived
+into a world with three sources and became a bug — invisible, because the system still produced
+grammatical, confident, well-formed output. It just said no.
+
+There's a second edge to this one. The restructure that caused it is also the most fragile thing in
+the repo: if anything request-specific ever leaks into that preamble — a date, a URL, a selection
+length — the cache boundary silently moves to token zero and the whole mechanism stops working
+*while still producing correct answers*. The only symptom is latency. That failure can't be caught
+by reading the output, so it's a test rather than a comment, and the test asserts the one property
+that matters: every feature, on a given host, must produce a byte-identical prefix.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
@@ -1197,3 +1293,12 @@ things actually happened — most beats are a thing I set out to do, the wall I 
 - "They shipped the fix the same afternoon I filed the repro. Two of my four bugs, gone in a point release — so I deleted my own workarounds."
 - "Deduping the pile you're about to add is the easy half. The hard half is that a third of it was already inside, under a different name."
 - "The figures aren't free. DeepDoc turns 132 books into 4,500 page-tasks and 28 hours — and a fiction shelf doesn't need figures."
+- "`[image omitted — model is text-only]`. True of the model, useless to me: it dropped the picture and answered anyway, from the filename."
+- "The machine isn't text-only. It just can't be both at once — 20.6 GB and 17 GB in a 24 GB card is arithmetic, not policy."
+- "The cache isn't an optimisation. Claude Code re-sends the whole transcript every turn, so without it the GPU swaps twice per turn to re-read a picture that hasn't changed."
+- "The vision model reports; the text model reasons. Letting the weaker one conclude would smuggle a guess into the context wearing the clothes of an observation."
+- "It quoted numbers that exist only in those pixels — and volunteered that it had never seen the image."
+- "An identical request went from 9,325 tokens processed to 4. Then every answer in the product broke."
+- "A rule written against one failure mode outlives the assumption that made it correct. Prompts have no type system to tell you."
+- "Three separate vetoes on the same answer, each individually defensible, each written before the thing it was blocking existed."
+- "It breaks the cache while still producing correct answers. The only symptom is latency — which is why it's a test and not a comment."

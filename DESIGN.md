@@ -1099,6 +1099,61 @@ It costs ~6 s of GPU — but spent in the background while the swap finishes, ra
 user's next question. Storing 11 KB of text instead of 112 MB of tensors to recover the same state
 is also, on reflection, simply the better trade.
 
+### 6.3 Per-host chat, and the harness it is turning into
+
+One continued conversation per **host** — not per tab, not per page. Reading a run report, then the
+docs, then another run is one line of thought about one system, and the host is what says so. The
+transcript lives on the receiver, so it survives the tab, the browser and a restart.
+
+**Three sources, kept apart.** The single-source rule the one-shot features use ("answer ONLY from
+the excerpts") cannot apply in a conversation: it would refuse *"what did we just decide?"*. So it
+becomes an **attribution** rule — corpus excerpts are evidence and carry numbered citations; page
+and site context explain the question and are never cited; the conversation answers questions about
+itself — with the offline rule intact where it matters: a technical fact not in the excerpts is "the
+corpus doesn't cover that", never something recalled from the weights.
+
+**Append-only, with epochs.** The store never rewrites a turn, because rewriting invalidates the KV
+prefix from the edit onward (§6.2) and turns every later turn into a full re-process. An over-budget
+conversation starts a new *epoch*; the old turns stay on disk. A roll happens before a **user** turn,
+never mid-exchange, so an epoch never opens with a reply to a question it cannot see.
+
+**Images become text.** A region sent to chat is read by qwen3-vl and the *reading* enters the
+transcript, not the pixels — so three turns later "that spike" still refers to something, the
+follow-up costs no GPU swap, and the conversation stays replayable into a cached prefix.
+
+#### Where this is going: the chat is becoming a harness (planned, TODO G6)
+
+The current shape has a clear ceiling, and it shows up in one question: *"what do you think about
+this page?"* That goes to corpus retrieval, because retrieval is the only thing the turn knows how
+to do — and the corpus has nothing to say about a page it has never seen. The honest answer requires
+*looking*, which means the model needs to be able to **act**, not just be fed.
+
+So chat gains tools, and the browser becomes the effector:
+
+| tool | what it does |
+|---|---|
+| `look_at_page` | screenshot the viewport (or full page) → qwen3-vl reads it → reading returns as the tool result |
+| `read_page` | the rendered text, or a named region of it |
+| `search_corpus` | what the turn does unconditionally today, made explicit and optional |
+| `click` / `type` | act on the page — gated, see below |
+
+Two architectural points this forces, both worth stating before building:
+
+1. **The extension drives the loop, not the receiver.** The receiver cannot execute a browser
+   action; it can only ask for one. So a turn ends with a `tool_request` event, the extension
+   performs it, and posts the result back as the next turn. The effector is the component that can
+   actually reach the DOM — which is the same reason the extension exists at all (§6.1), and the
+   same closed-loop rule as Axiom 2: the model decides "move the right hand", and the harness must
+   *actually move it*, verified.
+2. **Acting on a logged-in page is not retrieval.** `click` and `type` operate on the user's
+   authenticated session, where a wrong action is not a wrong answer but a wrong *deed* — a deleted
+   run, a triggered rerun, a submitted form. Reading tools can be automatic; acting tools need an
+   explicit gate, and the gate belongs in the harness rather than in a prompt rule asking the model
+   to be careful.
+
+The retrieval-by-default behaviour goes away with this: a turn should retrieve when the question is
+about the corpus and look when it is about the page, and the model is the thing that knows which.
+
 ## 7. MCP servers (the tool layer)
 
 All read-only or query-only, bridged stdio→SSE via mcp-proxy, systemd user services:

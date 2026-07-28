@@ -94,6 +94,12 @@ Everything in this repo that generalises past this machine is a corollary of the
   docstring, which is prompt too, and never gets audited. A list in a prompt doesn't read as "for
   example"; it reads as ground truth. The fix was deletion, and a rule: **a prompt may describe how
   to use a tool; it must never describe what the data contains.**
+- **I moved 2,500 tokens and every answer broke.** Sharing one prompt prefix across features took an
+  identical request from 9,325 tokens processed to **4**, and a new question on the same site now
+  skips 2,533. It also, in the same edit, described our own curated reference material as "not
+  evidence" — so the assistant began refusing every question that material existed to answer, in
+  three different places, each a rule written correctly against an older world. A rule outlives the
+  assumption that made it right, and prompts have no type system to tell you.
 - **The GPU holds one big model; the chat pretends otherwise.** 20.6 GB of text model and 17 GB of
   vision model do not fit in 24 GB, so the shim used to translate every pasted screenshot into
   "[image omitted — model is text-only]" and let the model answer from the filename. It isn't
@@ -142,10 +148,14 @@ CPU / RAM      RAGFlow + DeepDoc parsing · SereneDB doc store (Postgres-wire/Du
   tab — the pages a server-side fetch can't reach — as clean Markdown, and answers "explain this" /
   "fact-check this" from the corpus in a popup glued to the selection. Captures queue offline and
   drain when the backend returns, so it works mid-flight with the stack off.
-- **Vision, four ways in**: drag a region, right-click an image, explain the whole viewport, or
-  paste a screenshot into a local Claude Code chat. All of them send the page's *text* with the
-  pixels and swap the GPU automatically — one 24 GB slot, arbitrated by a single shared module
-  ([DESIGN.md](DESIGN.md) §6.1).
+- **Vision, four ways in**: drag a region, right-click an image, explain the whole viewport (scrolled
+  and stitched, capped), or paste a screenshot into a local Claude Code chat. All of them send the
+  page's *text* with the pixels and swap the GPU automatically — one 24 GB slot, arbitrated by a
+  single shared module ([DESIGN.md](DESIGN.md) §6.1).
+- **A conversation per site**: a pinned chat panel with one continued, append-only transcript per
+  host, kept on the receiver so it outlives the tab. Corpus excerpts are evidence and get citations;
+  the page and the site's own reference material explain the question and don't. Becoming a proper
+  harness next — tools to look at and act on the page, not just be fed it (§6.3).
 - **Curation**: a rules→LLM-judge cascade that deletes retrieval poison (exercises, ToC, index,
   OCR garbage), a versioned labeling rubric with a human-in-the-loop labeling UI, and an
   in-progress trained junk classifier.
