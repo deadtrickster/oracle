@@ -19,6 +19,12 @@ from pathlib import Path
 
 os.environ["ORACLE_BATCH_MAX"] = "3"
 os.environ["ORACLE_BATCH_MAX_SECONDS"] = "60"
+# Its OWN state file. The broker's whole point is that every Oracle process shares one queue — which
+# means a test run against the default path would queue behind the live receiver's real GPU work,
+# and worse, make the receiver queue behind the test. Tests must not compete with production for a
+# resource they are pretending to model.
+import tempfile as _tf                                    # noqa: E402
+os.environ["ORACLE_BROKER_STATE"] = str(Path(_tf.mkdtemp(prefix="oracle-broker-test-")) / "b.json")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oracle_broker as br                                # noqa: E402
 
@@ -134,8 +140,60 @@ try:
 except RuntimeError:
     pass
 check("nothing is left holding the GPU", br.status()["active"] == 0, str(br.status()))
-check("and the next request proceeds immediately", br.lease("vl").__enter__() == "")
-br._broker.release()
+with br.lease("vl") as note:
+    check("and the next request proceeds immediately", note == "", note)
+check("released again afterwards", br.status()["active"] == 0, str(br.status()))
+
+print("\n6. it works ACROSS PROCESSES — the whole reason it is a file")
+# The in-process version batched per process, so the browser receiver and the Claude-Code shim
+# could still make the GPU ping-pong between them. Real subprocesses, or this proves nothing.
+import subprocess                                        # noqa: E402
+import textwrap                                          # noqa: E402
+
+HOLD = textwrap.dedent("""
+    import sys, time, os
+    sys.path.insert(0, os.environ["ORACLE_SRC"])
+    import oracle_broker as br
+    with br.lease(sys.argv[1]):
+        print("START", flush=True)
+        time.sleep(float(sys.argv[2]))
+    print("END", flush=True)
+""")
+env = {**os.environ, "ORACLE_SRC": str(Path(__file__).resolve().parent)}
+holder = subprocess.Popen([sys.executable, "-c", HOLD, "text", "1.2"], env=env,
+                          stdout=subprocess.PIPE, text=True)
+assert holder.stdout.readline().strip() == "START"
+st = br.status()
+check("another process's lease is visible here", st["active"] == 1 and st["holder"] == "text",
+      str(st))
+t0 = time.time()
+with br.lease("vl"):
+    waited = time.time() - t0
+check("a vl lease in THIS process waits for it", waited > 0.5, f"{waited:.2f}s")
+holder.wait(timeout=10)
+check("and the file shows nobody holding it afterwards", br.status()["active"] == 0,
+      str(br.status()))
+
+print("\n7. a process that dies holding the GPU does not wedge it")
+KILLME = textwrap.dedent("""
+    import sys, time, os
+    sys.path.insert(0, os.environ["ORACLE_SRC"])
+    import oracle_broker as br
+    tok, _ = br.acquire("vl")
+    print("HELD", flush=True)
+    time.sleep(60)
+""")
+victim = subprocess.Popen([sys.executable, "-c", KILLME], env=env,
+                          stdout=subprocess.PIPE, text=True)
+assert victim.stdout.readline().strip() == "HELD"
+check("it holds the GPU", br.status()["holder"] == "vl", str(br.status()))
+victim.kill()
+victim.wait(timeout=10)
+t0 = time.time()
+with br.lease("text") as note:
+    took = time.time() - t0
+check("a dead holder is reaped rather than blocking forever", took < 3, f"{took:.2f}s")
+check("nothing is left over", br.status()["active"] == 0, str(br.status()))
 
 print()
 if fails:

@@ -31,11 +31,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # Vision detour. Optional on purpose: the shim's job is translating tool calls, and it must keep
 # doing that on a machine where these modules or the vision unit are absent.
 try:
+    import oracle_broker
     import oracle_vision
     import oracle_vram
     VISION = os.environ.get("ORACLE_SHIM_VISION", "1").lower() in ("1", "true", "yes", "on")
 except Exception:                                    # pragma: no cover - degraded but functional
-    oracle_vision = oracle_vram = None
+    oracle_broker = oracle_vision = oracle_vram = None
     VISION = False
 
 OLLAMA = os.environ.get("ORACLE_OLLAMA_URL", "http://localhost:11434").rstrip("/")
@@ -267,6 +268,14 @@ async def vision_detour(pending: list, question: str):
     when that is most likely to happen."""
     n = len(pending)
     yield f"{n} image{'s' if n > 1 else ''} in this message — reading with qwen3-vl."
+    # Queue for the GPU like everyone else. This process used to swap directly, so a Claude-Code
+    # image and a browser chat could take turns thrashing the card — correct (oracle_vram's flock
+    # serialises the swap) but slow, and invisible from either side. The broker's state is a file
+    # precisely so the two processes share one queue.
+    gpu = oracle_broker.lease("vl") if oracle_broker else None
+    waited = gpu.__enter__() if gpu else ""
+    if waited:
+        yield waited
     try:
         async for note in _athread(lambda: oracle_vram.ensure("vl")):
             yield note
@@ -284,8 +293,22 @@ async def vision_detour(pending: list, question: str):
             job["container"][job["pos"]] = {
                 "type": "text", "text": oracle_vision.block(text, job["label"])}
     finally:
-        async for note in _athread(lambda: oracle_vram.ensure("text")):
+        # Release the vision lease BEFORE taking a text one, or this process waits for itself.
+        if gpu:
+            gpu.__exit__(None, None, None)
+        async for note in _athread(_ensure_text_leased):
             yield note
+
+
+def _ensure_text_leased():
+    """oracle_vram.ensure("text") under a broker lease, as one blocking generator for _athread."""
+    if oracle_broker is None:
+        yield from oracle_vram.ensure("text")
+        return
+    with oracle_broker.lease("text") as waited:
+        if waited:
+            yield waited
+        yield from oracle_vram.ensure("text")
 
 
 async def ensure_text_backend():
@@ -296,7 +319,7 @@ async def ensure_text_backend():
         return
     if oracle_vram.text_available() or not oracle_vram.vl_available():
         return
-    async for note in _athread(lambda: oracle_vram.ensure("text")):
+    async for note in _athread(_ensure_text_leased):
         yield note
 
 
