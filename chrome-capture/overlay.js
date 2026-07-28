@@ -294,7 +294,16 @@
     }
     // a GPU swap takes 30-60s; say so, or it is indistinguishable from a hang
     if (event === "status") { setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;${esc(data.text||"")}</p>`); return; }
-    if (event === "sources") { sources = data.sources || []; cites = data.citations || []; reranked = data.reranked !== false; if (acc) render(); }
+    if (event === "sources") {
+      sources = data.sources || []; cites = data.citations || []; reranked = data.reranked !== false;
+      // Retrieval is done but the first token is still ~40 s away on this box. Saying so is the
+      // difference between "working" and "hung" — the card used to hold one static line for the
+      // whole 80 s and looked identical to a stall.
+      if (acc) render();
+      else setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;retrieved ${sources.length}
+        source${sources.length === 1 ? "" : "s"} — writing the answer…</p>`);
+      return;
+    }
     else if (event === "delta") { acc += data.text || ""; render(); }
     else if (event === "done") { primaryDone = true; render(); }
     else if (event === "error") { primaryDone = true; acc = ""; setBody(thumbHtml() + `<p>${esc(data && data.error || "error")}</p>`); }

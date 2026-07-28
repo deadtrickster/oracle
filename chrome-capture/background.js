@@ -272,10 +272,16 @@ async function ground(tab, mode, selection) {
                                                        func: extractSelectionContext });
     where = r?.result || where;
   } catch (_) { /* injection refused; the selection alone still works */ }
+  // Always say SOMETHING, so the Debug tab can never be ambiguous between "switched off" and
+  // "broken". An empty pane looked the same in both cases, and the honest answer to "why is this
+  // empty" is usually the boring one.
   if (debug) {
     dbg(tab, { stage: "selection context", mode, around_chars: where.around.length,
                headings: where.headings, page_fallback_chars: where.page.length,
                text: where.around || where.page }, mode);
+  } else {
+    dbg(tab, { stage: "debug is OFF — tick “debug” in the Oracle popup and ask again to see every "
+                      "event and the full prompt" }, mode);
   }
   const body = mode === "factcheck"
     ? { claim: selection, url: tab.url, title: tab.title, agents_md, debug, where }
