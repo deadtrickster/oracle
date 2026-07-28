@@ -286,6 +286,27 @@ def _warm_other(kind: str):
         return ""
 
 
+def _where_from(kind: str) -> str:
+    """"from RAM" or "from disk" — measured, not assumed. Checked once at the start of a load and
+    reused, because mincore over 50 GB every two seconds would itself be the slow part."""
+    try:
+        paths = MODEL_FILES.get(kind) or []
+        if not paths:
+            return "loading"
+        fracs = [cached_fraction(p) for p in paths]
+        fracs = [f for f in fracs if f >= 0]
+        if not fracs:
+            return "loading"
+        worst = min(fracs)
+        if worst > 0.95:
+            return "from RAM — the page cache still has it; this is the copy into VRAM"
+        if worst > 0.3:
+            return f"partly from disk ({worst * 100:.0f}% was still cached)"
+        return "reading weights from disk"
+    except Exception:
+        return "loading"
+
+
 def _swap(kind: str):
     other = "text model" if kind == "vl" else "vision model"
     want = "qwen3-vl" if kind == "vl" else "the text model"
@@ -293,6 +314,7 @@ def _swap(kind: str):
 
     # Run it asynchronously and HEARTBEAT. A single message followed by minutes of silence is
     # indistinguishable from a hang; emitting elapsed time also keeps a long SSE connection warm.
+    where = _where_from(kind)          # measured BEFORE the load starts to pull pages around
     proc = subprocess.Popen([VRAM_SH, kind], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True)
     started = time.time()
@@ -303,7 +325,15 @@ def _swap(kind: str):
         time.sleep(2)
         waited = int(time.time() - started)
         if waited and waited % 10 < 2:
-            yield f"loading {want}… {waited}s (reading weights from disk)"
+            # Say where the bytes are ACTUALLY coming from. This used to read "reading weights from
+            # disk" unconditionally, which was true before the page-cache tier existed and has been
+            # a lie since — and it is the kind of lie that gets acted on: it reads as "you are short
+            # of RAM" when the file is 100% resident and the time is going somewhere else entirely.
+            #
+            # Even fully cached, a load is not instant: --no-mmap COPIES ~50 GB from page cache into
+            # the process, then pushes ~20 GB across PCIe into VRAM. That is the 20-30s, and no
+            # amount of RAM removes it.
+            yield f"loading {want}… {waited}s ({where})"
     out = proc.stdout.read() if proc.stdout else ""
 
     # HEALTH decides, not the exit code: llama-server accepts the socket long before the weights
