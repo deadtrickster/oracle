@@ -15,9 +15,13 @@ from pathlib import Path
 
 _tmp = Path(tempfile.mkdtemp(prefix="oracle-sitectx-test-"))
 os.environ["ORACLE_SITE_CTX_CACHE"] = str(_tmp / "cache.json")
-pack = _tmp / "pack.txt"
-pack.write_text("# Stroppy\n\nDatabase stress testing powered by k6. A VU is a virtual user.\n")
-os.environ["ORACLE_PACK_STROPPY"] = str(pack)
+# Packs are DISCOVERED from a directory — adding a site is dropping a file, not editing code — so
+# the fixture is a directory with a file named after the domain.
+_packdir = _tmp / "site-packs"
+_packdir.mkdir()
+(_packdir / "stroppy.io.md").write_text(
+    "# Stroppy\n\nDatabase stress testing powered by k6. A VU is a virtual user.\n")
+os.environ["ORACLE_SITE_PACKS"] = str(_packdir)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oracle_sitectx as sc  # noqa: E402
@@ -63,6 +67,22 @@ check("a miss is remembered as a miss", sc.cached("nothing.example") == "")
 check("and yields no block", sc.block("https://nothing.example/p2") == "")
 check("never-looked is distinguishable from a miss", sc.cached("unknown.example") is None)
 
+print("\n4b. adding a site is dropping a file, not editing code")
+(_packdir / "example.org.md").write_text("Example Org runs the widget factory.\n")
+sc._pack_cache.clear()
+b = sc.block("https://docs.example.org/thing")
+check("a pack that did not exist a moment ago is used", "widget factory" in b, b[:120])
+check("and it is matched by suffix", "About docs.example.org" in b)
+(_packdir / "docs.example.org.md").write_text("The docs subdomain has its own pack.\n")
+sc._pack_cache.clear()
+b = sc.block("https://docs.example.org/thing")
+check("the LONGEST matching domain wins", "own pack" in b, b[:120])
+check("the broader pack still covers other subdomains",
+      "widget factory" in sc.block("https://api.example.org/x"))
+(_packdir / "docs.example.org.md").unlink()
+(_packdir / "example.org.md").unlink()
+sc._pack_cache.clear()
+
 print("\n5. size is capped — an enormous file must not crowd out the question")
 big = "x" * 100000
 b = sc.block("https://huge.example/p", big)
@@ -72,7 +92,7 @@ check("says it was clipped", "site context truncated" in b)
 print("\n5b. the REAL shipped pack: bigger budget, and it fits whole")
 # The tests above deliberately stub the pack; here we want the file that actually ships, because
 # "does the pack we wrote survive its own cap" is a fact about the repo, not about a fixture.
-sc.PACKS["stroppy.io"] = [str(Path(__file__).resolve().parent / "site-packs/stroppy.io.md")]
+sc._PACK_DIR = Path(__file__).resolve().parent / "site-packs"
 sc._pack_cache.clear()
 b = sc.block("https://cloud.stroppy.io/runs/42")
 check("fits whole, uncut", "truncated" not in b, f"{len(b)} chars")

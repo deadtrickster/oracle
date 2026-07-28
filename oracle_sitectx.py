@@ -48,22 +48,29 @@ CACHE_PATH = Path(os.environ.get(
         "site-context.json")))
 TTL = float(os.environ.get("ORACLE_SITE_CTX_TTL", str(24 * 3600)))
 
-# Hardcoded packs: domain suffix -> file to read. "for now" by design (his call) — the general
-# mechanism is AGENTS.md, and this is the escape hatch for our own sites, which do not have one yet.
-# A suffix match covers the apex and every subdomain (docs./cloud./app.stroppy.io).
-# Order matters: a CURATED pack first, upstream docs only as a fallback. A domain pack's job is
-# vocabulary, and truncating 60 KB of documentation to fit the budget keeps whichever section
-# happens to come first — for Stroppy that is the Go driver interface, when what a reader of a run
-# report needs is what a VU is.
-_PACK_DIR = Path(__file__).resolve().parent / "site-packs"
-PACKS = {
-    "stroppy.io": [
-        os.environ.get("ORACLE_PACK_STROPPY", ""),
-        str(_PACK_DIR / "stroppy.io.md"),
-        str(Path.home() / "Projects/stroppy-io/stroppy-mcp/llms-full.txt"),
-        str(Path.home() / "Projects/stroppy-io/stroppy/AGENTS.md"),
-    ],
-}
+# Packs are DISCOVERED, not registered. `site-packs/<domain>.md` — the filename is the domain, and
+# adding a site is dropping a file in a directory. It used to be a dict in this module with a
+# hardcoded path into someone's home directory, which meant every new site was a code change and
+# the only site anyone had was in the source. A registry that must be edited is a registry that
+# quietly makes the first example look like the design.
+#
+# A suffix match covers the apex and every subdomain (docs./cloud./stage.cloud.stroppy.io), and the
+# LONGEST match wins, so a pack for one subdomain can override a broader one.
+_PACK_DIR = Path(os.environ.get("ORACLE_SITE_PACKS",
+                                str(Path(__file__).resolve().parent / "site-packs")))
+
+
+def _packs() -> dict:
+    """{domain: path} from the pack directory. Re-read each call — the directory is small and a
+    pack you just wrote should work without a restart."""
+    out = {}
+    try:
+        for f in _PACK_DIR.glob("*.md"):
+            if "." in f.stem:                  # a domain, not a README
+                out[f.stem.lower()] = f
+    except OSError:
+        pass
+    return out
 
 _pack_cache: dict = {}       # path -> (mtime, text)
 
@@ -76,28 +83,26 @@ def host_of(url: str) -> str:
 
 
 def _pack_for(host: str):
-    """(text, path) for a known domain, or (None, None). Suffix match: `a.b.stroppy.io` matches
-    `stroppy.io`, but `notstroppy.io` must not — hence the dot check."""
-    for suffix, paths in PACKS.items():
-        if host == suffix or host.endswith("." + suffix):
-            for p in paths:
-                if not p:
-                    continue
-                f = Path(p).expanduser()
-                try:
-                    st = f.stat()
-                except OSError:
-                    continue
-                hit = _pack_cache.get(str(f))
-                if hit and hit[0] == st.st_mtime:
-                    return hit[1], str(f)
-                try:
-                    text = f.read_text(errors="replace")
-                except OSError:
-                    continue
-                _pack_cache[str(f)] = (st.st_mtime, text)
-                return text, str(f)
-    return None, None
+    """(text, path) for a known domain, or (None, None). Suffix match: `a.b.example.com` matches
+    `example.com`, but `notexample.com` must not — hence the dot check. Longest match wins."""
+    matches = [(d, f) for d, f in _packs().items()
+               if host == d or host.endswith("." + d)]
+    if not matches:
+        return None, None
+    _, f = max(matches, key=lambda kv: len(kv[0]))
+    try:
+        st = f.stat()
+    except OSError:
+        return None, None
+    hit = _pack_cache.get(str(f))
+    if hit and hit[0] == st.st_mtime:
+        return hit[1], str(f)
+    try:
+        text = f.read_text(errors="replace")
+    except OSError:
+        return None, None
+    _pack_cache[str(f)] = (st.st_mtime, text)
+    return text, str(f)
 
 
 def _load_cache() -> dict:
