@@ -157,3 +157,13 @@ def _swap(kind: str):
     if not probe(force=True):
         raise RuntimeError(f"GPU swap to {kind} failed: {out.strip()[:300]}")
     yield f"{want} is resident"
+
+    # A restart empties every slot, so the model that just came back is fast at generating and slow
+    # at reading. Replay the recent prompt prefixes now, while the swap is still finishing, rather
+    # than charging the ~6 s of prompt processing to whoever asks the next question.
+    if kind == "text":
+        try:
+            import oracle_kv
+            yield from oracle_kv.warm_all()
+        except Exception:
+            pass                                     # a cold cache is slow, never wrong

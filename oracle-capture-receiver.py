@@ -60,6 +60,7 @@ EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # oracle_vram serialises across processes and keeps availability PROBED rather than configured — a
 # flag would have to be flipped in lockstep with every swap and would lie whenever the two drifted.
 import oracle_chat
+import oracle_kv
 import oracle_vision
 import oracle_vram
 # Per-domain context: a hardcoded pack for our own sites, otherwise the site's own /AGENTS.md as
@@ -551,14 +552,23 @@ _CHAT_TASK = (
     "TASK: continue the conversation. This is a chat panel, not an essay — keep it short.")
 
 
-def _system_for(site: str = "") -> str:
+def _system_for(site: str = "", host: str = "") -> str:
     """The cached prefix: the preamble, plus this host's site pack if there is one.
 
     The pack goes HERE rather than in the user message specifically so it lands inside the shared
     prefix — it is the largest constant block in the prompt and therefore the one most worth
     caching. It stays byte-identical between requests because it is read from a file and memoised
-    on mtime."""
-    return _PREAMBLE + ("\n\n" + site if site else "")
+    on mtime.
+
+    Recording it also lets it be replayed after a model restart (oracle_kv), which our own vision
+    swaps cause several times a day."""
+    system = _PREAMBLE + ("\n\n" + site if site else "")
+    if host:
+        try:
+            oracle_kv.remember(host, system)
+        except Exception:
+            pass
+    return system
 
 
 
@@ -628,7 +638,7 @@ def _page_context(url: str, title: str, where: dict | None) -> str:
 
 
 def _grounded_stream(retrieval_query: str, framing: str, task: str, site: str = "",
-                     debug: bool = False, page: str = ""):
+                     debug: bool = False, page: str = "", host: str = ""):
     """Shared retrieve→rerank→stream path behind /explain, /ask, /factcheck. Emits SSE (event, data)
     pairs: ('sources',{sources,reranked}) once, then ('delta',{text})*, then ('done',{}) | ('error',…).
 
@@ -665,7 +675,7 @@ def _grounded_stream(retrieval_query: str, framing: str, task: str, site: str = 
     # The site pack has moved OUT of here and into the cached system prefix. What is left varies
     # per request anyway: the task, where it was read, and the excerpts — which stay last, closest
     # to the answer, because they are what it must be built from.
-    system = _system_for(site)
+    system = _system_for(site, host)
     user = "\n\n".join(x for x in [task, framing, page, f"Excerpts:\n{context}"] if x)
     yield from _dbg(debug, "prompt sent to the text model", chars=len(user),
                     cached_prefix_chars=len(system), site_context_chars=len(site),
@@ -698,7 +708,8 @@ def explain_stream(selection: str, url: str = "", title: str = "", agents_md: st
     # block, which states it once and says what it may be used for.
     return _grounded_stream(
         selection, f'Selection:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_TASK,
-        oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where))
+        oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where),
+        oracle_sitectx.host_of(url))
 
 
 def ask_stream(question: str):
@@ -709,7 +720,8 @@ def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str 
                      debug: bool = False, where: dict | None = None):
     return _grounded_stream(
         claim, f'Claim to check:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_TASK,
-        oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where))
+        oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where),
+        oracle_sitectx.host_of(url))
 
 
 
@@ -817,7 +829,7 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
                  "worth noticing about it, using the excerpts where they apply.")
     user = "\n\n".join(parts)
 
-    system = _system_for(site)
+    system = _system_for(site, host)
     msgs = ([{"role": "system", "content": system}]
             + [{"role": t["role"], "content": t["content"]} for t in turns]
             + [{"role": "user", "content": user}])

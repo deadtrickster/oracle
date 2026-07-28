@@ -1068,6 +1068,37 @@ The same constraint is why the chat transcript is **append-only** (§6.1): summa
 old turns invalidates everything after the edit, turning every subsequent turn into a full
 re-process. An over-budget conversation starts a new *epoch* instead.
 
+**Surviving a restart — and a negative result worth keeping.** The vision detour restarts the text
+server several times a day, and a restart empties every slot, so the cache the section above
+describes is repeatedly thrown away by our own feature. The obvious fix is llama.cpp's
+`--slot-save-path`: dump a slot's KV to a file, load it back afterwards. It was built and measured,
+and it does not work on this build:
+
+| | |
+|---|---|
+| dump size | ~79 MB fixed + 13 KB/token — 112 MB for the prefix (q8_0 KV) |
+| save / restore | ~30 ms, vs ~6 s to re-process |
+| restore reports | `n_restored = 6033` tokens |
+| next request | `cache_n = 0` — **nothing reused** |
+
+Pinning the follow-up request to the restored slot (`id_slot`) made it worse. An earlier probe
+appeared to show 2,538 tokens reused, but that was a slot left warm by a previous run — the exact
+confound this measurement exists to defeat, and the reason the controlled sequence (restart →
+restore → ask, nothing in between) is the only one that counts.
+
+What ships instead is dumber and works: keep the **~11 KB of prefix text** and replay it as a
+one-token request after the swap. The model rebuilds the KV through the same path that warms it
+normally, so there is nothing subtle to get wrong. Measured, with a control:
+
+| after a restart | processed | reused |
+|---|---|---|
+| ask immediately (control) | 2,553 | 0 |
+| replay the prefix, then ask | **15** | **2,538** |
+
+It costs ~6 s of GPU — but spent in the background while the swap finishes, rather than inside the
+user's next question. Storing 11 KB of text instead of 112 MB of tensors to recover the same state
+is also, on reflection, simply the better trade.
+
 ## 7. MCP servers (the tool layer)
 
 All read-only or query-only, bridged stdio→SSE via mcp-proxy, systemd user services:

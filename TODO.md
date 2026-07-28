@@ -707,6 +707,32 @@ the number. (Protocol §5: a new idea goes to §H, not §G — the freeze is the
   alone, what the model finally sees) with the GPU stubbed — the expensive part is exactly the part
   you cannot iterate on.
 
+### 2026-07-28 (later) — prompt prefix shared and cached: 2,533 tokens/request ✅ (H16, DESIGN §6.2)
+- **Nothing shared a prefix** because each feature's system message WAS its task instruction —
+  explain, fact-check and chat differed at token zero, so the site pack was re-processed every
+  request at 300-500 tok/s. Restructured: preamble + site pack in the system message, task
+  instruction moved to the front of the user message. The three-source discipline moved into the
+  preamble, where every feature needed it anyway (chat had been carrying a private copy).
+- **Measured** (`measure-prefix-cache.py`): identical request → 4 tokens processed of 11,860 (33s →
+  15s); same host, new question → 2,535 reused; different host → 199. **My first measurement was
+  wrong** and proved nothing: it compared tokens PROCESSED between requests, but a request that
+  processes fewer tokens may simply have had a smaller prompt. The number is `total − processed`,
+  with total from the server's own `/tokenize`.
+- **🔴 NEGATIVE RESULT — `--slot-save-path` does not work here.** Dumps are ~79 MB + 13 KB/token and
+  save in ~30 ms, and restore reports `n_restored=6033` — after which the next request reuses
+  **zero**. Pinning `id_slot` made it worse. An earlier probe seemed to show 2,538 reused; that was
+  a slot left warm by the previous run, which is exactly why the controlled sequence (restart →
+  restore → ask, nothing between) is the only evidence that counts. The unit flag was reverted
+  rather than left as dead config.
+- **What ships instead:** keep the ~11 KB of prefix TEXT and replay it as a one-token request after
+  a swap (`oracle_kv.warm_all()`, called from `oracle_vram` once text is resident). Control: ask
+  after a restart → processed 2,553, reused 0. Warmed → processed **15**, reused **2,538**. Costs
+  ~6 s of GPU in the background instead of inside the user's next question.
+- **The fragility is deliberate and tested** (`test-prefix.py`): editing the preamble invalidates
+  every warm slot, editing a pack invalidates that host's, and anything request-specific leaking
+  into the preamble moves the boundary to token zero — which breaks caching **while still producing
+  correct answers**, visible only as latency.
+
 # G. THE WORK (the only checklist)
 
 Test for inclusion: **does this make a grounded answer more trustworthy — or make an untrustworthy
