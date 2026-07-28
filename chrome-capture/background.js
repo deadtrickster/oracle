@@ -72,6 +72,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "oracle:chatLoad") { if (sender.tab) chatLoad(sender.tab); return false; }
   if (msg.type === "oracle:chatReset") { if (sender.tab) chatReset(sender.tab); return false; }
   if (msg.type === "oracle:chatAllow") { if (sender.tab) chatAllow(sender.tab, msg.allow); return false; }
+  if (msg.type === "oracle:setDebug") { chrome.storage.local.set({ [DEBUG_KEY]: !!msg.on }); return false; }
   if (msg.type === "openChat") {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) openChat(tab); sendResponse({ ok: true }); });
     return true;
@@ -319,7 +320,8 @@ async function chatLoad(tab) {
     const r = await fetch(`${RECEIVER}/chat/history?host=${encodeURIComponent(host)}`);
     const d = r.ok ? await r.json() : { turns: [] };
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: d.turns || [],
-                                      epoch: d.epoch, actions: !!d.actions }).catch(() => {});
+                                      epoch: d.epoch, actions: !!d.actions,
+                                      debug: await debugOn() }).catch(() => {});
   } catch (_) {
     chrome.tabs.sendMessage(tab.id, { type: "oracle:chatHistory", host, turns: [] }).catch(() => {});
   }
@@ -336,11 +338,14 @@ async function chatSend(message, tab, image = "") {
                                                        func: extractSelectionContext });
     where = r?.result || where;
   } catch (_) { /* injection refused; the question still works */ }
-  if (debug) {
-    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "debug", data: {
-      side: "extension", stage: "chat send", host, around_chars: where.around.length,
-      headings: where.headings, page_fallback_chars: where.page.length } } }).catch(() => {});
-  }
+  // Always emit one, so an empty Debug tab can never mean two different things. The overlay card
+  // got this fix; the chat panel did not, and it looked broken for exactly the same reason.
+  chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "debug", data: debug
+    ? { side: "extension", stage: "chat send", host, around_chars: where.around.length,
+        headings: where.headings, page_fallback_chars: where.page.length }
+    : { side: "extension", stage: "debug is OFF — tick “debug” in the Oracle popup and ask " +
+                                  "again to see every tool call and the full prompt" } } })
+    .catch(() => {});
   try {
     const r = await fetch(RECEIVER + "/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },

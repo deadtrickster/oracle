@@ -150,6 +150,20 @@ check("the skipped call was filled with an error, not dropped",
 ids = [t.get("tool_call_id") for t in ch.history(HOST) if t["role"] == "tool"]
 check("every call has a result", set(ids) == {"a1", "a2"}, str(ids))
 
+print("\n5b. an ABANDONED call still yields a well-formed prompt")
+# Chrome may kill the MV3 service worker mid-loop, so the result never arrives. The transcript is
+# then correct about what happened and incomplete as a prompt — every tool_call needs a result or
+# the chat template cannot render it.
+ch.reset(HOST)
+ch.append(HOST, "user", "look at this")
+ch.append(HOST, "assistant", "looking", tool_calls=[call("look_at_page", {}, "dead1")])
+ch.append(HOST, "user", "still there?")
+msgs = ch.to_messages(ch.history(HOST))
+roles = [m["role"] for m in msgs]
+check("a synthetic result is inserted", roles == ["user", "assistant", "tool", "user"], str(roles))
+check("it says the step never ran", "never completed" in msgs[2]["content"])
+check("and matches the call id", msgs[2]["tool_call_id"] == "dead1")
+
 print("\n6. a stale result from an abandoned loop is ignored")
 n_before = len(ch.history(HOST))
 SCRIPT[:] = [{"text": "ok"}]

@@ -27,6 +27,19 @@
   // happens, because a harness that acts silently is one you cannot supervise.
   let steps = [];
   let actions = false;
+  let debugOn = false;
+  // A running clock, because "how long has this been going" is the question a blinking cursor
+  // cannot answer. A screenshot plus two GPU swaps is genuinely minutes; the difference between
+  // slow and stuck should be readable at a glance rather than inferred.
+  let startedAt = 0;
+  let ticker = null;
+
+  function tick() {
+    const el = root.querySelector(".elapsed");
+    if (!el || !startedAt) return;
+    const s = Math.round((Date.now() - startedAt) / 1000);
+    el.textContent = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  }
 
   root.innerHTML = `
     <style>
@@ -83,6 +96,8 @@
       .caret { display:inline-block; width:6px; height:1.05em; vertical-align:text-bottom;
         background:currentColor; opacity:.55; animation:bl 1s steps(2) infinite; }
       @keyframes bl { 50% { opacity:0; } }
+      .busy { margin-top:8px; font-size:11px; opacity:.75; }
+      .elapsed { opacity:.55; margin-left:6px; font-variant-numeric:tabular-nums; }
       .empty { opacity:.6; font-size:12px; }
       .dbg { flex:1; overflow:auto; padding:8px 12px; font:11px/1.45 ui-monospace,monospace; }
       .dbg .ev { border-top:1px solid rgba(128,128,128,.2); padding:6px 0; }
@@ -95,8 +110,9 @@
     <div class="panel">
       <div class="bar">
         <b>Oracle · chat <span class="h"></span></b>
+        <button class="ico dbgt" title="Record every tool call and the full prompt">🐞</button>
         <button class="ico act" title="Allow Oracle to click and type on this site">🖐</button>
-        <button class="ico newt" title="New topic (keeps the old one)">⎌</button>
+        <button class="ico newt" title="New topic (keeps the old one)">✚</button>
         <button class="ico min" title="Hide">–</button>
       </div>
       <div class="tabs">
@@ -144,12 +160,18 @@
     if (steps.length) h += steps.map((s) =>
       `<p class="step${s.acting ? " act" : ""}">${esc(s.says)}</p>`).join("");
     if (streaming) {
+      // The status line must appear even when text has ALREADY streamed. The model says what it is
+      // about to do and then calls the tool, so `acc` is non-empty exactly when the slow thing
+      // starts — and showing the status only when acc was empty meant a multi-minute screenshot
+      // plus two GPU swaps was represented by a blinking caret and nothing else. "It feels like it
+      // does something and stuck" is the correct reading of that UI; the caret says a token is
+      // coming, and no token was coming.
+      //
+      // Not "consulting the corpus" either: the model decides whether to search at all.
+      const busy = `<div class="busy"><span class="spin"></span> &nbsp;${esc(status || "thinking…")}` +
+        `<span class="elapsed"></span></div>`;
       h += `<div class="msg"><div class="who">oracle</div><div class="bub">` +
-        (acc ? md(acc) + `<span class="caret"></span>`
-             // a GPU swap runs for minutes; the status line is the difference between "working"
-             // and "hung", and it is the same channel the other cards use
-             : `<span class="spin"></span> &nbsp;${esc(status || "consulting the corpus…")}`) +
-        `</div></div>`;
+        (acc ? md(acc) + busy : busy) + `</div></div>`;
     }
     if (!h) h = `<p class="empty">Ask anything about this site. Answers are grounded in your
       offline corpus and cited; the page you are on is used as context, not as evidence.
@@ -171,9 +193,11 @@
     const n = root.querySelector(".tab .n");
     if (n) n.textContent = dbgEvents.length ? `(${dbgEvents.length})` : "";
     if (!dbgEvents.length) {
-      dbgEl.innerHTML = `<p class="empty">Nothing recorded. Turn on <b>Debug</b> in the Oracle
-        popup and ask again — every event, and every block of context that went into the prompt,
-        shows up here.</p>`;
+      dbgEl.innerHTML = debugOn
+        ? `<p class="empty">Recording is <b>on</b>. Ask something — every tool call, and every
+           block of context that went into the prompt, will show up here.</p>`
+        : `<p class="empty">Recording is <b>off</b>. Click the 🐞 in this panel's title bar (or
+           tick <b>debug</b> in the Oracle toolbar popup), then ask again.</p>`;
       return;
     }
     dbgEl.innerHTML = dbgEvents.map((e, i) => {
@@ -201,7 +225,11 @@
     if (preset === undefined) input.value = "";
     turns.push({ role: "user", content: q || "(region sent)", thumb });
     streaming = true; acc = ""; status = ""; cites = null; sources = null;
-    steps = []; dbgEvents = []; renderDbg(); render();
+    steps = []; dbgEvents = []; renderDbg();
+    startedAt = Date.now();
+    clearInterval(ticker);
+    ticker = setInterval(tick, 1000);
+    render(); tick();
     go.disabled = true;
     try { chrome.runtime.sendMessage({ type: "oracle:chat", message: q, image }); } catch (_) {}
   }
@@ -228,6 +256,21 @@
     actions = !actions;
     paintAct();
     try { chrome.runtime.sendMessage({ type: "oracle:chatAllow", allow: actions }); } catch (_) {}
+  });
+  // Debug lives HERE as well as in the toolbar popup. The empty Debug tab told you to go and find
+  // a checkbox in another surface, which is a poor answer to "why is this empty" when the switch
+  // could simply be next to the thing it controls.
+  function paintDbg() {
+    const b = $(".dbgt");
+    b.classList.toggle("on", debugOn);
+    b.title = debugOn ? "Recording tool calls and prompts — click to stop"
+                      : "Record every tool call and the full prompt (off)";
+  }
+  $(".dbgt").addEventListener("click", () => {
+    debugOn = !debugOn;
+    paintDbg();
+    try { chrome.runtime.sendMessage({ type: "oracle:setDebug", on: debugOn }); } catch (_) {}
+    renderDbg();
   });
   $(".min").addEventListener("click", () => { host.style.display = "none"; });
   $(".newt").addEventListener("click", () => {
@@ -261,8 +304,11 @@
       turns = (msg.turns || []).map((t) => ({ role: t.role, content: t.content }));
       root.querySelector(".bar .h").textContent = msg.host ? `· ${msg.host}` : "";
       actions = !!msg.actions;
+      debugOn = !!msg.debug;
       paintAct();
+      paintDbg();
       render();
+      renderDbg();
       return;
     }
     if (msg.type === "oracle:chatAsk") { send(msg.message || "", msg.image || "", msg.thumb); return; }
@@ -279,12 +325,14 @@
     if (event === "delta") { acc += data.text || ""; render(); return; }
     if (event === "done") {
       streaming = false; go.disabled = false;
+      clearInterval(ticker); ticker = null; startedAt = 0;
       if (acc.trim()) turns.push({ role: "assistant", content: acc, cites });
       acc = ""; render();
       return;
     }
     if (event === "error") {
       streaming = false; go.disabled = false;
+      clearInterval(ticker); ticker = null; startedAt = 0;
       turns.push({ role: "assistant", content: "_" + (data && data.error || "error") + "_" });
       acc = ""; render();
     }

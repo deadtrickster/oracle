@@ -59,8 +59,10 @@ READ_TOOLS = [
                                                        "the page. Omit for the whole page."}}),
     _fn("look_at_page",
         "Take a screenshot and have the vision model read it. Use for charts, diagrams, colours, "
-        "layout, or anything read_page cannot express as text. SLOW: it swaps the GPU, which takes "
-        "minutes — call it when the pixels genuinely matter, not as a first move.",
+        "layout, or anything read_page cannot express as text — a dashboard's numbers are usually "
+        "in the pixels, so for 'what do these metrics show' this is the right tool. Costs about a "
+        "minute (the GPU swaps to the vision model and back), so prefer read_page when the answer "
+        "is text.",
         {"full_page": {"type": "boolean", "description": "true scrolls and stitches the whole page; "
                                                          "false (default) captures the viewport."},
          "question": {"type": "string", "description": "What to look for, so the reading is focused "

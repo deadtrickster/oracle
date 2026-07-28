@@ -127,9 +127,20 @@ def append(host: str, role: str, content: str, tool_calls: list | None = None,
 
 
 def to_messages(turns: list) -> list:
-    """Transcript turns -> OpenAI chat messages, tool calls included."""
-    out = []
-    for t in turns:
+    """Transcript turns -> OpenAI chat messages, tool calls included and ALWAYS well formed.
+
+    Every assistant tool_call must be followed by a result: the chat template requires it, and a
+    call left dangling produces a malformed prompt rather than a clear error. They do get left
+    dangling — the loop runs in an MV3 service worker, which Chrome may terminate mid-flight, and
+    then nobody ever posts the result. The old transcript is not wrong about what happened; it is
+    just incomplete, and completing it is the harness's job, not the model's problem.
+
+    So a missing result is synthesised, and says what it is. The model can then reason about the
+    gap ("that step did not finish, let me try again") instead of being handed a prompt the
+    template cannot render."""
+    out, i = [], 0
+    while i < len(turns):
+        t = turns[i]
         m = {"role": t["role"], "content": t.get("content", "")}
         if t.get("tool_calls"):
             m["tool_calls"] = t["tool_calls"]
@@ -138,6 +149,20 @@ def to_messages(turns: list) -> list:
         if t.get("name"):
             m["name"] = t["name"]
         out.append(m)
+        if t["role"] == "assistant" and t.get("tool_calls"):
+            answered = set()
+            j = i + 1
+            while j < len(turns) and turns[j]["role"] == "tool":
+                answered.add(turns[j].get("tool_call_id"))
+                j += 1
+            for c in t["tool_calls"]:
+                if c.get("id") not in answered:
+                    out.append({"role": "tool", "tool_call_id": c.get("id"),
+                                "name": (c.get("function") or {}).get("name", ""),
+                                "content": "error: this step never completed (the browser was "
+                                           "closed or the extension was reloaded). Nothing was "
+                                           "done; call it again if you still need it."})
+        i += 1
     return out
 
 
