@@ -36,6 +36,18 @@ Note what it knows: the dashboard's **ID 24298** and `pg_exporter` appear nowher
 they come from the page's own text, which is sent with the image. The instance values (17.6.0,
 4.19 GB, 40.9 MB) it reads off the crop.
 
+And it can **act**: read the page, screenshot it, click through a site's own tabs, and correct
+itself when a step misses.
+
+![The chat harness clicking through a benchmark UI, failing a step, and recovering](docs/screenshots/chat-harness-recovery.png)
+
+Read that middle failure, because it is the design working rather than the demo working. It guessed
+a CSS selector; the tool answered *"that selector was a guess and the page does not have it — call
+read_page with NO selector"* **and handed back the whole page anyway**; it immediately found the real
+tabs and carried on. A failing tool that only says "not found" leaves a model with nothing to correct
+itself with, so it guesses again. Every step shows `✓`/`✗` with its reason, so the model's prose can
+be checked against what actually happened.
+
 The same detour runs inside a **local Claude Code chat**. Paste a screenshot, or `Read` a `.png`,
 and the shim swaps the vision model in, has it read the picture, swaps the text model back, and
 continues with the reading in context — the text model answers about an image it cannot see, and
