@@ -60,6 +60,7 @@ EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # oracle_vram serialises across processes and keeps availability PROBED rather than configured — a
 # flag would have to be flipped in lockstep with every swap and would lie whenever the two drifted.
 import oracle_chat
+import oracle_vision
 import oracle_vram
 # Per-domain context: a hardcoded pack for our own sites, otherwise the site's own /AGENTS.md as
 # fetched by the extension. Fenced and labelled at the point of use — it is text written by the
@@ -693,13 +694,50 @@ _CHAT_SYSTEM = (
 
 
 def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | None = None,
-                debug: bool = False, where: dict | None = None, host: str = ""):
-    """One turn of the per-host conversation. Emits the same SSE shape as the other streams."""
+                debug: bool = False, where: dict | None = None, host: str = "",
+                image: str = "", image_mime: str = "image/png"):
+    """One turn of the per-host conversation. Emits the same SSE shape as the other streams.
+
+    With an `image`, the turn takes the vision detour first: qwen3-vl READS the region, its reading
+    is written into the transcript as text, and the text model answers from there. The reading
+    persists, so three turns later "that spike in the graph" still refers to something — which is
+    the whole reason a screenshot belongs in a conversation rather than in a one-shot card."""
     host = host or oracle_sitectx.host_of(url)
     message = (message or "").strip()
-    if not message:
+    # A dragged region with nothing typed IS a turn — the picture is the question. Only a turn with
+    # neither text nor pixels is empty.
+    if not message and not image:
         yield ("error", {"error": "empty message"})
         return
+
+    # STEP 0: if a picture came with the question, turn it into text before anything else. It has
+    # to happen first because it needs the OTHER model on the card, and everything below needs the
+    # text one — doing it late would mean swapping twice.
+    reading = ""
+    if image:
+        data_url = image if image.startswith("data:") else f"data:{image_mime};base64,{image}"
+        try:
+            raw = base64.b64decode(data_url.split(",", 1)[1])
+            key = oracle_vision.sha(raw)
+        except Exception:
+            key = ""
+        cached = oracle_vision.cached(key) if key else None
+        if cached:
+            reading = cached
+            yield from _dbg(debug, "image reading (cached)", chars=len(reading), text=reading)
+        else:
+            yield ("status", {"text": "reading the region with qwen3-vl…"})
+            try:
+                for note in ensure_model("vl"):
+                    yield ("status", {"text": note})
+                reading = oracle_vision.describe(data_url, question=message,
+                                                 label=(title or url or "")[:120])
+                if key:
+                    oracle_vision.remember(key, reading, question=message, label=title or url)
+            except Exception as e:
+                yield ("status", {"text": f"could not read the image: {e}"})
+                reading = ""
+            yield from _dbg(debug, "image reading", chars=len(reading), text=reading)
 
     turns = oracle_chat.history(host)
     yield from _dbg(debug, "chat turn", host=host, epoch=oracle_chat.epoch(host),
@@ -708,13 +746,16 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
 
     # Retrieval uses the message alone. Folding the transcript into the query was tempting and is
     # exactly how a conversation's first topic ends up dominating retrieval for its whole life.
+    # With no typed question, the image's reading IS the query — otherwise a silent region drag
+    # would retrieve on an empty string and come back with whatever the index happens to rank first.
+    query = message or " ".join(reading.split())[:300]
     chunks, reranked, cites = [], False, []
     try:
         kb_ids = _kb_ids()
-        if kb_ids:
-            chunks, reranked = _retrieve(message, kb_ids)
-            chunks = _diversify(message, chunks) if chunks else []
-            cites = _citations(chunks, message) if chunks else []
+        if kb_ids and query:
+            chunks, reranked = _retrieve(query, kb_ids)
+            chunks = _diversify(query, chunks) if chunks else []
+            cites = _citations(chunks, query) if chunks else []
     except (urllib.error.URLError, ConnectionError, TimeoutError):
         yield from _dbg(debug, "retrieval skipped", why="RAGFlow unreachable")
     except Exception as e:
@@ -731,7 +772,11 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
     parts = [p for p in [page, site] if p]
     parts.append(f"Excerpts for THIS question:\n{excerpts}" if excerpts
                  else "Excerpts for THIS question: (retrieval returned nothing relevant)")
-    parts.append(f"Question: {message}")
+    if reading:
+        parts.append(oracle_vision.block(reading, "a region the user selected on this page"))
+    parts.append(f"Question: {message}" if message else
+                 "The user sent this region without a question — say what it shows and what is "
+                 "worth noticing about it, using the excerpts where they apply.")
     user = "\n\n".join(parts)
 
     msgs = ([{"role": "system", "content": _CHAT_SYSTEM}]
@@ -751,7 +796,11 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
 
     # Record the user turn only once the model is reachable, so a failed swap does not leave a
     # question in the transcript that was never asked of anything.
-    roll = oracle_chat.append(host, "user", message)
+    stored = message
+    if reading:
+        stored = ((message + "\n\n") if message else "") + oracle_vision.block(
+            reading, "a region the user selected on this page")
+    roll = oracle_chat.append(host, "user", stored)
     if roll["rolled"]:
         yield ("status", {"text": f"previous conversation was full — started a new topic "
                                   f"(epoch {roll['epoch']}); nothing was deleted"})
@@ -1272,7 +1321,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_sse(chat_stream(p.get("message", ""), p.get("url", ""),
                                            p.get("title", ""), p.get("agents_md"),
                                            bool(p.get("debug")), p.get("where"),
-                                           (p.get("host") or "").strip()))
+                                           (p.get("host") or "").strip(),
+                                           p.get("image", ""),
+                                           p.get("mime", "image/png")))
             elif self.path.startswith("/observe"):
                 self._send(observe(p.get("text", ""), float(p.get("weight", 1.0)),
                                    p.get("url", ""), p.get("title", "")))

@@ -55,6 +55,8 @@
       .msg .who { font-size:10px; opacity:.5; margin-bottom:2px; }
       .msg .bub { padding:7px 10px; border-radius:9px; background:rgba(128,128,128,.10); }
       .msg.me .bub { background:#e8f3f2; }
+      .thumb { display:block; max-width:100%; max-height:180px; border-radius:6px; margin-bottom:6px;
+        border:1px solid rgba(128,128,128,.35); }
       .msg p { margin:0 0 6px; } .msg p:last-child { margin:0; }
       .msg ul { margin:5px 0; padding-left:18px; }
       pre { background:#f4f4f4; padding:8px; border-radius:6px; overflow:auto; }
@@ -122,9 +124,10 @@
       const pl = OracleCite.plan(t.content, t.cites);   // excerpt -> sequential display number
       body = OracleCite.linkify(body, pl, "occ" + i) + OracleCite.footnotes(pl, "occ" + i);
     }
+    const thumb = t.thumb ? `<img class="thumb" src="${t.thumb}">` : "";
     return `<div class="msg ${t.role === "user" ? "me" : ""}">
       <div class="who">${t.role === "user" ? "you" : "oracle"}</div>
-      <div class="bub">${body}</div></div>`;
+      <div class="bub">${thumb}${body}</div></div>`;
   }
 
   function render() {
@@ -179,15 +182,17 @@
     }));
   }
 
-  function send() {
-    const q = input.value.trim();
-    if (!q || streaming) return;
-    input.value = "";
-    turns.push({ role: "user", content: q });
+  function send(preset, image, thumb) {
+    const q = preset !== undefined ? preset : input.value.trim();
+    // A region with no typed question is a legitimate turn — the picture IS the question — so only
+    // a typed-and-empty send is a no-op.
+    if (streaming || (!q && !image)) return;
+    if (preset === undefined) input.value = "";
+    turns.push({ role: "user", content: q || "(region sent)", thumb });
     streaming = true; acc = ""; status = ""; cites = null; sources = null;
     dbgEvents = []; renderDbg(); render();
     go.disabled = true;
-    try { chrome.runtime.sendMessage({ type: "oracle:chat", message: q }); } catch (_) {}
+    try { chrome.runtime.sendMessage({ type: "oracle:chat", message: q, image }); } catch (_) {}
   }
 
   root.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
@@ -197,7 +202,7 @@
     dbgEl.hidden = !wantDbg;
   }));
 
-  go.addEventListener("click", send);
+  go.addEventListener("click", () => send());
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
@@ -235,6 +240,7 @@
       render();
       return;
     }
+    if (msg.type === "oracle:chatAsk") { send(msg.message || "", msg.image || "", msg.thumb); return; }
     if (msg.type !== "oracle:chatEvent") return;
     const { event, data } = msg.ev || {};
     if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }

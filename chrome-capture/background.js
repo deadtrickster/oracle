@@ -24,6 +24,8 @@ chrome.runtime.onInstalled.addListener(() => {
   // The whole viewport, both models: page text (summarised) + a screenshot read by qwen3-vl.
   chrome.contextMenus.create({ id: "page-vl", title: "Explain this page with Oracle (vision)", contexts: ["page"] });
   chrome.contextMenus.create({ id: "chat", title: "Chat with Oracle about this site", contexts: ["page", "selection"] });
+  chrome.contextMenus.create({ id: "chat-sel", title: "Send selection to Oracle chat", contexts: ["selection"] });
+  chrome.contextMenus.create({ id: "chat-region", title: "Send a region to Oracle chat", contexts: ["page", "image", "selection"] });
   refreshBadge();
 });
 
@@ -36,6 +38,8 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   else if (info.menuItemId === "img") visionImage(info.srcUrl, tab);
   else if (info.menuItemId === "page-vl") visionPage(tab);
   else if (info.menuItemId === "chat") openChat(tab);
+  else if (info.menuItemId === "chat-sel") chatSelection(tab, info.selectionText || "");
+  else if (info.menuItemId === "chat-region") screenshotRegion(tab, "chat");
 });
 
 chrome.commands.onCommand.addListener((cmd) => {
@@ -56,12 +60,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) screenshotRegion(tab); sendResponse({ ok: true }); });
     return true;
   }
-  if (msg.type === "vision:region") { if (sender.tab) visionRegion(msg, sender.tab); return false; }
+  if (msg.type === "vision:region") {
+    if (sender.tab) (msg.target === "chat" ? chatRegion : visionRegion)(msg, sender.tab);
+    return false;
+  }
   if (msg.type === "visionPage") {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) visionPage(tab); sendResponse({ ok: true }); });
     return true;
   }
-  if (msg.type === "oracle:chat") { if (sender.tab) chatSend(msg.message, sender.tab); return false; }
+  if (msg.type === "oracle:chat") { if (sender.tab) chatSend(msg.message, sender.tab, msg.image || ""); return false; }
   if (msg.type === "oracle:chatLoad") { if (sender.tab) chatLoad(sender.tab); return false; }
   if (msg.type === "oracle:chatReset") { if (sender.tab) chatReset(sender.tab); return false; }
   if (msg.type === "openChat") {
@@ -307,7 +314,7 @@ async function chatLoad(tab) {
   }
 }
 
-async function chatSend(message, tab) {
+async function chatSend(message, tab, image = "") {
   const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev }).catch(() => {});
   let host = "";
   try { host = new URL(tab.url).host; } catch (_) {}
@@ -327,7 +334,8 @@ async function chatSend(message, tab) {
     const r = await fetch(RECEIVER + "/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, host, url: tab.url, title: tab.title,
-                             agents_md: await agentsMd(tab.url), debug, where }),
+                             agents_md: await agentsMd(tab.url), debug, where,
+                             image, mime: "image/png" }),
     });
     if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
     await pumpSSE(r.body, send);
@@ -335,6 +343,38 @@ async function chatSend(message, tab) {
     send({ event: "error", data: { error: "Oracle receiver offline." } });
   }
   observe(message, OBS.explain, tab.url, tab.title);
+}
+
+// Selection -> chat. Same gesture as "Explain this", different destination: the answer lands in
+// the conversation, so the follow-up question already knows what you were looking at.
+async function chatSelection(tab, selection) {
+  selection = (selection || "").trim();
+  if (!selection) return;
+  await openChat(tab);
+  const msg = `Explain this, from the page I'm reading:\n\n"${selection.slice(0, 2000)}"`;
+  chrome.tabs.sendMessage(tab.id, { type: "oracle:chatAsk", message: msg }).catch(() => {});
+}
+
+// Region -> chat. The pixels are read by qwen3-vl on the receiver and the READING is what enters
+// the transcript, so three turns later "that spike" still refers to something.
+async function chatRegion(msg, tab) {
+  const { rect, dpr, prompt } = msg;
+  await openChat(tab);
+  try {
+    const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const bmp = await createImageBitmap(await (await fetch(shot)).blob());
+    const sx = Math.round(rect.x * dpr), sy = Math.round(rect.y * dpr);
+    const sw = Math.max(1, Math.round(rect.w * dpr)), sh = Math.max(1, Math.round(rect.h * dpr));
+    const canvas = new OffscreenCanvas(sw, sh);
+    canvas.getContext("2d").drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
+    const b64 = await blobToB64(await canvas.convertToBlob({ type: "image/png" }));
+    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatAsk", message: (prompt || "").trim(),
+                                      image: b64, thumb: "data:image/png;base64," + b64 })
+      .catch(() => {});
+  } catch (e) {
+    chrome.tabs.sendMessage(tab.id, { type: "oracle:chatEvent", ev: { event: "error",
+      data: { error: "Could not capture that region: " + (e.message || e) } } }).catch(() => {});
+  }
 }
 
 async function chatReset(tab) {
@@ -401,13 +441,16 @@ async function agentsMd(url) {
 
 // ---------------------------------------------------------------- screenshot region -> vision model
 
-async function screenshotRegion(tab) {
+async function screenshotRegion(tab, target = "vision") {
   if (!scriptableTab(tab)) { notify("Can't screenshot this page (only http/https)."); return; }
   // NO pre-flight check on /status here. An earlier version refused when status.vision was false
   // and it silently broke the feature the moment auto-swap landed: `vision:false` now means only
   // "not resident at this instant", not "unavailable", so the guard aborted before the selector was
   // ever injected and the crosshair never appeared. The request itself swaps the model in.
   try {
+    // tell the selector where its result should go before it exists, so one selector serves both
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, args: [target],
+                                           func: (t) => { window.__oracleRegionTarget = t; } });
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["regionselect.js"] });
   } catch (e) { notify("Region select failed: " + e.message); }
 }

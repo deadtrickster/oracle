@@ -128,6 +128,29 @@ check("the system prompt separates the three sources",
 check("and keeps the offline rule", "cannot check you" in sysmsg)
 check("the exchange was recorded", [t["content"] for t in ch.history(H)][-2:] == ["why did p99 spike?", "ok"])
 
+print("\n7b. a region sent to chat becomes TEXT in the transcript")
+rcv.oracle_vision.describe = lambda url, question="", label="": "The panel shows p99 at 412ms."
+rcv.oracle_vision.cached = lambda k: None
+rcv.oracle_vision.remember = lambda *a, **k: None
+ch.reset(H)
+evs2 = list(rcv.chat_stream("what is wrong here?", "https://docs.stroppy.io/x", "Docs", None, True,
+                            None, H, image="iVBORw0KGgo=", image_mime="image/png"))
+u2 = seen["msgs"][-1]["content"]
+check("the reading is in the prompt", "p99 at 412ms" in u2)
+check("labelled as a model's reading, not as the image",
+      "read by qwen3-vl" in u2 and "not as ground truth" in u2)
+stored = ch.history(H)[0]["content"]
+check("and the READING, not the pixels, is what persists",
+      "p99 at 412ms" in stored and "iVBORw0KGgo" not in stored)
+check("so a later turn can still refer back to it", "read by qwen3-vl" in stored)
+
+ch.reset(H)
+list(rcv.chat_stream("", "https://docs.stroppy.io/x", "Docs", None, True, None, H,
+                     image="iVBORw0KGgo="))
+u3 = seen["msgs"][-1]["content"]
+check("a region with NO question still asks something sensible",
+      "without a question" in u3 and "worth noticing" in u3)
+
 print("\n8. retrieval uses the question, not the whole transcript")
 check("query was the message alone", "earlier question" not in u.split("Question:")[0] or True)
 done = [d for k, d in evs if k == "done"]

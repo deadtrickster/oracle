@@ -115,7 +115,9 @@
   function send() {
     const prompt = input.value.trim(), dpr = window.devicePixelRatio || 1;
     teardown();                                   // remove UI first, then capture clean pixels
-    setTimeout(() => { try { chrome.runtime.sendMessage({ type: "vision:region", rect, dpr, prompt }); } catch (_) {} }, 60);
+    // one selector, two destinations: the transient vision card, or the per-host conversation
+    const target = window.__oracleRegionTarget || "vision";
+    setTimeout(() => { try { chrome.runtime.sendMessage({ type: "vision:region", rect, dpr, prompt, target }); } catch (_) {} }, 60);
   }
   $(".go").addEventListener("click", send);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });

@@ -96,6 +96,12 @@ shows what was actually stored.
 > decide?" — so it becomes an *attribution* rule instead, with the offline rule intact: a technical
 > fact not in the excerpts is "the corpus doesn't cover that", never something recalled from weights.
 >
+> Two ways to feed it without typing: **Send selection to Oracle chat** and **Send a region to
+> Oracle chat** — the same gestures as *Explain this* and *Screenshot a region*, with the answer
+> landing in the conversation instead of a card that closes. A region is read by **qwen3-vl** and
+> the **reading**, not the pixels, is what enters the transcript — so three turns later "that spike"
+> still refers to something, and the follow-up costs no GPU swap.
+>
 > History is **append-only**. When a conversation outgrows its budget it starts a new **epoch**
 > rather than being compacted — rewriting history would invalidate the KV prefix cache and cost a
 > full re-process every turn. The ⎌ button ("new topic") is the same mechanism: nothing is deleted.
