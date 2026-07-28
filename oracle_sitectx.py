@@ -41,7 +41,11 @@ from pathlib import Path
 # room — an attacker who cannot make the model obey can still make it forget the question by
 # filling the window (Axiom 1).
 SITE_CTX_CHARS = int(os.environ.get("ORACLE_SITE_CTX_CHARS", "6000"))     # fetched AGENTS.md
-PACK_CHARS = int(os.environ.get("ORACLE_SITE_PACK_CHARS", "14000"))       # curated pack
+# Raised when packs began composing: a site with its own app carries both the parent domain's
+# vocabulary and its own URL grammar, and truncating the pair silently drops whichever came last.
+# ~20k chars is ~5k tokens, which sounds large until you remember it lives in the CACHED prefix and
+# is therefore processed once per host rather than once per question (§6.2).
+PACK_CHARS = int(os.environ.get("ORACLE_SITE_PACK_CHARS", "20000"))       # curated pack
 CACHE_PATH = Path(os.environ.get(
     "ORACLE_SITE_CTX_CACHE",
     str(Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")) / "oracle" /
@@ -82,27 +86,42 @@ def host_of(url: str) -> str:
     return m.group(1).split("@")[-1].split(":")[0].lower().rstrip(".")
 
 
-def _pack_for(host: str):
-    """(text, path) for a known domain, or (None, None). Suffix match: `a.b.example.com` matches
-    `example.com`, but `notexample.com` must not — hence the dot check. Longest match wins."""
-    matches = [(d, f) for d, f in _packs().items()
-               if host == d or host.endswith("." + d)]
-    if not matches:
-        return None, None
-    _, f = max(matches, key=lambda kv: len(kv[0]))
+def _read_pack(f: Path):
     try:
         st = f.stat()
     except OSError:
-        return None, None
+        return None
     hit = _pack_cache.get(str(f))
     if hit and hit[0] == st.st_mtime:
-        return hit[1], str(f)
+        return hit[1]
     try:
         text = f.read_text(errors="replace")
     except OSError:
-        return None, None
+        return None
     _pack_cache[str(f)] = (st.st_mtime, text)
-    return text, str(f)
+    return text
+
+
+def _pack_for(host: str):
+    """(text, sources) for a domain, or (None, None). Suffix match: `a.b.example.com` matches
+    `example.com`, but `notexample.com` must not — hence the dot check.
+
+    Packs COMPOSE, broad first then specific. `stroppy.io` carries the vocabulary and the engine
+    notes; `cloud.stroppy.io` carries that particular app's URL grammar. A longest-match-wins rule
+    would make the specific pack silently discard the general one, so every site with its own app
+    would have to restate everything the parent domain already said — and would drift from it."""
+    matches = sorted(((d, f) for d, f in _packs().items()
+                      if host == d or host.endswith("." + d)),
+                     key=lambda kv: len(kv[0]))
+    parts, names = [], []
+    for _, f in matches:
+        text = _read_pack(f)
+        if text:
+            parts.append(text)
+            names.append(f.name)
+    if not parts:
+        return None, None
+    return "\n\n".join(parts), ", ".join(names)
 
 
 def _load_cache() -> dict:
@@ -167,8 +186,9 @@ def block(url: str, fetched: str | None = None, citable: bool = False) -> str:
     if fetched is not None:
         remember(host, fetched)
 
-    pack, path = _pack_for(host)
+    pack, sources = _pack_for(host)
     if pack:
+        path = sources
         # Observed live (2026-07-28): the model cited the pack the way it cites corpus excerpts —
         # "From the Stroppy docs ([stroppy.io.md](source: stroppy.io.md))". Trustworthy content, but
         # the WRONG SHAPE: numbered citations in these answers are links into the corpus browser,
@@ -178,7 +198,7 @@ def block(url: str, fetched: str | None = None, citable: bool = False) -> str:
                 "material says…\"), but do NOT give it a bracketed number — those belong to the "
                 "corpus excerpts, and each one has to resolve to a page a reader can open.")
         return (f"About {host} — reference material we maintain for this site "
-                f"(source: {Path(path).name}). {cite}\n"
+                f"(source: {path}). {cite}\n"
                 f"{_clip(_strip_meta(pack), PACK_CHARS)}\n[end of site reference]")
 
     text = fetched if fetched else cached(host)

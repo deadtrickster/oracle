@@ -570,6 +570,24 @@ async function runBrowserTool(call, tab, notify = () => {}) {
       return `${out}\nAFTER: ${after?.url} — ${after?.title}\n${after?.text || ""}`;
     }
     if (call.name === "type_text") return String(await exec(toolType, [a]));
+    if (call.name === "navigate") {
+      // Same-origin only. A site's URL grammar is a tool for using THAT site; letting a page's own
+      // reference material send the tab anywhere would make "context from the site" into "control
+      // of the browser", which is not the trade the per-host permission was granted for.
+      let target;
+      try { target = new URL(a.url, tab.url); } catch (_) { return `not a URL: ${a.url}`; }
+      const here = new URL(tab.url);
+      if (target.origin !== here.origin) {
+        return `REFUSED: ${target.origin} is a different site. navigate only works within ` +
+               `${here.origin}; ask the user to open that themselves.`;
+      }
+      await chrome.tabs.update(tab.id, { url: target.href });
+      await new Promise((r) => setTimeout(r, 1200));
+      const after = await exec(() => ({
+        url: location.href, title: document.title,
+        text: (document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 3000) }));
+      return `navigated to ${after?.url} — ${after?.title}\n${after?.text || ""}`;
+    }
     if (call.name === "wait") {
       const s = Math.max(1, Math.min(15, Number(a.seconds) || 3));
       await new Promise((r) => setTimeout(r, s * 1000));

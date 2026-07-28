@@ -32,10 +32,10 @@ that owns the hand does the moving, and reports what actually happened.
 LOCAL = {"search_corpus"}
 
 # Tools that need a browser. The extension executes these and posts the result back.
-BROWSER = {"read_page", "look_at_page", "click", "type_text", "wait"}
+BROWSER = {"read_page", "look_at_page", "click", "type_text", "wait", "navigate"}
 
 # Tools that change the user's session. Only offered for hosts the user has enabled.
-ACTING = {"click", "type_text"}
+ACTING = {"click", "type_text", "navigate"}
 
 
 def _fn(name, description, properties, required=()):
@@ -77,6 +77,13 @@ READ_TOOLS = [
 ]
 
 ACT_TOOLS = [
+    _fn("navigate",
+        "Go to a URL in the tab you are working in. Only within the SAME SITE — this is for using a "
+        "site's own URL grammar (filters, tabs, ids) when its reference material documents one, "
+        "which is faster and more reliable than clicking through to the same place. It changes what "
+        "the user is looking at, so say why first.",
+        {"url": {"type": "string", "description": "Absolute URL on the current site."}},
+        ["url"]),
     _fn("click",
         "Click an element on the page. This ACTS on the user's logged-in session and cannot be "
         "undone by you — a click may delete, rerun, submit or navigate. Identify the target by its "
@@ -125,4 +132,6 @@ def describe(name: str, args: dict) -> str:
         return f"clicked “{a.get('text') or a.get('selector', '?')}”"
     if name == "type_text":
         return f"typed into {a.get('selector', '?')}"
+    if name == "navigate":
+        return f"went to {a.get('url', '?')}"
     return f"{name}({a})"
