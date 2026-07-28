@@ -762,6 +762,11 @@
       turns = (msg.turns || []).map((t) => ({ role: t.role, content: t.content,
                                               image: t.image || "", tool: t.tool || "",
                                               calls: t.calls || [] }));
+      // The transcript is authoritative; live items are provisional copies of what it now contains.
+      // Keeping both after a reload rendered the same paragraph twice — once committed, once still
+      // streaming — which is what a mid-turn session switch produced.
+      live = [];
+      acc = "";
       if (msg.session) session = msg.session;
       paintSession();
       currentHost = msg.host || "";
