@@ -281,8 +281,8 @@ async function ground(tab, mode, selection) {
                headings: where.headings, page_fallback_chars: where.page.length,
                text: where.around || where.page }, mode);
   } else {
-    dbg(tab, { stage: "debug is OFF — tick “debug” in the Oracle popup and ask again to see every "
-                      "event and the full prompt" }, mode);
+    dbg(tab, { stage: "debug is OFF — tick “debug” in the Oracle popup and ask again to see " +
+                      "every event and the full prompt" }, mode);
   }
   const body = mode === "factcheck"
     ? { claim: selection, url: tab.url, title: tab.title, agents_md, debug, where }
