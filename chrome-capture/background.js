@@ -198,6 +198,47 @@ async function drainQueue() {
 
 // ---------------------------------------------------------------- explain / fact-check (glued popup)
 
+// Where the selection sits on the page — the context that disambiguates it.
+//
+// "It collapses under contention" means one thing under a heading about locks and another under one
+// about connection pools, and the selection alone carries neither. So send the enclosing block and
+// the heading chain above it.
+//
+// Deliberately NOT the whole page: the corpus excerpts are what the answer is built from, and a few
+// thousand characters of nav, footer and sidebar would dilute them (Axiom 1) while adding nothing
+// that helps interpret the phrase. Whole-page text is a fallback for when the selection has no
+// usable container at all.
+function extractSelectionContext() {
+  const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+  const sel = window.getSelection();
+  const out = { around: "", headings: "", page: "" };
+  if (!sel || !sel.rangeCount) {
+    out.page = clean(document.body && document.body.innerText).slice(0, 2000);
+    return out;
+  }
+  let node = sel.getRangeAt(0).commonAncestorContainer;
+  if (node.nodeType === Node.TEXT_NODE) node = node.parentElement;
+  // climb until the container holds real surrounding prose, not just the selection again
+  let el = node;
+  const want = Math.max(400, clean(sel.toString()).length * 3);
+  while (el && el !== document.body && clean(el.innerText).length < want) el = el.parentElement;
+  out.around = clean(el && el.innerText).slice(0, 1500);
+
+  // the heading chain above it: walk backwards through the document for h1..h3, keeping the
+  // most recent of each level, which reconstructs "PostgreSQL > Locks" without a DOM tree walk
+  const heads = [...document.querySelectorAll("h1,h2,h3")];
+  const anchor = node instanceof Element ? node : node.parentElement;
+  const seen = {};
+  for (const h of heads) {
+    if (anchor && (h.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+      seen[h.tagName] = clean(h.innerText).slice(0, 120);
+    }
+  }
+  out.headings = ["H1", "H2", "H3"].map((k) => seen[k]).filter(Boolean).join(" › ");
+  if (!out.around) out.page = clean(document.body && document.body.innerText).slice(0, 2000);
+  return out;
+}
+
 async function ground(tab, mode, selection) {
   selection = (selection || "").trim();
   if (!scriptableTab(tab) || !selection) return;
@@ -209,9 +250,20 @@ async function ground(tab, mode, selection) {
   const endpoint = mode === "factcheck" ? "/factcheck" : "/explain";
   const agents_md = await agentsMd(tab.url);
   const debug = await debugOn();
+  let where = { around: "", headings: "", page: "" };
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId: tab.id },
+                                                       func: extractSelectionContext });
+    where = r?.result || where;
+  } catch (_) { /* injection refused; the selection alone still works */ }
+  if (debug) {
+    dbg(tab, { stage: "selection context", mode, around_chars: where.around.length,
+               headings: where.headings, page_fallback_chars: where.page.length,
+               text: where.around || where.page }, mode);
+  }
   const body = mode === "factcheck"
-    ? { claim: selection, url: tab.url, title: tab.title, agents_md, debug }
-    : { selection, url: tab.url, title: tab.title, agents_md, debug };
+    ? { claim: selection, url: tab.url, title: tab.title, agents_md, debug, where }
+    : { selection, url: tab.url, title: tab.title, agents_md, debug, where };
   const send = (ev) => chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode, ev }).catch(() => {});
   try {
     const r = await fetch(RECEIVER + endpoint, {
@@ -245,8 +297,8 @@ const DEBUG_KEY = "oracleDebug";
 async function debugOn() {
   return (await chrome.storage.local.get(DEBUG_KEY))[DEBUG_KEY] === true;
 }
-function dbg(tab, data) {
-  chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode: "vision",
+function dbg(tab, data, mode = "vision") {
+  chrome.tabs.sendMessage(tab.id, { type: "oracle:event", mode,
                                     ev: { event: "debug", data: { side: "extension", ...data } } })
     .catch(() => {});
 }

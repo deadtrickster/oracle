@@ -91,6 +91,7 @@
         .ground-btn { margin-top:10px; width:100%; padding:6px; border:0; border-radius:7px;
           background:#128a86; color:#fff; font:inherit; font-weight:600; cursor:pointer; }
         .ground-btn:hover { filter:brightness(1.08); }
+        .tabs[hidden] { display:none; }   /* an author display: rule outranks UA [hidden] */
         .tabs { display:flex; gap:2px; padding:0 10px; border-bottom:1px solid rgba(128,128,128,.25);
           position:sticky; top:33px; background:inherit; }
         .tab { border:0; background:transparent; color:inherit; font:inherit; font-size:11px;
@@ -113,7 +114,7 @@
       </style>
       <div class="card">
         <div class="bar"><b class="ttl">Oracle</b><span class="verdict" hidden></span><button class="x" title="Close">×</button></div>
-        <div class="tabs" hidden>
+        <div class="tabs">
           <button class="tab on" data-pane="body">Answer</button>
           <button class="tab" data-pane="dbg">Debug<span class="n"></span></button>
         </div>
@@ -130,6 +131,7 @@
     }));
     root.querySelector(".x").addEventListener("click", () => host.remove());
     makeDraggable(root.querySelector(".bar"));
+    renderDbg();
   }
 
   function setBody(html) {
@@ -239,7 +241,6 @@
     if (!dbgEl) return;
     const n = root.querySelector(".tab .n");
     if (n) n.textContent = dbgEvents.length ? `(${dbgEvents.length})` : "";
-    root.querySelector(".tabs").hidden = dbgEvents.length === 0;
     if (!dbgEvents.length) {
       dbgEl.innerHTML = `<p class="empty">Nothing recorded. Turn on <b>Debug</b> in the Oracle
         popup, then run this again — every event and every block of injected context shows up
@@ -280,6 +281,8 @@
     }
     if (msg.type !== "oracle:event") return;
     const { event, data } = msg.ev || {};
+    // debug events are handled for BOTH streams before the mode split — the grounded sub-stream
+    // reports its own prompt, and those belong in the same tab, in arrival order
     if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }
     if (msg.mode === "ground") {                              // grounded sub-stream
       if (event === "status") { setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;${esc(data.text||"")}</p>`); return; }
@@ -289,7 +292,6 @@
       else if (event === "error") { gStreaming = false; gDone = true; gAcc += "\n\n_" + (data.error || "error") + "_"; render(); }
       return;
     }
-    if (event === "debug") { dbgEvents.push(data || {}); renderDbg(); return; }
     // a GPU swap takes 30-60s; say so, or it is indistinguishable from a hang
     if (event === "status") { setBody(thumbHtml() + `<p><span class="spin"></span> &nbsp;${esc(data.text||"")}</p>`); return; }
     if (event === "sources") { sources = data.sources || []; cites = data.citations || []; reranked = data.reranked !== false; if (acc) render(); }

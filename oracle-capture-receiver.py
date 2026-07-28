@@ -546,8 +546,41 @@ def _sections(text: str) -> list:
     return out
 
 
+
+def _page_context(url: str, title: str, where: dict | None) -> str:
+    """Where the selection sits on the page — the context that disambiguates it.
+
+    "It collapses under contention" means one thing under a heading about locks and another under
+    one about pools, and the selection alone carries neither.
+
+    The framing is the same discipline the corpus excerpts get, inverted: this text is the QUESTION's
+    context, never the ANSWER's evidence. Without saying so the model happily answers from the page
+    it is reading — which is a web summariser, not a grounded assistant, and would quietly undo the
+    property the whole pipeline exists to provide. A reader cannot check a claim sourced from the
+    page they are already looking at."""
+    w = where or {}
+    bits = []
+    ident = " — ".join(x for x in [(title or "").strip(), (url or "").strip()] if x)
+    if ident:
+        bits.append(f"  Page: {ident}")
+    if (w.get("headings") or "").strip():
+        bits.append(f"  Section: {w['headings'].strip()[:200]}")
+    around = " ".join((w.get("around") or "").split())[:1500]
+    page = " ".join((w.get("page") or "").split())[:2000]
+    if around:
+        bits.append(f"  Surrounding text: \"{around}\"")
+    elif page:
+        bits.append(f"  Elsewhere on the page: \"{page}\"")
+    if not bits:
+        return ""
+    return ("Where the user is reading (context for interpreting the selection ONLY — it is not a "
+            "corpus source, must not be cited, and must not be used as evidence for any claim; if "
+            "the excerpts do not answer the question, say so even when this page appears to):\n"
+            + "\n".join(bits))
+
+
 def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str = "",
-                     debug: bool = False):
+                     debug: bool = False, page: str = ""):
     """Shared retrieve→rerank→stream path behind /explain, /ask, /factcheck. Emits SSE (event, data)
     pairs: ('sources',{sources,reranked}) once, then ('delta',{text})*, then ('done',{}) | ('error',…).
     `retrieval_query` drives retrieval; `framing` is the task-specific instruction wrapping the input.
@@ -581,10 +614,12 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str 
         for i, c in enumerate(chunks))
     # Site context sits between the task and the excerpts: close enough to disambiguate the page's
     # vocabulary, and visibly separate from the excerpts, which are the only citable material.
-    user = f"{framing}\n\n{site}\n\nExcerpts:\n{context}" if site else \
-        f"{framing}\n\nExcerpts:\n{context}"
+    # Order: the task, then where it was read (specific), then the site (general), then the
+    # excerpts — which stay last, closest to the answer, because they are what it must be built from.
+    user = "\n\n".join(x for x in [framing, page, site, f"Excerpts:\n{context}"] if x)
     yield from _dbg(debug, "prompt sent to the text model", chars=len(user),
-                    site_context_chars=len(site), excerpt_count=len(chunks),
+                    site_context_chars=len(site), page_context_chars=len(page),
+                    excerpt_count=len(chunks),
                     reranked=reranked, system=system, text=user)
     # Retrieval is done (CPU + embeddings); only NOW is the text model needed, so a swap — if the
     # vision model is currently resident — is paid for as late as possible.
@@ -608,11 +643,12 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str 
 
 
 def explain_stream(selection: str, url: str = "", title: str = "", agents_md: str | None = None,
-                   debug: bool = False):
-    where = f" (seen on: {title or url})" if (title or url) else ""
+                   debug: bool = False, where: dict | None = None):
+    # The page identity used to be inlined here as "(seen on: …)"; it now lives in the page-context
+    # block, which states it once and says what it may be used for.
     return _grounded_stream(
-        selection, f'Explain this selection{where}:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_SYSTEM,
-        oracle_sitectx.block(url, agents_md), debug)
+        selection, f'Explain this selection:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_SYSTEM,
+        oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where))
 
 
 def ask_stream(question: str):
@@ -620,11 +656,10 @@ def ask_stream(question: str):
 
 
 def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str | None = None,
-                     debug: bool = False):
-    where = f" (from: {title or url})" if (title or url) else ""
+                     debug: bool = False, where: dict | None = None):
     return _grounded_stream(
-        claim, f'Claim to check{where}:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM,
-        oracle_sitectx.block(url, agents_md), debug)
+        claim, f'Claim to check:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM,
+        oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where))
 
 
 VL_CTX_CHARS = int(os.environ.get("ORACLE_VL_CTX_CHARS", "4000"))
@@ -1082,7 +1117,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send({"error": "empty selection"}, 400)
                     return
                 self._send_sse(explain_stream(sel, p.get("url", ""), p.get("title", ""),
-                                              p.get("agents_md"), bool(p.get("debug"))))
+                                              p.get("agents_md"), bool(p.get("debug")),
+                                              p.get("where")))
             elif self.path.startswith("/ask"):
                 q = (p.get("question") or "").strip()
                 if not q:
@@ -1095,7 +1131,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send({"error": "empty claim"}, 400)
                     return
                 self._send_sse(factcheck_stream(claim, p.get("url", ""), p.get("title", ""),
-                                                p.get("agents_md"), bool(p.get("debug"))))
+                                                p.get("agents_md"), bool(p.get("debug")),
+                                              p.get("where")))
             elif self.path.startswith("/vision"):
                 img = p.get("image") or ""
                 if not img:

@@ -99,6 +99,23 @@ check("site context is measured", pr and pr.get("site_context_chars", 0) > 1000,
 check("the excerpts are in it", pr and "excerpt text" in pr.get("text", ""))
 check("the system prompt is shown", pr and "corpus" in (pr.get("system") or "").lower())
 
+print("\n5b. page context: the selection's surroundings, marked non-evidence")
+evs4 = events(rcv.explain_stream(
+    "it collapses under contention", "https://docs.stroppy.io/x", "Stroppy docs", None, True,
+    {"around": "TPC-B hammers one branch row.", "headings": "PostgreSQL \u203a Locks", "page": ""}))
+pr2 = dbg(evs4, "prompt sent to the text model")
+check("page context is measured", pr2 and pr2.get("page_context_chars", 0) > 0)
+u2 = (pr2 or {}).get("text", "")
+check("the heading chain is in the prompt", "PostgreSQL \u203a Locks" in u2)
+check("the surrounding text is in the prompt", "TPC-B hammers one branch row." in u2)
+check("marked not citable", "must not be cited" in u2)
+check("and not usable as evidence", "must not be used as evidence" in u2)
+check("excerpts stay LAST, closest to the answer", u2.rindex("Excerpts:") > u2.rindex("Where the user"))
+evs5 = events(rcv.explain_stream("x", "https://a.example/p", "T", None, True, None))
+pr3 = dbg(evs5, "prompt sent to the text model")
+check("with no extension context the page is still identified",
+      pr3 and "a.example" in pr3.get("text", ""))
+
 print("\n6. a full-page screenshot is labelled as stitched, not as one screenful")
 c = rcv._vl_context("https://x.example/p", "T", "", False, "", None, "fullpage")
 check("says it was scrolled and stitched", "stitched" in c)
