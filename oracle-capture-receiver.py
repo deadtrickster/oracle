@@ -491,28 +491,74 @@ def _chat_stream(messages, url: str = None, model: str = None, timeout: int = 30
                 yield delta
 
 
-_GROUND_RULES = (
-    "using ONLY the provided documentation excerpts. Every specific claim (names, flags, sizes, "
-    "semantics, versions) must come from an excerpt, never your own knowledge; cite the excerpt "
-    "number/source for key claims. Write in the SAME language as the input; never switch languages "
-    "mid-answer. Tag code fences by language.")
+# ---- prompt shape: one shared prefix, then the task ---------------------------------------------
+#
+# llama.cpp routes a request to the slot whose cached tokens best match the prompt PREFIX, and
+# processes only what comes after the match. Prompt processing here runs at 300-500 tok/s, so the
+# ~2.7k tokens of a site pack are 6-9 seconds paid on every single request — and until now they were
+# paid every time, because nothing shared a prefix with anything: each feature's system message WAS
+# its task instruction, so explain, fact-check and chat differed at token zero.
+#
+# Hence the split. Everything that is identical across features moves into the system message, and
+# everything task-specific moves to the front of the user message:
+#
+#     system:  ORACLE PREAMBLE          identical for every feature, forever
+#              SITE PACK for this host  identical for every request about that host
+#     ─────── cache boundary ───────
+#     user:    TASK: …                  explain | fact-check | ask | chat
+#              the page, the excerpts, the question
+#
+# Two consequences worth keeping in mind when editing any of this:
+#   * Editing the PREAMBLE invalidates every warm slot on the machine. Editing a site pack
+#     invalidates that host's. Both are fine and both are supposed to be rare.
+#   * The preamble must not mention anything request-specific. A date, a URL, a selection length —
+#     anything that varies — silently moves the cache boundary to token zero and the whole thing
+#     quietly stops working while still producing correct answers. That failure is invisible except
+#     as latency, which is exactly the shape of bug this repo keeps finding.
+_PREAMBLE = (
+    "You are Oracle, a grounded offline assistant. The user has no network: they cannot check you, "
+    "so a confident wrong answer is worse than no answer.\n"
+    "Material you may be given, and what each is for:\n"
+    "- CORPUS EXCERPTS — the only evidence. Every specific claim (names, flags, sizes, semantics, "
+    "versions, numbers) must come from an excerpt, never from your own knowledge, and key claims "
+    "cite their excerpt number as [n].\n"
+    "- PAGE AND SITE CONTEXT — what the user is reading. Use it to understand the question. It is "
+    "not evidence, gets no citation, and never licenses a claim the excerpts do not support.\n"
+    "- THE CONVERSATION, when there is one — answer questions about it directly.\n"
+    "If the excerpts do not cover a technical question, say so and stop; do not fill the gap from "
+    "memory. Write in the SAME language as the input and never switch mid-answer. Tag code fences "
+    "by language. Be concise."
+)
 
-_EXPLAIN_SYSTEM = (
-    "You explain a term or passage the user selected while reading, " + _GROUND_RULES +
-    " If the excerpts do not explain it, reply exactly: 'The corpus doesn't cover this.' Be concise "
-    "(a few sentences).")
+# Task instructions. These go at the FRONT OF THE USER MESSAGE, after the cached prefix — which is
+# also why they are phrased as instructions to follow rather than as an identity to assume.
+_EXPLAIN_TASK = (
+    "TASK: explain the term or passage the user selected while reading. If the excerpts do not "
+    "explain it, reply exactly: 'The corpus doesn't cover this.' A few sentences.")
 
-_ASK_SYSTEM = (
-    "You answer a documentation/API/concept question " + _GROUND_RULES +
-    " If the excerpts do not contain the answer, reply exactly: 'The corpus doesn't cover this.' "
-    "Be concise and direct.")
+_ASK_TASK = (
+    "TASK: answer this documentation/API/concept question. If the excerpts do not contain the "
+    "answer, reply exactly: 'The corpus doesn't cover this.' Be direct.")
 
-_FACTCHECK_SYSTEM = (
-    "You fact-check a claim the user is reading against the corpus, " + _GROUND_RULES +
-    " START your reply with exactly one verdict tag on its own — [SUPPORTED], [CONTRADICTED], "
-    "[PARTIAL], or [NOT COVERED] — then a brief justification quoting the decisive excerpt. "
-    "[SUPPORTED]/[CONTRADICTED]/[PARTIAL] require excerpts that actually address the claim; if none "
-    "do, you MUST use [NOT COVERED] (the corpus is silent — never guess from your own knowledge).")
+_FACTCHECK_TASK = (
+    "TASK: fact-check the claim below against the excerpts. START your reply with exactly one "
+    "verdict tag on its own — [SUPPORTED], [CONTRADICTED], [PARTIAL], or [NOT COVERED] — then a "
+    "brief justification quoting the decisive excerpt. [SUPPORTED]/[CONTRADICTED]/[PARTIAL] require "
+    "excerpts that actually address the claim; if none do, you MUST use [NOT COVERED] (the corpus "
+    "is silent — never guess from your own knowledge).")
+
+_CHAT_TASK = (
+    "TASK: continue the conversation. This is a chat panel, not an essay — keep it short.")
+
+
+def _system_for(site: str = "") -> str:
+    """The cached prefix: the preamble, plus this host's site pack if there is one.
+
+    The pack goes HERE rather than in the user message specifically so it lands inside the shared
+    prefix — it is the largest constant block in the prompt and therefore the one most worth
+    caching. It stays byte-identical between requests because it is read from a file and memoised
+    on mtime."""
+    return _PREAMBLE + ("\n\n" + site if site else "")
 
 
 
@@ -581,12 +627,14 @@ def _page_context(url: str, title: str, where: dict | None) -> str:
             + "\n".join(bits))
 
 
-def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str = "",
+def _grounded_stream(retrieval_query: str, framing: str, task: str, site: str = "",
                      debug: bool = False, page: str = ""):
     """Shared retrieve→rerank→stream path behind /explain, /ask, /factcheck. Emits SSE (event, data)
     pairs: ('sources',{sources,reranked}) once, then ('delta',{text})*, then ('done',{}) | ('error',…).
-    `retrieval_query` drives retrieval; `framing` is the task-specific instruction wrapping the input.
-    """
+
+    `retrieval_query` drives retrieval; `task` is the task instruction and `framing` wraps the input.
+    Note what is NOT a parameter any more: the system message. It is derived from `site` alone, so
+    every feature on a given host produces the same prefix (see _system_for)."""
     try:
         kb_ids = _kb_ids()
     except (urllib.error.URLError, ConnectionError, TimeoutError):
@@ -614,14 +662,14 @@ def _grounded_stream(retrieval_query: str, framing: str, system: str, site: str 
         f"[{i+1}] (source: {c.get('document_keyword','?')})\n"
         f"{c.get('content_with_weight') or c.get('content','')}"
         for i, c in enumerate(chunks))
-    # Site context sits between the task and the excerpts: close enough to disambiguate the page's
-    # vocabulary, and visibly separate from the excerpts, which are the only citable material.
-    # Order: the task, then where it was read (specific), then the site (general), then the
-    # excerpts — which stay last, closest to the answer, because they are what it must be built from.
-    user = "\n\n".join(x for x in [framing, page, site, f"Excerpts:\n{context}"] if x)
+    # The site pack has moved OUT of here and into the cached system prefix. What is left varies
+    # per request anyway: the task, where it was read, and the excerpts — which stay last, closest
+    # to the answer, because they are what it must be built from.
+    system = _system_for(site)
+    user = "\n\n".join(x for x in [task, framing, page, f"Excerpts:\n{context}"] if x)
     yield from _dbg(debug, "prompt sent to the text model", chars=len(user),
-                    site_context_chars=len(site), page_context_chars=len(page),
-                    excerpt_count=len(chunks),
+                    cached_prefix_chars=len(system), site_context_chars=len(site),
+                    page_context_chars=len(page), excerpt_count=len(chunks),
                     reranked=reranked, system=system, text=user)
     # Retrieval is done (CPU + embeddings); only NOW is the text model needed, so a swap — if the
     # vision model is currently resident — is paid for as late as possible.
@@ -649,48 +697,33 @@ def explain_stream(selection: str, url: str = "", title: str = "", agents_md: st
     # The page identity used to be inlined here as "(seen on: …)"; it now lives in the page-context
     # block, which states it once and says what it may be used for.
     return _grounded_stream(
-        selection, f'Explain this selection:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_SYSTEM,
+        selection, f'Selection:\n\n"""\n{selection[:2000]}\n"""', _EXPLAIN_TASK,
         oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where))
 
 
 def ask_stream(question: str):
-    return _grounded_stream(question, f"Question: {question[:1000]}", _ASK_SYSTEM)
+    return _grounded_stream(question, f"Question: {question[:1000]}", _ASK_TASK)
 
 
 def factcheck_stream(claim: str, url: str = "", title: str = "", agents_md: str | None = None,
                      debug: bool = False, where: dict | None = None):
     return _grounded_stream(
-        claim, f'Claim to check:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_SYSTEM,
+        claim, f'Claim to check:\n\n"""\n{claim[:2000]}\n"""', _FACTCHECK_TASK,
         oracle_sitectx.block(url, agents_md), debug, _page_context(url, title, where))
 
 
 
 # ------------------------------------------------------------------ per-host chat
-# A continued conversation scoped to the site you are reading. Unlike explain/ask, this one has
-# THREE possible sources and its whole job is keeping them apart:
+# A continued conversation scoped to the site you are reading.
 #
-#   the corpus   — evidence. Numbered, citable, checkable in the corpus browser.
-#   the page     — context. What you are looking at; not evidence, never cited.
-#   the chat     — memory. What was said; fine to answer "what did I ask?" from it.
+# It used to carry its own system prompt, because a chat has THREE sources to keep apart (corpus =
+# evidence, page = context, conversation = memory) while the one-shot features had one. That
+# distinction turned out to be false: explain and fact-check were already being handed page and site
+# context, and the rule they needed was the same attribution rule, just unstated. So the three-source
+# discipline moved into the shared _PREAMBLE, where every feature gets it — and, not incidentally,
+# where it is cached instead of re-processed on every request.
 #
-# The single-source rule the other prompts use ("answer ONLY from the excerpts") cannot apply here:
-# it would make the assistant refuse "what did we just decide?", which is absurd in a conversation.
-# So the rule becomes an ATTRIBUTION rule instead of a silence rule — say which of the three a claim
-# came from — with the corpus rule intact where it matters: a technical fact not in the excerpts is
-# still "the corpus doesn't cover that", never something recalled from the weights.
-_CHAT_SYSTEM = (
-    "You are Oracle, a grounded assistant answering inside the user's browser about the site they "
-    "are reading, backed by their OFFLINE corpus of documentation, books and papers.\n"
-    "You have three kinds of material and must not confuse them:\n"
-    "1. CORPUS EXCERPTS — the only evidence. Every specific technical claim (names, flags, sizes, "
-    "semantics, versions, numbers) must come from an excerpt, and you cite it as [n].\n"
-    "2. PAGE AND SITE CONTEXT — what the user is looking at. Use it to understand the question. It "
-    "is NOT evidence and gets no citation; if you rely on it, say so in words ('the page says…').\n"
-    "3. THIS CONVERSATION — what was already said. Answer questions about it directly.\n"
-    "If the excerpts do not cover a technical question, say the corpus doesn't cover it and stop. "
-    "Do not fill the gap from your own knowledge — the user is offline and cannot check you. "
-    "Write in the SAME language as the question; never switch mid-answer. Tag code fences by "
-    "language. Be concise: this is a chat panel, not an essay.")
+# The chat-specific part is one line about length, in _CHAT_TASK, after the cache boundary.
 
 
 def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | None = None,
@@ -767,9 +800,14 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
         f"[{i+1}] (source: {c.get('document_keyword','?')})\n"
         f"{c.get('content_with_weight') or c.get('content','')}"
         for i, c in enumerate(chunks))
+    # The site pack lives in the cached system prefix (see _system_for), NOT here — it is identical
+    # for every turn on this host, so repeating it per turn would both waste the cache and re-state
+    # the same 2.7k tokens inside a growing conversation.
     site = oracle_sitectx.block(url, agents_md)
     page = _page_context(url, title, where)
-    parts = [p for p in [page, site] if p]
+    parts = [_CHAT_TASK]
+    if page:
+        parts.append(page)
     parts.append(f"Excerpts for THIS question:\n{excerpts}" if excerpts
                  else "Excerpts for THIS question: (retrieval returned nothing relevant)")
     if reading:
@@ -779,13 +817,16 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
                  "worth noticing about it, using the excerpts where they apply.")
     user = "\n\n".join(parts)
 
-    msgs = ([{"role": "system", "content": _CHAT_SYSTEM}]
+    system = _system_for(site)
+    msgs = ([{"role": "system", "content": system}]
             + [{"role": t["role"], "content": t["content"]} for t in turns]
             + [{"role": "user", "content": user}])
+    # The cache boundary is the end of the system message; the transcript after it is append-only,
+    # so turn N reuses everything through turn N-1 and only the new turn is processed.
     yield from _dbg(debug, "prompt sent to the text model", chars=sum(len(m["content"]) for m in msgs),
-                    history_turns=len(turns), excerpt_count=len(chunks),
-                    page_context_chars=len(page), site_context_chars=len(site),
-                    system=_CHAT_SYSTEM, text=user)
+                    cached_prefix_chars=len(system), history_turns=len(turns),
+                    excerpt_count=len(chunks), page_context_chars=len(page),
+                    site_context_chars=len(site), system=system, text=user)
 
     try:
         for note in ensure_model("text"):

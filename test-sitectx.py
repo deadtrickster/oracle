@@ -102,20 +102,25 @@ rcv.ensure_model = lambda kind: iter(())
 
 
 def _fake_chat(messages, **kw):
+    seen["system"] = messages[0]["content"]
     seen["user"] = messages[-1]["content"]
     return iter(["ok"])
 
 
 rcv._chat_stream = _fake_chat
 list(rcv.explain_stream("p99 blew up at 50 VUs", "https://cloud.stroppy.io/runs/42", "Run 42"))
-u = seen.get("user", "")
-check("the pack is in the prompt", "virtual user" in u.lower() or "VU — virtual user" in u, u[:200])
-check("it precedes the excerpts", u.find("stroppy") < u.find("Excerpts:"), "order")
+u, sysmsg = seen.get("user", ""), seen.get("system", "")
+# The pack sits in the SYSTEM message so it lands inside the KV-cached prefix (test-prefix.py);
+# it is the largest constant block in the prompt and therefore the one most worth caching.
+check("the pack is in the cached prefix", "virtual user" in sysmsg.lower(), sysmsg[:200])
+check("it precedes everything per-request", sysmsg.index("Stroppy") >= 0)
 check("corpus excerpts are still there", "a corpus excerpt" in u)
+check("and are not duplicated into the prefix", "a corpus excerpt" not in sysmsg)
 
 seen.clear()
 list(rcv.explain_stream("what is this", "https://unknown.example/p", "T"))
-check("an unknown domain adds nothing", "site reference" not in seen.get("user", ""))
+check("an unknown domain adds nothing",
+      "site reference" not in seen.get("system", "") + seen.get("user", ""))
 
 print()
 if fails:

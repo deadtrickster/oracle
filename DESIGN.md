@@ -1020,6 +1020,54 @@ KV cache, so the conversation is reprocessed. That is the price of 24 GB and it 
 progress is streamed as visible text, because silence for four minutes is indistinguishable from a
 hang, which is exactly how the first version was reported.
 
+### 6.2 One shared prompt prefix — measured, not assumed
+
+llama.cpp routes a request to the slot whose cached tokens best match the prompt **prefix**, and
+processes only what follows. Prompt processing here runs at **300–500 tok/s**, so every constant
+block re-sent per request is paid for again in seconds.
+
+Nothing shared a prefix, because each feature's system message *was* its task instruction: explain,
+fact-check and chat differed at token zero. So the prompt was restructured around the boundary:
+
+```
+system:  ORACLE PREAMBLE            identical for every feature, forever
+         SITE PACK for this host    identical for every request about that host
+──────── cache boundary ────────
+user:    TASK: explain | fact-check | ask | chat
+         page context, excerpts, the question
+```
+
+The site pack moved *into* the system message specifically because it is the largest constant block
+in the prompt and therefore the one most worth caching. The three-source discipline (corpus =
+evidence, page = context, conversation = memory) moved into the preamble, where it turned out every
+feature needed it anyway — chat had been carrying its own copy for no reason but history.
+
+**Measured** (`measure-prefix-cache.py`; `total` from the server's own `/tokenize`, `processed`
+from its `prompt eval time` line — the first attempt compared *processed* between requests and
+proved nothing, since a request that processes less may simply have had a smaller prompt):
+
+| request | total | processed | reused | prefix |
+|---|---|---|---|---|
+| A cold | 11,860 | 9,325 | 2,535 | 2,533 |
+| B identical to A | 11,860 | **4** | **11,856** | 2,533 |
+| C same host, new question | 9,034 | 6,499 | **2,535** | 2,533 |
+| D different host | 6,694 | 6,495 | 199 | 197 |
+
+B is the control that proves the mechanism (33s → 15s). C is the everyday case: a different
+question on the same host skips the whole pack. D reuses only the preamble, having no pack to
+share.
+
+**Two things this makes fragile, on purpose.** Editing the preamble invalidates every warm slot on
+the machine; editing a site pack invalidates that host's. Both are supposed to be rare. And the
+preamble must never mention anything request-specific — a date, a URL, a selection length — because
+that silently moves the boundary to token zero and the whole thing stops working *while still
+producing correct answers*. The only symptom is latency, which is this repo's signature failure
+shape, so it is a test (`test-prefix.py`) rather than a comment.
+
+The same constraint is why the chat transcript is **append-only** (§6.1): summarising or dropping
+old turns invalidates everything after the edit, turning every subsequent turn into a full
+re-process. An over-budget conversation starts a new *epoch* instead.
+
 ## 7. MCP servers (the tool layer)
 
 All read-only or query-only, bridged stdio→SSE via mcp-proxy, systemd user services:

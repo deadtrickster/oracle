@@ -120,11 +120,16 @@ check("prior turns are verbatim", msgs[1]["content"] == "earlier question")
 u = msgs[-1]["content"]
 check("excerpts are present", "WAL flush is the bottleneck" in u)
 check("page context is present", "AROUND TEXT" in u)
-check("site pack is present", "virtual user" in u.lower() or "Stroppy" in u)
 check("page context is marked non-evidence", "must not be used as evidence" in u)
 sysmsg = msgs[0]["content"]
+# The site pack lives in the CACHED SYSTEM PREFIX, not the turn — identical every turn, so
+# repeating it per turn would waste the prefix cache and re-state 2.7k tokens inside a conversation
+# that is already growing. See test-prefix.py.
+check("site pack is in the cached prefix", "virtual user" in sysmsg.lower())
+check("and NOT repeated in the turn", "virtual user" not in u.lower())
 check("the system prompt separates the three sources",
-      "CORPUS EXCERPTS" in sysmsg and "PAGE AND SITE CONTEXT" in sysmsg and "THIS CONVERSATION" in sysmsg)
+      "CORPUS EXCERPTS" in sysmsg and "PAGE AND SITE CONTEXT" in sysmsg
+      and "THE CONVERSATION" in sysmsg)
 check("and keeps the offline rule", "cannot check you" in sysmsg)
 check("the exchange was recorded", [t["content"] for t in ch.history(H)][-2:] == ["why did p99 spike?", "ok"])
 
