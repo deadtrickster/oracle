@@ -1099,6 +1099,28 @@ def _chat_steps(host, session, system, page, tools, can_act, debug):
     yield ("done", {"epoch": oracle_chat.epoch(host, session)})
 
 
+def chat_resume(host: str, session: str = oracle_chat.MAIN, url: str = "", title: str = "",
+                agents_md: str | None = None, where: dict | None = None, debug: bool = False):
+    """Pick up a conversation whose turn was cut off — a receiver restart, a killed service worker,
+    a laptop that slept.
+
+    Nothing is lost when this happens, and that is the point: the transcript lives here, so a turn
+    that died between the tool result and the answer needs no new question, only another model call.
+    Without this the work is still on disk and simply unreachable, which is the worst of both."""
+    if not host:
+        yield ("error", {"error": "no host"})
+        return
+    turns = oracle_chat.history(host, session)
+    if not turns:
+        yield ("error", {"error": "nothing to continue"})
+        return
+    if turns[-1]["role"] == "assistant" and not turns[-1].get("tool_calls"):
+        yield ("delta", {"text": "_(that turn had already finished)_"})
+        yield ("done", {"epoch": oracle_chat.epoch(host, session)})
+        return
+    yield from _chat_loop(host, url, title, agents_md, where, debug, session)
+
+
 def chat_tool_results(host: str, results: list, url: str = "", title: str = "",
                       agents_md: str | None = None, where: dict | None = None,
                       debug: bool = False, session: str = oracle_chat.MAIN):
@@ -1657,6 +1679,12 @@ class Handler(BaseHTTPRequestHandler):
                                               ("image_alt", "image_title", "image_caption")},
                                              p.get("source", "region"), p.get("agents_md"),
                                              bool(p.get("debug"))))
+            elif self.path.startswith("/chat/resume"):
+                self._send_sse(chat_resume(
+                    (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip(),
+                    (p.get("session") or oracle_chat.MAIN).strip(),
+                    p.get("url", ""), p.get("title", ""), p.get("agents_md"),
+                    p.get("where"), bool(p.get("debug"))))
             elif self.path.startswith("/chat/tool"):
                 self._send_sse(chat_tool_results(
                     (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip(),

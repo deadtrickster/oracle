@@ -74,6 +74,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === "oracle:chatLoad") { if (sender.tab) chatLoad(sender.tab, msg.session); return false; }
   if (msg.type === "oracle:chatReset") { if (sender.tab) chatReset(sender.tab); return false; }
+  if (msg.type === "oracle:chatResume") { if (sender.tab) chatResume(sender.tab); return false; }
   if (msg.type === "oracle:chatAllow") { if (sender.tab) chatAllow(sender.tab, msg.allow); return false; }
   if (msg.type === "oracle:setDebug") { chrome.storage.local.set({ [DEBUG_KEY]: !!msg.on }); return false; }
   if (msg.type === "oracle:chatSessions") { if (sender.tab) chatSessions(sender.tab); return false; }
@@ -689,6 +690,29 @@ async function chatAllow(tab, allow) {
       body: JSON.stringify({ host, allow: !!allow }),
     });
   } catch (_) {}
+}
+
+// Continue a turn that was cut off. Nothing was lost — the transcript is on the receiver — so this
+// is another model call over what is already recorded, not a re-ask.
+async function chatResume(tab) {
+  const send = (ev) => chrome.tabs
+    .sendMessage(tab.id, { type: "oracle:chatEvent", ev, session: chatSession }).catch(() => {});
+  let host = "";
+  try { host = new URL(tab.url).host; } catch (_) {}
+  keepaliveStart();
+  try {
+    const r = await fetch(RECEIVER + "/chat/resume", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, session: chatSession, url: tab.url, title: tab.title,
+                             agents_md: await agentsMd(tab.url), debug: await debugOn() }),
+    });
+    if (!r.ok || !r.body) { send({ event: "error", data: { error: "receiver error " + r.status } }); return; }
+    await chatPump(r.body, send, tab);
+  } catch (e) {
+    send({ event: "error", data: { error: "Could not continue: " + (e.message || e) } });
+  } finally {
+    keepaliveStop();
+  }
 }
 
 async function chatReset(tab) {

@@ -31,6 +31,7 @@
   // happens, because a harness that acts silently is one you cannot supervise.
   let steps = [];
   let stepsOpen = false;      // folded once the turn is done; click to reopen
+  let turnFailed = false;     // ...but never folded when it ended badly
   let actions = false;
   let debugOn = false;
   // A running clock, because "how long has this been going" is the question a blinking cursor
@@ -167,6 +168,10 @@
       .go { border:0; border-radius:8px; padding:0 13px; background:#128a86; color:#fff;
         font:inherit; font-weight:600; cursor:pointer; }
       .go[disabled] { opacity:.5; cursor:default; }
+      .resume { display:block; margin-top:8px; border:0; border-radius:7px; padding:5px 10px;
+        background:#128a86; color:#fff; font:inherit; font-size:12px; font-weight:600;
+        cursor:pointer; }
+      .resume:hover { filter:brightness(1.1); }
       /* Grips on the two corners that make sense for a panel anchored bottom-right: the top-left
          one grows it up and to the left (where the space is), the bottom-right one is the corner
          everyone reaches for. */
@@ -355,9 +360,12 @@
     if (t.role === "assistant" && (t.calls || []).length && !(t.content || "").trim()) {
       return (t.calls || []).map((c) => `<p class="step">· ${esc(c)}</p>`).join("");
     }
+    // A dropped connection is not lost work — the transcript is on the receiver, tool results and
+    // all — so offer to carry on instead of making the user retype a question the system still has.
+    const cont = t.resume ? `<button class="resume">Continue this answer</button>` : "";
     return `<div class="msg ${t.role === "user" ? "me" : ""}">
       <div class="who">${t.role === "user" ? "you" : "oracle"}</div>
-      <div class="bub">${img}${body}</div></div>`;
+      <div class="bub">${img}${body}${cont}</div></div>`;
   }
 
   function render() {
@@ -369,7 +377,11 @@
     if (steps.length) {
       const done = steps.filter((s) => s.done).length;
       const bad = steps.filter((s) => s.failed).length;
-      if (!streaming && !stepsOpen) {
+      // NEVER fold after a failed turn. Folding on completion is right — the answer is what you
+      // came for — but when the turn died the steps are the only record of what happened, and
+      // hiding them is how "the screenshot and tool log disappeared" the instant the error landed.
+      const hideOk = !streaming && !stepsOpen && !turnFailed;
+      if (hideOk) {
         h += `<p class="step fold">▸ ${done} step${done === 1 ? "" : "s"}` +
              (bad ? ` · ${bad} failed` : "") + ` — show</p>`;
       } else {
@@ -491,7 +503,7 @@
     if (preset === undefined) input.value = "";
     turns.push({ role: "user", content: q || "(region sent)", image: thumb });
     streaming = true; acc = ""; status = ""; cites = null; sources = null;
-    steps = []; dbgEvents = []; renderDbg();
+    steps = []; turnFailed = false; stepsOpen = false; dbgEvents = []; renderDbg();
     startedAt = Date.now();
     lastEventAt = Date.now();
     clearInterval(ticker);
@@ -573,6 +585,15 @@
       return;
     }
     if (t.classList.contains("fold")) { stepsOpen = !stepsOpen; render(); return; }
+    if (t.classList.contains("resume")) {
+      turns = turns.filter((x) => !x.resume);          // drop the error we are answering
+      streaming = true; go.disabled = true; status = "picking up where it stopped…";
+      turnFailed = false; startedAt = Date.now(); lastEventAt = Date.now();
+      clearInterval(ticker); ticker = setInterval(tick, 1000);
+      render();
+      try { chrome.runtime.sendMessage({ type: "oracle:chatResume" }); } catch (_) {}
+      return;
+    }
     if (t.classList.contains("more")) {
       const pre = scroll.querySelector(`pre.rawout[data-i="${t.closest(".res").dataset.i}"]`);
       if (pre) { pre.hidden = !pre.hidden; t.textContent = pre.hidden ? "show output" : "hide"; }
@@ -799,7 +820,13 @@
     if (event === "error") {
       streaming = false; go.disabled = false;
       clearInterval(ticker); ticker = null; startedAt = 0;
-      turns.push({ role: "assistant", content: "_" + (data && data.error || "error") + "_" });
+      const msgText = (data && data.error) || "error";
+      // A dropped connection is not lost work: the transcript lives on the receiver, so the tool
+      // results and everything before them are still there. Offer to carry on rather than making
+      // the user retype a question the system already has.
+      const recoverable = /cut off|ended early|connection|dropped|offline/i.test(msgText);
+      turnFailed = true;
+      turns.push({ role: "assistant", content: "_" + msgText + "_", resume: recoverable });
       acc = ""; render();
     }
   });
