@@ -90,9 +90,15 @@ def epoch(host: str) -> int:
     return _read(host).get("epoch", 1)
 
 
-def append(host: str, role: str, content: str) -> dict:
+def append(host: str, role: str, content: str, tool_calls: list | None = None,
+           tool_call_id: str = "", name: str = "") -> dict:
     """Add a turn. Returns {"epoch": n, "rolled": bool} — `rolled` means this turn began a new
-    epoch because the previous one was full."""
+    epoch because the previous one was full.
+
+    Tool calls and their results are stored as turns like any other, because they ARE the
+    conversation once the chat can act: "I clicked LOGS, here is what it said" is the reasoning, and
+    a transcript that dropped it would leave the next turn unable to explain how it knows anything.
+    """
     if not host:
         return {"epoch": 1, "rolled": False}
     with _lock(host):
@@ -108,9 +114,46 @@ def append(host: str, role: str, content: str) -> dict:
             ep += 1
             d["epoch"] = ep
             rolled = True
-        d["turns"].append({"role": role, "content": content, "at": time.time(), "epoch": ep})
+        turn = {"role": role, "content": content, "at": time.time(), "epoch": ep}
+        if tool_calls:
+            turn["tool_calls"] = tool_calls
+        if tool_call_id:
+            turn["tool_call_id"] = tool_call_id
+        if name:
+            turn["name"] = name
+        d["turns"].append(turn)
         _write(host, d)
         return {"epoch": ep, "rolled": rolled}
+
+
+def to_messages(turns: list) -> list:
+    """Transcript turns -> OpenAI chat messages, tool calls included."""
+    out = []
+    for t in turns:
+        m = {"role": t["role"], "content": t.get("content", "")}
+        if t.get("tool_calls"):
+            m["tool_calls"] = t["tool_calls"]
+        if t.get("tool_call_id"):
+            m["tool_call_id"] = t["tool_call_id"]
+        if t.get("name"):
+            m["name"] = t["name"]
+        out.append(m)
+    return out
+
+
+def pending_tools(host: str) -> list:
+    """Tool calls the model asked for and nobody has answered yet — the last assistant turn's calls
+    with no matching tool result after them. Survives a browser restart mid-loop, which a purely
+    in-memory pending list would not."""
+    turns = history(host)
+    for i in range(len(turns) - 1, -1, -1):
+        t = turns[i]
+        if t.get("tool_calls"):
+            answered = {r.get("tool_call_id") for r in turns[i + 1:] if r["role"] == "tool"}
+            return [c for c in t["tool_calls"] if c.get("id") not in answered]
+        if t["role"] == "user":
+            return []
+    return []
 
 
 def reset(host: str) -> int:
@@ -122,6 +165,37 @@ def reset(host: str) -> int:
         d["epoch"] = d.get("epoch", 1) + 1
         _write(host, d)
         return d["epoch"]
+
+
+_ALLOW = CHAT_DIR / "allow-actions.json"
+
+
+def actions_allowed(host: str) -> bool:
+    """May the chat ACT on this host (click, type)? Off until the user says otherwise, per host.
+
+    Per host rather than global because trust is not a property of the assistant, it is a property
+    of what a mistake would cost — clicking around a benchmark UI you own is not the same as
+    clicking around a bank."""
+    try:
+        return bool(json.loads(_ALLOW.read_text()).get(host))
+    except Exception:
+        return False
+
+
+def set_actions(host: str, allowed: bool) -> bool:
+    try:
+        d = json.loads(_ALLOW.read_text())
+    except Exception:
+        d = {}
+    d[host] = bool(allowed)
+    try:
+        CHAT_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _ALLOW.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d))
+        os.replace(tmp, _ALLOW)
+    except Exception:
+        pass
+    return bool(allowed)
 
 
 def hosts() -> list:

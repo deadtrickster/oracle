@@ -103,30 +103,42 @@ rcv._citations = lambda c, q: []
 seen = {}
 
 
-def fake_chat(messages, **kw):
+def fake_chat(messages, tools, out, **kw):
+    """Chat goes through the TOOL-aware stream now; retrieval is a tool the model may call, not
+    something every turn does unconditionally."""
     seen["msgs"] = messages
-    return iter(["ok"])
+    seen["tools"] = [t["function"]["name"] for t in tools]
+    out["text"] = "ok"
+    out["tool_calls"] = []
+    yield "ok"
 
 
-rcv._chat_stream = fake_chat
+rcv._chat_stream_tools = fake_chat
 ch.append(H, "user", "earlier question")
 ch.append(H, "assistant", "earlier answer")
 evs = list(rcv.chat_stream("why did p99 spike?", "https://docs.stroppy.io/x", "Docs",
                            None, True, {"around": "AROUND TEXT", "headings": "PostgreSQL"}, H))
 msgs = seen.get("msgs", [])
-check("system, history, then the new turn",
-      [m["role"] for m in msgs] == ["system", "user", "assistant", "user"], str([m["role"] for m in msgs]))
-check("prior turns are verbatim", msgs[1]["content"] == "earlier question")
-u = msgs[-1]["content"]
-check("excerpts are present", "WAL flush is the bottleneck" in u)
-check("page context is present", "AROUND TEXT" in u)
-check("page context is marked non-evidence", "must not be used as evidence" in u)
+# system, then the task+page block, then the transcript. The task block is only sent on the first
+# step of a loop; the transcript that follows is append-only, which is what keeps the prefix warm.
+check("system, task, then the transcript",
+      [m["role"] for m in msgs] == ["system", "user", "user", "assistant", "user"],
+      str([m["role"] for m in msgs]))
+check("prior turns are verbatim", msgs[2]["content"] == "earlier question")
+check("the new question is last", msgs[-1]["content"] == "why did p99 spike?")
+task = msgs[1]["content"]
+check("page context is present", "AROUND TEXT" in task)
+check("page context is marked non-evidence", "must not be used as evidence" in task)
+check("the task tells it to look rather than assume", "answered by looking" in task)
+check("retrieval is offered as a TOOL, not applied unconditionally",
+      "search_corpus" in seen.get("tools", []), str(seen.get("tools")))
 sysmsg = msgs[0]["content"]
 # The site pack lives in the CACHED SYSTEM PREFIX, not the turn — identical every turn, so
 # repeating it per turn would waste the prefix cache and re-state 2.7k tokens inside a conversation
 # that is already growing. See test-prefix.py.
 check("site pack is in the cached prefix", "virtual user" in sysmsg.lower())
-check("and NOT repeated in the turn", "virtual user" not in u.lower())
+check("and NOT repeated in the turn",
+      not any("virtual user" in m["content"].lower() for m in msgs[1:]))
 check("the system prompt separates the kinds of material",
       "CORPUS EXCERPTS" in sysmsg and "SITE REFERENCE MATERIAL" in sysmsg
       and "PAGE CONTEXT" in sysmsg and "THE CONVERSATION" in sysmsg)
@@ -140,7 +152,7 @@ rcv.oracle_vision.remember = lambda *a, **k: None
 ch.reset(H)
 evs2 = list(rcv.chat_stream("what is wrong here?", "https://docs.stroppy.io/x", "Docs", None, True,
                             None, H, image="iVBORw0KGgo=", image_mime="image/png"))
-u2 = seen["msgs"][-1]["content"]
+u2 = "\n".join(m["content"] for m in seen["msgs"])
 check("the reading is in the prompt", "p99 at 412ms" in u2)
 check("labelled as a model's reading, not as the image",
       "read by qwen3-vl" in u2 and "not as ground truth" in u2)
@@ -152,12 +164,13 @@ check("so a later turn can still refer back to it", "read by qwen3-vl" in stored
 ch.reset(H)
 list(rcv.chat_stream("", "https://docs.stroppy.io/x", "Docs", None, True, None, H,
                      image="iVBORw0KGgo="))
-u3 = seen["msgs"][-1]["content"]
-check("a region with NO question still asks something sensible",
-      "without a question" in u3 and "worth noticing" in u3)
+allmsgs = "\n".join(m["content"] for m in seen["msgs"])
+check("a region with NO question still carries the reading",
+      "p99 at 412ms" in allmsgs)
+check("and the transcript holds it, not the pixels",
+      "iVBORw0KGgo" not in "".join(t.get("content", "") for t in ch.history(H)))
 
-print("\n8. retrieval uses the question, not the whole transcript")
-check("query was the message alone", "earlier question" not in u.split("Question:")[0] or True)
+print("\n8. the turn completes")
 done = [d for k, d in evs if k == "done"]
 check("done carries the epoch", done and "epoch" in done[0], str(done))
 

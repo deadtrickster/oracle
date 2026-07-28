@@ -58,7 +58,17 @@ def fake_chat(messages, **kw):
     return iter(["ok"])
 
 
+def fake_chat_tools(messages, tools, out, **kw):
+    """Chat runs the tool loop, which uses a different entry point — stub both, or the chat leg of
+    the prefix comparison silently measures nothing."""
+    captured.append(messages)
+    out["text"] = "ok"
+    out["tool_calls"] = []
+    yield "ok"
+
+
 rcv._chat_stream = fake_chat
+rcv._chat_stream_tools = fake_chat_tools
 
 
 def run(fn, *a, **kw):
@@ -116,10 +126,12 @@ ch.reset(H)
 ch.append(H, "user", "first question")
 ch.append(H, "assistant", "first answer")
 msgs = run(rcv.chat_stream, "second question", URL, "T", None, False, None, H)
-check("system, then history, then the new turn",
-      [m["role"] for m in msgs] == ["system", "user", "assistant", "user"],
+# system, the task block, then the transcript. Only the first two are constant; everything from the
+# transcript onward is append-only, so turn N reuses turns 1..N-1.
+check("system, task, then history, then the new turn",
+      [m["role"] for m in msgs] == ["system", "user", "user", "assistant", "user"],
       str([m["role"] for m in msgs]))
-check("history is verbatim and unrewritten", msgs[1]["content"] == "first question")
+check("history is verbatim and unrewritten", msgs[2]["content"] == "first question")
 check("the site pack is NOT repeated in the turn", "virtual user" not in msgs[-1]["content"].lower())
 
 print("\n8. the grounding rules survived the move into the preamble")

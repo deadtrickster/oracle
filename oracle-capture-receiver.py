@@ -61,6 +61,7 @@ EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # flag would have to be flipped in lockstep with every swap and would lie whenever the two drifted.
 import oracle_chat
 import oracle_kv
+import oracle_tools
 import oracle_vision
 import oracle_vram
 # Per-domain context: a hardcoded pack for our own sites, otherwise the site's own /AGENTS.md as
@@ -467,6 +468,95 @@ def _diversify(query: str, chunks: list, main: int = 18, cross: int = 4) -> list
     return top + other[:cross]
 
 
+_TOOLCALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+_FUNC_RE = re.compile(r"<function=([^>\s]+)\s*>(.*?)</function>", re.DOTALL)
+_PARAM_RE = re.compile(r"<parameter=([^>\s]+)\s*>(.*?)</parameter>", re.DOTALL)
+
+
+def _salvage_tool_calls(text: str):
+    """(clean_text, [tool_call, ...]) — recover tool calls qwen leaked into prose.
+
+    The same failure the Claude-Code shim exists for: qwen3-coder emits its native
+    `<function=NAME><parameter=P>V</parameter></function>` (or a `<tool_call>{json}</tool_call>`)
+    as plain text instead of a structured call, a few percent of the time, under load. Begging it in
+    the prompt to format properly is the workaround this repo refuses to write; salvaging in the
+    harness is the fix that already took the shim's failure rate to ~0. Same bug, same answer."""
+    calls = []
+    if not text or ("<function=" not in text and "<tool_call" not in text):
+        return text, calls
+
+    def _add(name, args):
+        calls.append({"id": f"call_{len(calls)}_{abs(hash(name)) % 10**8}", "type": "function",
+                      "function": {"name": name, "arguments": json.dumps(args)}})
+
+    def _json(m):
+        try:
+            d = json.loads(m.group(1))
+            _add(d.get("name", ""), d.get("arguments") or d.get("parameters") or {})
+        except Exception:
+            pass
+        return ""
+
+    def _xml(m):
+        args = {}
+        for pm in _PARAM_RE.finditer(m.group(2)):
+            v = pm.group(2).strip()
+            if v.lower() in ("true", "false"):
+                args[pm.group(1)] = v.lower() == "true"
+            else:
+                args[pm.group(1)] = v
+        _add(m.group(1), args)
+        return ""
+
+    text = _TOOLCALL_RE.sub(_json, text)
+    text = _FUNC_RE.sub(_xml, text)
+    return text.strip(), [c for c in calls if c["function"]["name"]]
+
+
+def _chat_stream_tools(messages, tools, out: dict, timeout: int = 600, max_tokens: int = 2048):
+    """Like _chat_stream but tool-aware: yields text deltas and leaves the model's tool calls in
+    `out["tool_calls"]`. Arguments arrive fragmented across chunks and are reassembled by index."""
+    body = json.dumps({"model": SYNTH_MODEL, "stream": True, "messages": messages,
+                       "tools": tools, "tool_choice": "auto",
+                       "temperature": 0.1, "max_tokens": max_tokens}).encode()
+    req = urllib.request.Request(f"{OLLAMA}/v1/chat/completions", data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    acc, partial = [], {}
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                delta = json.loads(data)["choices"][0].get("delta", {})
+            except Exception:
+                continue
+            for tc in delta.get("tool_calls") or []:
+                slot = partial.setdefault(tc.get("index", 0),
+                                          {"id": "", "type": "function",
+                                           "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]
+            if delta.get("content"):
+                acc.append(delta["content"])
+                yield delta["content"]
+    calls = [partial[i] for i in sorted(partial)]
+    if not calls:                       # nothing structured — look for a leaked one in the prose
+        _, calls = _salvage_tool_calls("".join(acc))
+        if calls:
+            out["salvaged"] = True
+    out["text"] = "".join(acc)
+    out["tool_calls"] = [c for c in calls if (c.get("function") or {}).get("name")]
+
+
 def _chat_stream(messages, url: str = None, model: str = None, timeout: int = 300, max_tokens: int = 2048):
     """Yield chat text deltas from an OpenAI-compatible /v1/chat/completions (Ollama, llama.cpp, or the
     qwen3-vl server). Streaming so the glued popup fills token-by-token instead of waiting."""
@@ -558,7 +648,18 @@ _FACTCHECK_TASK = (
     "is silent — never guess from your own knowledge).")
 
 _CHAT_TASK = (
-    "TASK: continue the conversation. This is a chat panel, not an essay — keep it short.")
+    "TASK: continue the conversation, using tools when they would help. This is a chat panel, not "
+    "an essay — keep it short.\n"
+    "You are attached to the page the user is looking at, so ANSWER FROM WHAT IS THERE rather than "
+    "from what you remember. Two habits matter:\n"
+    "- A question about THIS page or run ('what do you think about this?', 'explain this run') is "
+    "answered by looking: read_page first, look_at_page when the pixels carry the meaning, and "
+    "click through the page's own tabs to gather what you still need. Do not answer such a question "
+    "from the corpus — it has never seen this page.\n"
+    "- A question about how something WORKS in general goes to search_corpus, and its excerpts get "
+    "numbered citations.\n"
+    "Work in small steps and say what you are doing as you go. When you have enough, stop calling "
+    "tools and answer.")
 
 
 def _system_for(site: str = "", host: str = "") -> str:
@@ -812,61 +913,73 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
                 reading = ""
             yield from _dbg(debug, "image reading", chars=len(reading), text=reading)
 
-    turns = oracle_chat.history(host)
-    yield from _dbg(debug, "chat turn", host=host, epoch=oracle_chat.epoch(host),
-                    prior_turns=len(turns),
-                    prior_chars=sum(len(t.get("content", "")) for t in turns))
+    # Record the user turn before the loop, so a browser tool round trip (which re-enters this
+    # function) sees a transcript that already contains the question it is answering.
+    stored = message
+    if reading:
+        stored = ((message + "\n\n") if message else "") + oracle_vision.block(
+            reading, "a region the user selected on this page")
+    if stored:
+        roll = oracle_chat.append(host, "user", stored)
+        if roll["rolled"]:
+            yield ("status", {"text": f"previous conversation was full — started a new topic "
+                                      f"(epoch {roll['epoch']}); nothing was deleted"})
+    yield from _chat_loop(host, url, title, agents_md, where, debug)
 
-    # Retrieval uses the message alone. Folding the transcript into the query was tempting and is
-    # exactly how a conversation's first topic ends up dominating retrieval for its whole life.
-    # With no typed question, the image's reading IS the query — otherwise a silent region drag
-    # would retrieve on an empty string and come back with whatever the index happens to rank first.
-    query = message or " ".join(reading.split())[:300]
-    chunks, reranked, cites = [], False, []
+
+def _run_local_tool(name: str, args: dict, debug: bool):
+    """Execute a tool the receiver owns. Yields SSE events, returns the result text via `out`."""
+    out = {"text": ""}
+    if name != "search_corpus":
+        out["text"] = f"error: {name} is not a tool this side can run"
+        return out
+    query = (args.get("query") or "").strip()
+    if not query:
+        out["text"] = "error: search_corpus needs a query"
+        return out
     try:
         kb_ids = _kb_ids()
-        if kb_ids and query:
-            chunks, reranked = _retrieve(query, kb_ids)
-            chunks = _diversify(query, chunks) if chunks else []
-            cites = _citations(chunks, query) if chunks else []
-    except (urllib.error.URLError, ConnectionError, TimeoutError):
-        yield from _dbg(debug, "retrieval skipped", why="RAGFlow unreachable")
+        chunks, reranked = _retrieve(query, kb_ids) if kb_ids else ([], False)
+        chunks = _diversify(query, chunks) if chunks else []
     except Exception as e:
-        yield from _dbg(debug, "retrieval failed", why=str(e))
-    yield ("sources", {"sources": sorted({c.get("document_keyword", "?") for c in chunks}),
-                       "citations": cites, "reranked": reranked})
-
-    excerpts = "\n\n".join(
+        out["text"] = f"error: the corpus is unreachable ({e})"
+        return out
+    out["sources"] = sorted({c.get("document_keyword", "?") for c in chunks})
+    out["citations"] = _citations(chunks, query) if chunks else []
+    out["reranked"] = reranked
+    out["text"] = ("\n\n".join(
         f"[{i+1}] (source: {c.get('document_keyword','?')})\n"
         f"{c.get('content_with_weight') or c.get('content','')}"
         for i, c in enumerate(chunks))
-    # The site pack lives in the cached system prefix (see _system_for), NOT here — it is identical
-    # for every turn on this host, so repeating it per turn would both waste the cache and re-state
-    # the same 2.7k tokens inside a growing conversation.
+        or "No relevant passages. The corpus does not cover this; say so rather than guessing.")
+    return out
+
+
+CHAT_MAX_STEPS = int(os.environ.get("ORACLE_CHAT_MAX_STEPS", "8"))
+
+
+def _try_json(s):
+    try:
+        return json.loads(s or "{}")
+    except Exception:
+        return {}
+
+
+def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool):
+    """Drive the model until it answers, needs the browser, or runs out of steps.
+
+    Two kinds of tool and two very different control flows. `search_corpus` runs here, so the loop
+    just continues. Anything needing a DOM cannot run here at all — the receiver has no page — so
+    the turn ENDS with a tool_request and the extension re-enters this loop by posting the result.
+    That is not a workaround for a missing feature; it is the only correct place for the work, and
+    it is the same closed-loop rule the whole repo runs on: whoever owns the hand does the moving,
+    and reports what actually happened rather than what was intended.
+    """
     site = oracle_sitectx.block(url, agents_md)
     page = _page_context(url, title, where)
-    parts = [_CHAT_TASK]
-    if page:
-        parts.append(page)
-    parts.append(f"Excerpts for THIS question:\n{excerpts}" if excerpts
-                 else "Excerpts for THIS question: (retrieval returned nothing relevant)")
-    if reading:
-        parts.append(oracle_vision.block(reading, "a region the user selected on this page"))
-    parts.append(f"Question: {message}" if message else
-                 "The user sent this region without a question — say what it shows and what is "
-                 "worth noticing about it, using the excerpts where they apply.")
-    user = "\n\n".join(parts)
-
     system = _system_for(site, host)
-    msgs = ([{"role": "system", "content": system}]
-            + [{"role": t["role"], "content": t["content"]} for t in turns]
-            + [{"role": "user", "content": user}])
-    # The cache boundary is the end of the system message; the transcript after it is append-only,
-    # so turn N reuses everything through turn N-1 and only the new turn is processed.
-    yield from _dbg(debug, "prompt sent to the text model", chars=sum(len(m["content"]) for m in msgs),
-                    cached_prefix_chars=len(system), history_turns=len(turns),
-                    excerpt_count=len(chunks), page_context_chars=len(page),
-                    site_context_chars=len(site), system=system, text=user)
+    can_act = oracle_chat.actions_allowed(host)
+    tools = oracle_tools.for_host(can_act)
 
     try:
         for note in ensure_model("text"):
@@ -875,30 +988,100 @@ def chat_stream(message: str, url: str = "", title: str = "", agents_md: str | N
         yield ("error", {"error": str(e)})
         return
 
-    # Record the user turn only once the model is reachable, so a failed swap does not leave a
-    # question in the transcript that was never asked of anything.
-    stored = message
-    if reading:
-        stored = ((message + "\n\n") if message else "") + oracle_vision.block(
-            reading, "a region the user selected on this page")
-    roll = oracle_chat.append(host, "user", stored)
-    if roll["rolled"]:
-        yield ("status", {"text": f"previous conversation was full — started a new topic "
-                                  f"(epoch {roll['epoch']}); nothing was deleted"})
-    acc = []
-    try:
-        for delta in _chat_stream(msgs):
-            acc.append(delta)
-            yield ("delta", {"text": delta})
-    except (urllib.error.URLError, ConnectionError, TimeoutError):
-        yield ("error", {"error": "Synthesis model is unreachable."})
+    for step in range(CHAT_MAX_STEPS):
+        turns = oracle_chat.history(host)
+        msgs = ([{"role": "system", "content": system}]
+                + ([{"role": "user", "content": _CHAT_TASK + ("\n\n" + page if page else "")}]
+                   if step == 0 else [])
+                + oracle_chat.to_messages(turns))
+        yield from _dbg(debug, f"model call (step {step + 1})", host=host, turns=len(turns),
+                        tools=[t["function"]["name"] for t in tools], actions_allowed=can_act,
+                        cached_prefix_chars=len(system))
+
+        out = {}
+        try:
+            for delta in _chat_stream_tools(msgs, tools, out):
+                yield ("delta", {"text": delta})
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            yield ("error", {"error": "Synthesis model is unreachable."})
+            return
+        except Exception as e:
+            yield ("error", {"error": f"chat error: {e}"})
+            return
+
+        calls = out.get("tool_calls") or []
+        text = out.get("text", "")
+        if out.get("salvaged"):
+            yield from _dbg(debug, "salvaged a leaked tool call", n=len(calls))
+        if not calls:
+            if text.strip():
+                oracle_chat.append(host, "assistant", text)
+            yield ("done", {"epoch": oracle_chat.epoch(host)})
+            return
+
+        oracle_chat.append(host, "assistant", text, tool_calls=calls)
+
+        browser = [c for c in calls if oracle_tools.is_browser(c["function"]["name"])]
+        if browser:
+            # Hand off. The extension executes these and posts the results back, which re-enters
+            # this loop with the transcript one step further along.
+            asks = []
+            for c in browser:
+                try:
+                    args = json.loads(c["function"].get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                asks.append({"id": c["id"], "name": c["function"]["name"], "args": args,
+                             "acting": oracle_tools.is_acting(c["function"]["name"]),
+                             "says": oracle_tools.describe(c["function"]["name"], args)})
+            yield ("tool_request", {"calls": asks})
+            yield ("done", {"epoch": oracle_chat.epoch(host), "pending_tools": True})
+            return
+
+        for c in calls:
+            name = c["function"]["name"]
+            try:
+                args = json.loads(c["function"].get("arguments") or "{}")
+            except Exception:
+                args = {}
+            yield ("status", {"text": oracle_tools.describe(name, args) + "…"})
+            res = _run_local_tool(name, args, debug)
+            if res.get("citations") is not None:
+                yield ("sources", {"sources": res.get("sources", []),
+                                   "citations": res.get("citations", []),
+                                   "reranked": res.get("reranked", False)})
+            yield from _dbg(debug, f"tool result: {name}", chars=len(res["text"]),
+                            args=args, text=res["text"])
+            oracle_chat.append(host, "tool", res["text"], tool_call_id=c["id"], name=name)
+
+    yield ("delta", {"text": f"\n\n_(stopped after {CHAT_MAX_STEPS} steps without reaching an "
+                             f"answer — ask again, more narrowly.)_"})
+    yield ("done", {"epoch": oracle_chat.epoch(host)})
+
+
+def chat_tool_results(host: str, results: list, url: str = "", title: str = "",
+                      agents_md: str | None = None, where: dict | None = None,
+                      debug: bool = False):
+    """The extension reporting back what a browser tool actually did. Records each result and
+    resumes the loop."""
+    if not host:
+        yield ("error", {"error": "no host"})
         return
-    except Exception as e:
-        yield ("error", {"error": f"chat error: {e}"})
-        return
-    if acc:
-        oracle_chat.append(host, "assistant", "".join(acc))
-    yield ("done", {"epoch": roll["epoch"]})
+    pending = {c.get("id") for c in oracle_chat.pending_tools(host)}
+    for r in results or []:
+        cid = r.get("id")
+        if cid not in pending:
+            continue                      # a stale reply from an abandoned loop
+        oracle_chat.append(host, "tool", str(r.get("content", ""))[:20000],
+                           tool_call_id=cid, name=r.get("name", ""))
+    still = oracle_chat.pending_tools(host)
+    if still:
+        # Never call the model with an unanswered tool call in the transcript: the chat template
+        # requires a result for every call, and a half-answered turn produces a malformed prompt.
+        for c in still:
+            oracle_chat.append(host, "tool", "error: not executed", tool_call_id=c.get("id"),
+                               name=(c.get("function") or {}).get("name", ""))
+    yield from _chat_loop(host, url, title, agents_md, where, debug)
 
 
 VL_CTX_CHARS = int(os.environ.get("ORACLE_VL_CTX_CHARS", "4000"))
@@ -1357,7 +1540,14 @@ class Handler(BaseHTTPRequestHandler):
             h = (q.get("host", [""])[0] or
                  oracle_sitectx.host_of(q.get("url", [""])[0])).strip()
             self._send({"host": h, "epoch": oracle_chat.epoch(h),
-                        "turns": [{"role": t["role"], "content": t["content"], "at": t.get("at", 0)}
+                        "actions": oracle_chat.actions_allowed(h),
+                        "turns": [{"role": t["role"], "content": t.get("content", ""),
+                                   "at": t.get("at", 0),
+                                   "tool": t.get("name", ""),
+                                   "calls": [oracle_tools.describe(
+                                       c["function"]["name"],
+                                       _try_json(c["function"].get("arguments")))
+                                       for c in (t.get("tool_calls") or [])]}
                                   for t in oracle_chat.history(h)]})
         elif self.path.startswith("/health"):
             self._send({"ok": True})
@@ -1412,6 +1602,14 @@ class Handler(BaseHTTPRequestHandler):
                                               ("image_alt", "image_title", "image_caption")},
                                              p.get("source", "region"), p.get("agents_md"),
                                              bool(p.get("debug"))))
+            elif self.path.startswith("/chat/tool"):
+                self._send_sse(chat_tool_results(
+                    (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip(),
+                    p.get("results") or [], p.get("url", ""), p.get("title", ""),
+                    p.get("agents_md"), p.get("where"), bool(p.get("debug"))))
+            elif self.path.startswith("/chat/allow"):
+                h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
+                self._send({"host": h, "actions": oracle_chat.set_actions(h, bool(p.get("allow")))})
             elif self.path.startswith("/chat/reset"):
                 h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
                 self._send({"host": h, "epoch": oracle_chat.reset(h)})
