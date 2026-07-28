@@ -195,7 +195,9 @@
       .empty { opacity:.6; font-size:12px; }
       .dbg { flex:1; overflow:auto; padding:8px 12px; font:11px/1.45 ui-monospace,monospace; }
       .dbg .ev { border-top:1px solid rgba(128,128,128,.2); padding:6px 0; }
-      .dbg .hd { cursor:pointer; display:flex; gap:6px; align-items:baseline; }
+      .dbg .hd { cursor:default; display:flex; gap:6px; align-items:baseline; }
+      .dbg .hd.has { cursor:pointer; }
+      .dbg .hd.has:hover .st { text-decoration:underline; }
       .dbg .side { font-size:9px; padding:0 4px; border-radius:6px; background:rgba(128,128,128,.22); }
       .dbg .st { font-weight:700; } .dbg .meta { opacity:.65; font-size:10px; }
       .dbg pre { white-space:pre-wrap; word-break:break-word; max-height:320px; overflow:auto;
@@ -464,12 +466,16 @@
       const { side, stage, text, sections, ...rest } = e;
       const meta = Object.entries(rest).filter(([, v]) => v !== undefined && v !== null && v !== "")
         .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
-      return `<div class="ev"><div class="hd" data-i="${i}">
+      // Only rows with something to expand LOOK expandable. The cursor used to say "clickable" on
+      // every row, including the ones carrying nothing but their metadata — so clicking did
+      // nothing and the UI had promised otherwise.
+      const has = text != null;
+      return `<div class="ev"><div class="hd${has ? " has" : ""}" data-i="${i}">
           <span class="side">${esc(side || "receiver")}</span>
           <span class="st">${esc(stage || "?")}</span>
-          ${text != null ? `<span class="meta">▸ ${String(text).length}c</span>` : ""}
+          ${has ? `<span class="meta">▸ ${String(text).length}c</span>` : ""}
         </div><div class="meta">${esc(meta)}</div>
-        ${text != null ? `<pre hidden data-i="${i}">${esc(String(text))}</pre>` : ""}</div>`;
+        ${has ? `<pre hidden data-i="${i}">${esc(String(text))}</pre>` : ""}</div>`;
     }).join("");
     dbgEl.querySelectorAll(".hd").forEach((h) => h.addEventListener("click", () => {
       const pre = dbgEl.querySelector(`pre[data-i="${h.dataset.i}"]`);

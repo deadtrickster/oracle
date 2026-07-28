@@ -1025,11 +1025,15 @@ def _chat_loop(host: str, url: str, title: str, agents_md, where, debug: bool,
 def _chat_steps(host, session, system, page, tools, can_act, debug):
     for step in range(CHAT_MAX_STEPS):
         turns = oracle_chat.history(host, session)
+        # Count model calls across the whole EXCHANGE, not this invocation of the loop. A browser
+        # tool ends the turn and the extension re-enters, so `step` restarts at 0 every hand-off —
+        # which printed "model call (step 1)" twice in a row and read as the same work repeating.
+        call_no = sum(1 for t in turns if t["role"] == "assistant") + 1
         msgs = ([{"role": "system", "content": system}]
                 + ([{"role": "user", "content": _CHAT_TASK + ("\n\n" + page if page else "")}]
                    if step == 0 else [])
                 + oracle_chat.to_messages(turns))
-        yield from _dbg(debug, f"model call (step {step + 1})", host=host, turns=len(turns),
+        yield from _dbg(debug, f"model call #{call_no}", host=host, turns=len(turns),
                         tools=[t["function"]["name"] for t in tools], actions_allowed=can_act,
                         cached_prefix_chars=len(system))
 
