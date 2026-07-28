@@ -223,6 +223,22 @@ def set_actions(host: str, allowed: bool) -> bool:
     return bool(allowed)
 
 
+def delete(host: str) -> bool:
+    """Delete a conversation outright. `reset` starts a new epoch and keeps everything; this is the
+    other thing, and the difference should stay visible in the UI.
+
+    The per-host action permission is deliberately NOT cleared: whether you trust a site with clicks
+    is a fact about the site, not about a conversation you happened to finish."""
+    if not host:
+        return False
+    with _lock(host):
+        try:
+            _path(host).unlink()
+            return True
+        except OSError:
+            return False
+
+
 def hosts() -> list:
     """Every host with a stored conversation, most recently used first."""
     out = []

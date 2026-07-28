@@ -1607,6 +1607,10 @@ class Handler(BaseHTTPRequestHandler):
                     (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip(),
                     p.get("results") or [], p.get("url", ""), p.get("title", ""),
                     p.get("agents_md"), p.get("where"), bool(p.get("debug"))))
+            elif self.path.startswith("/chat/delete"):
+                h = (p.get("host") or "").strip()
+                self._send({"host": h, "deleted": oracle_chat.delete(h),
+                            "hosts": oracle_chat.hosts()})
             elif self.path.startswith("/chat/allow"):
                 h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
                 self._send({"host": h, "actions": oracle_chat.set_actions(h, bool(p.get("allow")))})

@@ -73,6 +73,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "oracle:chatReset") { if (sender.tab) chatReset(sender.tab); return false; }
   if (msg.type === "oracle:chatAllow") { if (sender.tab) chatAllow(sender.tab, msg.allow); return false; }
   if (msg.type === "oracle:setDebug") { chrome.storage.local.set({ [DEBUG_KEY]: !!msg.on }); return false; }
+  if (msg.type === "oracle:chatSessions") { if (sender.tab) chatSessions(sender.tab); return false; }
+  if (msg.type === "oracle:chatDelete") { if (sender.tab) chatDelete(sender.tab, msg.host); return false; }
   if (msg.type === "openChat") {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => { if (tab) openChat(tab); sendResponse({ ok: true }); });
     return true;
@@ -536,6 +538,35 @@ async function chatPump(body, send, tab, depth = 0) {
     send({ event: "error", data: { error:
       "The answer was cut off — the connection to the Oracle receiver ended early." } });
   }
+}
+
+// Every stored conversation, so the panel can show them and let you throw them away. They live on
+// the receiver, which is the only component that knows about the ones this browser never opened.
+async function chatSessions(tab) {
+  let host = "";
+  try { host = new URL(tab.url).host; } catch (_) {}
+  let hosts = [];
+  try {
+    const r = await fetch(RECEIVER + "/chat/hosts");
+    if (r.ok) hosts = (await r.json()).hosts || [];
+  } catch (_) {}
+  chrome.tabs.sendMessage(tab.id, { type: "oracle:chatSessions", hosts, here: host })
+    .catch(() => {});
+}
+
+async function chatDelete(tab, host) {
+  try {
+    await fetch(RECEIVER + "/chat/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host }),
+    });
+  } catch (_) {}
+  await chatSessions(tab);
+  // Deleting the conversation you are looking at should empty the panel, not leave a ghost of it
+  // on screen that the next question would silently contradict.
+  let here = "";
+  try { here = new URL(tab.url).host; } catch (_) {}
+  if (host === here) chatLoad(tab);
 }
 
 // The per-host gate for acting tools. Stored on the RECEIVER, not in the extension, because the

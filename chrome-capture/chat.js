@@ -70,7 +70,16 @@
       .tab { border:0; background:transparent; color:inherit; font:inherit; font-size:11px;
         padding:5px 9px; cursor:pointer; opacity:.55; border-bottom:2px solid transparent; }
       .tab.on { opacity:1; border-bottom-color:#128a86; font-weight:600; }
-      .scroll[hidden], .dbg[hidden] { display:none; }   /* author rules outrank UA [hidden] */
+      .scroll[hidden], .dbg[hidden], .ses[hidden] { display:none; }  /* outranks UA [hidden] */
+      .ses { flex:1; overflow:auto; padding:8px 12px; }
+      .ses .row { display:flex; align-items:baseline; gap:8px; padding:7px 0;
+        border-bottom:1px solid rgba(128,128,128,.18); }
+      .ses .h { flex:1; font-weight:600; word-break:break-all; }
+      .ses .h .me { font-weight:400; opacity:.6; font-size:10px; margin-left:6px; }
+      .ses .meta { font-size:10px; opacity:.6; white-space:nowrap; }
+      .ses .del { border:0; background:transparent; color:#c0392b; cursor:pointer; font:inherit;
+        font-size:11px; opacity:.75; padding:2px 4px; }
+      .ses .del:hover { opacity:1; text-decoration:underline; }
       .scroll { flex:1; overflow:auto; padding:10px 12px; }
       .msg { margin:0 0 10px; }
       .msg .who { font-size:10px; opacity:.5; margin-bottom:2px; }
@@ -118,9 +127,11 @@
       <div class="tabs">
         <button class="tab on" data-pane="chat">Conversation</button>
         <button class="tab" data-pane="dbg">Debug<span class="n"></span></button>
+        <button class="tab" data-pane="ses">Sessions</button>
       </div>
       <div class="scroll"></div>
       <div class="dbg" hidden></div>
+      <div class="ses" hidden></div>
       <div class="foot">
         <textarea class="in" rows="1" placeholder="Ask about this site… (Enter to send)"></textarea>
         <button class="go">Ask</button>
@@ -128,7 +139,8 @@
     </div>`;
 
   const $ = (s) => root.querySelector(s);
-  const scroll = $(".scroll"), dbgEl = $(".dbg"), input = $(".in"), go = $(".go");
+  const scroll = $(".scroll"), dbgEl = $(".dbg"), sesEl = $(".ses"),
+        input = $(".in"), go = $(".go");
   const esc = (s) => String(s).replace(/</g, "&lt;");
 
   function md(text) {
@@ -189,6 +201,39 @@
     scroll.scrollTop = scroll.scrollHeight;
   }
 
+  function ago(t) {
+    if (!t) return "";
+    const s = Math.max(0, Math.round(Date.now() / 1000 - t));
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  }
+
+  function renderSessions(hosts, here) {
+    if (!hosts.length) {
+      sesEl.innerHTML = `<p class="empty">No stored conversations yet.</p>`;
+      return;
+    }
+    sesEl.innerHTML = hosts.map((s) => `
+      <div class="row">
+        <span class="h">${esc(s.host)}${s.host === here ? '<span class="me">this site</span>' : ""}</span>
+        <span class="meta">${s.turns} turn${s.turns === 1 ? "" : "s"} · ${esc(ago(s.at))}</span>
+        <button class="del" data-host="${esc(s.host)}">delete</button>
+      </div>`).join("");
+    sesEl.querySelectorAll(".del").forEach((b) => b.addEventListener("click", () => {
+      // Deliberately two clicks: this is the one control here that destroys something. "New topic"
+      // (✚) keeps everything and only moves the window; delete does not.
+      if (b.dataset.armed !== "1") {
+        b.dataset.armed = "1";
+        b.textContent = "really delete?";
+        setTimeout(() => { b.dataset.armed = "0"; b.textContent = "delete"; }, 4000);
+        return;
+      }
+      b.textContent = "deleting…";
+      try { chrome.runtime.sendMessage({ type: "oracle:chatDelete", host: b.dataset.host }); } catch (_) {}
+    }));
+  }
+
   function renderDbg() {
     const n = root.querySelector(".tab .n");
     if (n) n.textContent = dbgEvents.length ? `(${dbgEvents.length})` : "";
@@ -236,9 +281,16 @@
 
   root.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
     root.querySelectorAll(".tab").forEach((o) => o.classList.toggle("on", o === t));
-    const wantDbg = t.dataset.pane === "dbg";
-    scroll.hidden = wantDbg;
-    dbgEl.hidden = !wantDbg;
+    const pane = t.dataset.pane;
+    scroll.hidden = pane !== "chat";
+    dbgEl.hidden = pane !== "dbg";
+    sesEl.hidden = pane !== "ses";
+    // Fetched on open rather than kept in sync: the list changes rarely and staleness here would
+    // mean offering to delete something that is already gone.
+    if (pane === "ses") {
+      sesEl.innerHTML = `<p class="empty">loading…</p>`;
+      try { chrome.runtime.sendMessage({ type: "oracle:chatSessions" }); } catch (_) {}
+    }
   }));
 
   go.addEventListener("click", () => send());
@@ -311,6 +363,7 @@
       renderDbg();
       return;
     }
+    if (msg.type === "oracle:chatSessions") { renderSessions(msg.hosts || [], msg.here || ""); return; }
     if (msg.type === "oracle:chatAsk") { send(msg.message || "", msg.image || "", msg.thumb); return; }
     if (msg.type !== "oracle:chatEvent") return;
     const { event, data } = msg.ev || {};
