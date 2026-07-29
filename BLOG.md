@@ -1301,6 +1301,75 @@ I have a whole vocabulary for guarding against models that make things up. I had
 infrastructure that makes things up — and infrastructure is more convincing, because it comes with
 a progress bar.
 
+## Act 28 — The database wasn't the bottleneck. My own reranker was.
+
+I pointed a firehose at the corpus: an arXiv mirror, ~310,000 papers already on disk and 800,000
+still downloading, ingesting continuously. The point was not to build a better shelf. It was load —
+to find out where the document store breaks, and whether retrieval gets worse as the index grows.
+
+Then a single search failed to return in 115 seconds, and I assumed I had my answer.
+
+I was wrong about which component. Breaking it apart:
+
+| what I asked for | time |
+|---|---|
+| one knowledge base, no reranking | 1.87 s |
+| **arXiv alone — the biggest, 140k chunks** | **1.39 s** |
+| all 22 knowledge bases, top 64 | 2.76 s |
+| **all 22, with the reranker** | **42.5 s** |
+
+The store is *faster* on its largest collection than on a small one, and going from one collection
+to twenty-two costs under a second at 467,000 rows. The forty seconds is a cross-encoder reranker
+that runs on the CPU — the same CPU the ingest was saturating.
+
+So ingest load degrades **retrieval**, but through CPU contention, not through anything to do with
+the index. And because the retrieval path tries the reranked query first, *every chat turn* pays it.
+That is a "the chat feels stuck" complaint whose cause is a background job in a different subsystem,
+with no error anywhere and both components behaving exactly as designed.
+
+The measurement I built to test the database ended up testing the thing next to it. That keeps
+happening, and I have stopped treating it as a detour.
+
+## Act 29 — Two filters I measured, and then didn't ship
+
+Adding a rule feels like progress. Both of these looked obviously right, and the measurement killed
+them.
+
+**The first: letter-spaced text.** Some PDFs position every glyph individually, so the extractor
+cannot tell which gaps are word breaks, and you get `P ro d u c tio n R e a d y`. It tokenises into
+nothing, matches no query, and still occupies a retrieval slot. My user asked the obvious question —
+*"what's the point of letter-spaced PDFs?"* — and he was right that there isn't one.
+
+So I wrote a detector: what fraction of a document's words are a single letter? Then I measured it
+across 2,260 papers. Median 2.9%. And the highest scorer in the entire corpus, at 42.7%, is a
+perfectly readable algebra paper from Kyoto — because mathematics is *full* of single-letter
+variables. The two genuinely broken papers score 0.052 and 0.111, near the median, because only
+their figure captions are damaged and the prose around them is clean.
+
+Any threshold that catches the broken figures deletes the mathematics. Three chunks in 5,373 are
+actually bad. The cure was more dangerous than the disease.
+
+**The second: bibliographies.** This one is real — asking about approximate nearest neighbour search
+returned six papers, and two of the six were pure reference lists (*"CIKM '24. ACM, 4906–4913.
+doi:…"*) outranking chunks that explain the method. Across 138,000 chunks, 4,278 carry three or more
+DOIs. I started writing a rule to detect them by DOI density and push them down the ranking.
+
+My user stopped me twice, and both corrections were the same correction. First: the chunk cleaner is
+its own subsystem with its own design — a cheap rule proposes *candidates*, a judge decides — and the
+lesson written into it when it was built is *"my rules kept encoding the surface form instead of the
+thing."* A DOI count is surface form. Second: this case was already specified, months earlier,
+including the output contract — **demote by default**, as per-class weights in the reranking layer,
+where it is configuration rather than code and can be *inverted* for navigational queries.
+
+Which matters, because deleting bibliographies would be wrong anyway. *"Who wrote the RaBitQ
+paper?"* is a real question, and the citation is the answer.
+
+The pattern in both: I had a lever (delete), so everything looked like something to delete. The
+useful additions turned out to be the other two — **exclude a whole collection** when it is
+legitimate but wrong for this question, and **demote a chunk** when it is real but rarely the
+answer. Deleting is for material that is actively poisonous, and that is a much smaller category
+than it feels like at 2am.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
@@ -1452,3 +1521,12 @@ things actually happened — most beats are a thing I set out to do, the wall I 
 - "The status line said 'reading weights from disk'. The file was 100% in RAM. He read it and asked if he needed more memory."
 - "A status line that states a cause it hasn't measured is a guess wearing a uniform."
 - "fadvise alone would have warmed almost nothing and reported success — this project's signature bug, written by me, in the name of elegance."
+- "Every chunk was missing the letter `n`, and every counter said 100%."
+- "I have a whole vocabulary for guarding against models that make things up. I had almost nothing for infrastructure that makes things up — and infrastructure is more convincing, because it comes with a progress bar."
+- "'The config now reads correctly' was true while the data was still garbage. I had already believed it once."
+- "The config is copied forward three times, and the parser reads the last copy. Fixing the first one changes nothing that already exists."
+- "It is invisible in Cyrillic, which has no Latin `n` to lose — so one affected shelf looked perfect."
+- "The database is faster on its largest collection than on a small one. The forty seconds was my own reranker, starved by my own ingest."
+- "A 'the chat feels stuck' complaint whose cause is a background job in a different subsystem, with both components behaving exactly as designed."
+- "The highest-scoring document in the corpus was a readable algebra paper — because mathematics is full of single-letter variables. Any threshold that catches the broken figures deletes the maths."
+- "I had a lever, so everything looked like something to delete. Deleting is for material that is actively poisonous, and that is a much smaller category than it feels like at 2am."
