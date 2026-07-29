@@ -848,6 +848,38 @@ scripting is the product, not overspecialisation.
   set at ~16% of a 131,072-token slot; injected functions cannot see module scope (now checked by
   `chrome-capture/check-injected.mjs`, wired into `check.sh`).
 
+### G8 — arXiv: mirror -> corpus, and two silent-corruption bugs (2026-07-29)
+
+The mirror at `/mnt/data/arxiv` (separate long-running sync, ~230k of a ~1.1M target, 3.1M papers
+catalogued in `state.db`) now feeds the corpus. `arxiv-select.py` picks a slice and extracts text;
+`arxiv-tail.sh` + `oracle-arxiv-ingest.service` follow the download continuously.
+
+**`naive` over pdftotext, not DeepDoc over the PDFs.** Measured here: DeepDoc is ~415s per 13-page
+range (table analysis ~47s, OCR ~31s), so the 8,273 systems-category papers already downloaded would
+be six to eleven WEEKS of CPU. Via pdftotext it is ~0.11s each — 50 papers in 5.3s. arXiv PDFs are
+born-digital, so OCR and table-structure recognition solve a problem these files do not have.
+
+**Chunk volume is the real constraint, not CPU.** Measured 52 chunks/paper: the systems slice alone
+would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the script says so.
+
+- [x] **The delimiter that ate every letter `n`.** Chunks stored as `i creasi gly i volves i
+      formatio `. Creating a dataset through RAGFlow's API without an explicit delimiter stores the
+      default double-escaped (`\\n`), which `unicode_escape` turns into backslash + a literal `n`;
+      the txt parser splits on each character of that set and consumes it. Parsing reported success
+      throughout. Eight KBs were affected (arxiv, bio, books, collection, keep-books, ml, papers,
+      tpc) — invisible on the PDF-parsed ones and on the Cyrillic one, which has no Latin `n` to
+      lose. Fixed by setting `delimiter` explicitly in ingest-corpus.py + repairing the KBs in
+      place. Upstream bug, reproduced on `main`, written up in
+      `~/Projects/ragflow/stories/delimiter-eats-the-letter-n.md`.
+- [x] **NUL from pdftotext**, 3.5% of papers (51 of 1,446; median 724 NULs per affected file, none
+      under 10 — systematically broken CID font maps, not stray glyphs). Extrapolates to ~38k over
+      the mirror. Per G4.4 policy these are KEPT and allowed to fail visibly rather than dropped:
+      a failure that vanishes is not a decision, it is amnesia. Ids accumulate in
+      `corpus/arxiv-needs-ocr.txt` for a deliberate OCR pass.
+- [ ] Run DeepDoc OCR over the `arxiv-needs-ocr.txt` queue.
+- [ ] Decide how wide to go. cs.DB alone is ~72k chunks; the systems slice is ~430k, which would
+      double the corpus. Measure retrieval before widening.
+
 ### G7 — TPC specifications ingested (2026-07-29)
 
 `fetch-tpc-specs.sh` → `~/Documents/Books/TPC` → `corpus/tpc_raw` → KB `tpc` (book parser). 13

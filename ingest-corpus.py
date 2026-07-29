@@ -280,7 +280,26 @@ def main():
             ds = api(s, args.base, "POST", "/datasets",
                      json={"name": name, "chunk_method": chunk_method,
                            "parser_config": {"raptor": {"use_raptor": False},
-                                             "graphrag": {"use_graphrag": False}}})
+                                             "graphrag": {"use_graphrag": False},
+                                             # Set EXPLICITLY. Never inherit this default.
+                                             #
+                                             # RAGFlow's txt parser does:
+                                             #   delimiter.encode("utf-8")
+                                             #            .decode("unicode_escape")
+                                             #            .encode("latin1").decode("utf-8")
+                                             # and then splits on each CHARACTER of the result.
+                                             # Newer RAGFlow defaults the delimiter to "\\\\n"
+                                             # (backslash backslash n), which unicode_escape turns
+                                             # into backslash + a literal "n" — so the parser split
+                                             # on every letter n and CONSUMED it. Chunks came out
+                                             # as "i creasi gly i volves i formatio " and nothing
+                                             # anywhere reported an error.
+                                             #
+                                             # Older KBs (linux, emacs) hold "\\n" and are fine,
+                                             # which is why this only appeared on a KB created
+                                             # today. "\n" here is a real newline and needs no
+                                             # escaping round-trip at all.
+                                             "delimiter": "\n"}})
         dsid = ds["id"]
 
         # re-queue alongside new uploads: never-parsed docs (UNSTART), failed ones,

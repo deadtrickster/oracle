@@ -1431,6 +1431,37 @@ The electricity failed mid-ingest — an unplanned run of the "does the stack co
   (or a `<tool_call>{json}`) into a proper `tool_use` — net ~0% failures. Lesson: "no proxy" was an
   aesthetic, not a requirement; correctness beat it.
 
+### 8.1 Silent corruption: the failure mode that reports success
+
+Two bugs found on the same day, both in RAGFlow, both invisible to every signal the system emits.
+
+**tiktoken refused to encode `<|endoftext|>`.** Books about language models print that string, so
+`truncate()` raised and killed the page-task — while `num_tokens_from_string()`, which wraps the
+same call in `try/except: return 0`, silently reported a real chunk as **zero tokens**. One path
+died loudly, the other lied quietly, from the same input.
+
+**The chunk delimiter ate every letter `n`.** Creating a dataset through the API stored the default
+delimiter double-escaped, `unicode_escape` turned it into backslash + a literal `n`, and the text
+parser split on each character of that set — consuming every `n` in every document. Chunks read
+`i creasi gly i volves i formatio `. Parsing reported success, chunk counts looked healthy, no log
+line anywhere. The documents still embedded, still matched queries, and would still have been cited.
+
+The shape is the same and it is worth naming, because this project's entire premise is that a
+confident wrong answer is worse than no answer:
+
+- **An exception is a gift.** Both of these had a version that threw and a version that did not; the
+  throwing one was found in minutes, the silent one survived a full ingest.
+- **Counters cannot see content.** `done/total`, `chunk_num`, "100%" were all correct and all
+  useless. The corruption was three levels below what the status tooling looks at.
+- **Non-Latin text hid it.** The Cyrillic KB carried the same broken delimiter and looked perfect —
+  no letter `n` to lose. A corpus can be half-poisoned and show no symptom on the half you check.
+- **So sample the stored data, not the status.** Both were caught by reading actual rows out of the
+  document store — the first from a failed-task log, the second from six random chunks. That is now
+  a routine check rather than an investigation: `ingest-status.py` prints the live engine, its size
+  and its row count on every run, because the same day also produced a silent engine SWAP (an unset
+  `DOC_ENGINE` in the invoking shell moved the whole corpus to Elasticsearch, and every counter
+  still said done).
+
 ## 9. Lessons (transferable beyond this box)
 
 ### 9.0 The two axioms

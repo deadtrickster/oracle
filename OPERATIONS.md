@@ -163,6 +163,21 @@ then re-queue the docs. This is why early ingests took hours.
 - man pages, GNU manuals, kernel docs, PDFs all browsable.
 - Restart: `systemctl --user restart oracle-docs`.
 
+## Where the data lives (moved 2026-07-29)
+
+Both document stores are on `/mnt/data` (7.3T) rather than `/` (689G free):
+
+| | |
+|---|---|
+| SereneDB | `/mnt/data/oracle/serenedb` — `oracle-serenedb.service`, network alias `serenedb:7890` |
+| Elasticsearch | `/mnt/data/oracle/es` — same volume NAME (`docker_esdata01`), re-pointed at a bind |
+
+**`DOC_ENGINE` is now defaulted to `serenedb` in `ragflow/docker/.env`.** It used to read
+`${DOC_ENGINE:-elasticsearch}` — i.e. from the invoking SHELL — so `docker compose up -d` in a
+terminal that had not exported it silently moved the whole system onto Elasticsearch. Nothing
+errored; ingest-status reported documents done while the chunks went elsewhere. `ingest-status.py`
+now prints the live engine, its on-disk size and row count on every run, for exactly this reason.
+
 ## Knowledge bases (all chunk method General/"naive", all bge-m3@Ollama)
 | KB | contents | source dir |
 |---|---|---|
@@ -175,6 +190,7 @@ then re-queue the docs. This is why early ingests took hours.
 | oracle-meta | THIS file, PLAN.md, the operation scripts | corpus/meta |
 | go | official Go docs (effective_go, spec, doc/), Go 101, Go by Example, Little Go Book, astaxie web book | corpus/go |
 | papers / books / links | user's PDFs, books, bookmarked pages | corpus/{papers,books,links} |
+| arxiv | arXiv papers from the /mnt/data/arxiv mirror, pdftotext -> naive. Selection is mandatory: ~52 chunks/paper, so the systems slice alone would double the corpus. | corpus/arxiv |
 | tpc | TPC benchmark specifications — the 12 current ones plus TPC-B (pgbench is a TPC-B implementation, so it is the reference for a workload still run daily). Obsolete specs and TPC governance documents are deliberately excluded. | corpus/tpc_raw → ~/Documents/Books/TPC |
 
 ## How to ingest new material (tell the user this when asked)
@@ -232,6 +248,12 @@ then re-queue the docs. This is why early ingests took hours.
   `disallowed_special` (a document that merely mentions `<|endoftext|>` killed the task) and NUL →
   OCR fallback (a damaged text layer must be re-read, never stripped). Both are written up for
   upstreaming in `~/Projects/ragflow/stories/oracle-container-patches.md`.
+- `arxiv-select.py` — pick a slice of the /mnt/data/arxiv mirror by category (or `--all`) and
+  pdftotext it into corpus/arxiv/. `--list` to see the selection first.
+- `arxiv-tail.sh` — the same, in a loop, following the still-running download. Normally run as
+  `oracle-arxiv-ingest.service` (Nice=15, lowest priority on the box: it shares CPU with DeepDoc, a
+  GPU with vision, and a disk with the sync that feeds it, and nothing is waiting on it).
+- `move-data-to-mnt.sh` — relocate ES + SereneDB data to /mnt/data. Idempotent, `--dry-run`.
 - `ingest-status.py` — per-KB progress, chunk counts, and what failed. Use this rather than hand-
   rolled SQL against RAGFlow's MySQL.
 

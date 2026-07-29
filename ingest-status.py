@@ -64,7 +64,64 @@ def bar(frac, width=24):
     return "#" * filled + "." * (width - filled)
 
 
+def doc_engine():
+    """Which document store is ACTUALLY in use, and how big it is on disk.
+
+    Worth reporting for two reasons. RAGFlow's own failure text says "please check log file and
+    Elasticsearch/Infinity status!" on every insert error regardless of engine — stale boilerplate
+    that names two backends this system does not use, and sends whoever reads it to the wrong place.
+
+    And the engine can change without anyone choosing it: `.env` reads DOC_ENGINE from the invoking
+    shell, so a `docker compose up` in a terminal that never exported it silently moved the whole
+    corpus onto Elasticsearch. Nothing errored; this script cheerfully reported 50/50 done while the
+    chunks went somewhere else. The only way to notice was to open the database. So it is printed
+    here, every run, next to the numbers it qualifies.
+    """
+    import shutil
+    import subprocess
+
+    def sh(*cmd, timeout=8):
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout.strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    if not shutil.which("docker"):
+        return None
+    engine = sh("docker", "exec", "docker-ragflow-cpu-1", "printenv", "DOC_ENGINE") or "unknown"
+    out = {"engine": engine, "size": "", "rows": ""}
+
+    if engine == "serenedb":
+        path = sh("docker", "inspect", "oracle-serenedb", "--format",
+                  "{{range .Mounts}}{{.Source}}{{end}}")
+        out["size"] = sh("du", "-sh", path).split("\t")[0] if path else ""
+        out["where"] = path
+        n = sh("docker", "exec", "-e", "PGPASSWORD=oracle-sdb", "oracle-serenedb", "psql",
+               "-h", "127.0.0.1", "-p", "7890", "-U", "postgres", "-t", "-c",
+               "select count(*) from ragflow_a73b470e7d6111f1b22afb6d9f0455fb;")
+        out["rows"] = n.strip()
+    elif engine == "elasticsearch":
+        path = sh("docker", "inspect", "docker-es01-1", "--format",
+                  "{{range .Mounts}}{{.Source}}{{end}}")
+        out["where"] = path
+        out["size"] = sh("du", "-sh", path).split("\t")[0] if path else ""
+    return out
+
+
 def main():
+    eng = doc_engine()
+    if eng:
+        line = f"document store: {eng['engine']}"
+        if eng.get("rows"):
+            line += f"  ·  {int(eng['rows']):,} rows" if eng["rows"].isdigit() else ""
+        if eng.get("size"):
+            line += f"  ·  {eng['size']} on disk"
+        if eng.get("where"):
+            line += f"  ·  {eng['where']}"
+        print(line)
+        if eng["engine"] not in ("serenedb", "elasticsearch"):
+            print("  ⚠ could not determine the engine — is the ragflow container up?")
+
     try:
         ds = get("/api/v1/datasets?page_size=100")["data"]
     except Exception as e:  # noqa: BLE001
@@ -125,9 +182,28 @@ def main():
     if pending:
         print(f"not created yet (defined in ingest-corpus.py): {', '.join(pending)}")
     if failed:
-        print(f"\n⚠ {len(failed)} FAILED/CANCELLED:")
-        for name, dn, msg in failed[:20]:
-            print(f"  {name:12} {dn[:36]:36} {msg}")
+        # Cap the listing. arXiv alone is expected to produce tens of thousands of NUL-extraction
+        # failures at ~3.5% of ~1.1M papers; printing them all turns a status line into a wall and
+        # buries the one failure that is actually new. The COUNT is the signal; the examples are
+        # illustration. `-v` shows more.
+        cap = 20 if VERBOSE else 5
+        print(f"\n⚠ {len(failed)} FAILED/CANCELLED"
+              + (f" (showing {min(cap, len(failed))}; -v for more)" if len(failed) > cap else "")
+              + ":")
+        nul = 0
+        for name, dn, msg in failed[:cap]:
+            # RAGFlow appends "please check log file and Elasticsearch/Infinity status!" to every
+            # insert error, naming backends this system does not run. Drop it and say what the
+            # engine actually is (printed at the top), so nobody goes looking at an Infinity that
+            # was never here.
+            clean = msg.replace("please check log file and Elasticsearch/Infinity status!", "").strip()
+            if "NUL (0x00)" in clean:
+                nul += 1
+            print(f"  {name:12} {dn[:36]:36} {clean[-120:]}")
+        if nul:
+            print(f"\n  {nul} of these are NUL-byte extraction failures — a broken CID font map, so")
+            print("  the text layer is unusable and the paper needs OCR rather than a retry.")
+            print("  Ids are listed in corpus/arxiv-needs-ocr.txt.")
     if VERBOSE and active:
         print(f"\nActively parsing ({len(active)}), highest progress first:")
         for name, dn, pr, msg in sorted(active, key=lambda x: -x[2])[:15]:

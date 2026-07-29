@@ -61,7 +61,10 @@ def select(cats: list, limit: int, newest_first: bool = True) -> list:
         print(f"no catalogue at {STATE}", file=sys.stderr)
         return []
     db = sqlite3.connect(f"file:{STATE}?mode=ro", uri=True)
-    w, args = where_for(cats)
+    # No categories = the whole mirror. The mirror is already scoped (all categories, 2022-01 ->
+    # 2026-07, latest version only), so "everything downloaded" is a meaningful selection rather
+    # than an unbounded one.
+    w, args = where_for(cats) if cats else ("1=1", [])
     order = "p.update_date DESC" if newest_first else "p.update_date ASC"
     rows = db.execute(
         f"""SELECT o.name, o.paper_id, p.categories, p.update_date
@@ -98,14 +101,25 @@ def extract(name: str, paper_id: str, force: bool) -> str:
     # then failed at insert with "A string literal cannot contain NUL (0x00) characters" — after the
     # CPU had already been spent.
     #
-    # Reject rather than strip, for the same reason the PDF parser re-OCRs rather than strips
-    # (G4.4): what surrounds the NUL came from the same broken extraction, so stripping keeps the
-    # garbage and indexes it as if it were the paper. A dropped paper is a gap; a corrupt one is a
-    # confident wrong answer with a citation.
+    # Never STRIP it — that is the G4.4 policy: what surrounds a NUL came from the same broken
+    # extraction, so stripping keeps the garbage and indexes it as if it were the paper.
+    #
+    # But do not silently DROP it either. The first version deleted the file, and the paper simply
+    # ceased to exist: gone from ingest-status, recorded only in a side file nobody reads. A failure
+    # that vanishes is worse than a failure that sits there, because the second one is a work queue
+    # and the first one is amnesia. His call, and it is the right one — failures stay failed.
+    #
+    # So the file is KEPT and will be ingested and fail at insert, visibly, in RAGFlow's own
+    # document table. It is also noted here so the reason is recoverable without reading a log.
     if dst.exists():
         try:
             if b"\x00" in dst.read_bytes():
-                dst.unlink(missing_ok=True)
+                note = OUT.parent / "arxiv-needs-ocr.txt"
+                line = f"{paper_id}\t{name}\tpdftotext emitted NUL (broken CID font)\n"
+                prior = note.read_text() if note.exists() else ""
+                if paper_id not in prior:
+                    with open(note, "a") as fh:
+                        fh.write(line)
                 return "corrupt"
         except OSError:
             pass
@@ -121,19 +135,24 @@ def extract(name: str, paper_id: str, force: bool) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--category", action="append", default=[], required=True,
+    ap.add_argument("--category", action="append", default=[],
                     help="arXiv category, e.g. cs.DB. Repeatable.")
+    ap.add_argument("--all", action="store_true",
+                    help="every downloaded paper, no category filter (the mirror is all categories)")
     ap.add_argument("--max", type=int, default=500)
     ap.add_argument("--oldest", action="store_true", help="oldest first (default: newest)")
     ap.add_argument("--force", action="store_true", help="re-extract even if the .txt exists")
     ap.add_argument("--list", action="store_true", help="show the selection, extract nothing")
     a = ap.parse_args()
 
+    if not a.category and not a.all:
+        print("give --category, or --all for everything downloaded", file=sys.stderr)
+        return 2
     rows = select(a.category, a.max, newest_first=not a.oldest)
     if not rows:
         print("nothing selected — is the mirror still downloading this slice?", file=sys.stderr)
         return 1
-    print(f"{len(rows)} papers selected from {', '.join(a.category)}")
+    print(f"{len(rows)} papers selected from {', '.join(a.category) if a.category else 'ALL categories'}")
 
     if a.list:
         for name, pid, cats, upd in rows[:60]:
@@ -147,6 +166,13 @@ def main() -> int:
         return 1
 
     OUT.mkdir(parents=True, exist_ok=True)
+    # In a tailing loop the same head of the list is re-walked every cycle, and stat()ing thousands
+    # of already-extracted files each pass is most of the run time. Drop the ones already on disk
+    # before starting so `--max` bounds NEW work rather than total rows examined.
+    have = {f.stem for f in OUT.glob("*.txt")}
+    if not a.force:
+        rows = [r for r in rows if re.sub(r"[^A-Za-z0-9._-]", "_", r[1]) not in have]
+        print(f"{len(rows)} not yet extracted")
     tally = {"ok": 0, "skip": 0, "missing": 0, "empty": 0, "corrupt": 0, "error": 0}
     for i, (name, pid, _c, _u) in enumerate(rows, 1):
         tally[extract(name, pid, a.force)] += 1
@@ -155,7 +181,7 @@ def main() -> int:
 
     print()
     print(f"extracted {tally['ok']}, already had {tally['skip']}, "
-          f"no text layer {tally['empty']}, NUL/corrupt extraction {tally['corrupt']}, "
+          f"no text layer {tally['empty']}, NUL-corrupt but KEPT (will fail visibly) {tally['corrupt']}, "
           f"missing file {tally['missing']}, failed {tally['error']}")
     print(f"text in: {OUT}  ({len(list(OUT.glob('*.txt')))} files total)")
     print()
