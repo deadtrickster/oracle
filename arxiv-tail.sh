@@ -46,7 +46,8 @@ MAX_PENDING="${ARXIV_MAX_PENDING:-50}" # skip a cycle if the parser is this busy
 # So each cycle is: refill -> wait for the parser to finish -> do nothing for COOLDOWN -> refill.
 # Set ARXIV_COOLDOWN=0 to disable.
 COOLDOWN="${ARXIV_COOLDOWN:-60}"
-DRAIN_POLL="${ARXIV_DRAIN_POLL:-30}"
+DRAIN_POLL="${ARXIV_DRAIN_POLL:-10}"
+DRAIN_MAX="${ARXIV_DRAIN_MAX:-60}" # cap the drain wait; the pause is the point, not the waiting
 ONCE=0
 [ "${1:-}" = "--once" ] && ONCE=1
 
@@ -103,18 +104,19 @@ cycle() {
 	# Wait for the parser to actually finish before resting. Without this the "rest" is spent with
 	# thousands of documents still queued and every core busy — a pause that pauses nothing.
 	if [ "$COOLDOWN" -gt 0 ]; then
+		# Wait for the queue to drain, but CAP the wait (his call: "limit 1 minute wait for now").
+		# At 8 workers a 500-document batch takes minutes to parse, so waiting for a full drain
+		# would idle the feeder far longer than the thermal pause needs — and the pause is the
+		# point, not the waiting. Bounded here, so one cycle rests for about a minute whether or
+		# not the parser has caught up.
 		local waited=0 d
-		while true; do
+		while [ "$waited" -lt "$DRAIN_MAX" ]; do
 			d="$(pending_docs)"
 			[ "${d:-0}" -le 0 ] && break
-			[ "$waited" -ge 3600 ] && {
-				echo "$(stamp)  still $d queued after 1h — resting anyway"
-				break
-			}
 			sleep "$DRAIN_POLL"
 			waited=$((waited + DRAIN_POLL))
 		done
-		echo "$(stamp)  queue drained after ${waited}s — idling ${COOLDOWN}s to cool off"
+		echo "$(stamp)  queue check done after ${waited}s — idling ${COOLDOWN}s to cool off"
 		sleep "$COOLDOWN"
 	fi
 	echo "$(stamp)  cycle done"

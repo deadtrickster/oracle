@@ -52,44 +52,75 @@
 # `self.page_chars[pi] = []`, which makes the OCR path supply the text instead. So this patch adds
 # no new machinery — it teaches an existing, proven fallback to recognise one more symptom, and a
 # NUL is the least ambiguous symptom of the three.
+#
+# ── PATCH 3: WORKERS=1 is not a default, it is a bottleneck ──────────────────────────────────────
+#
+# RAGFlow ships one task executor. On this machine that left the CPU idle while a 10,000-document
+# queue crawled: 25 documents/minute with cores to spare. Raising it to 8 gave 95 docs/min — 3.8x,
+# not 8x, because the ceiling moved rather than vanished (GPU embedding went to ~70%, and SereneDB
+# to ~3 cores sustained with compaction bursts to 5.5).
+#
+# This one lives in the VENDORED docker/docker-compose.yml rather than inside the container, which
+# makes it MORE fragile, not less: a re-checkout of ragflow/ silently reverts it and throughput
+# quietly drops back to 25/min with nothing in any log to say why. That already happened once with
+# DOC_ENGINE. So it is checked here with the others.
 set -uo pipefail
 
 CONTAINER="${RAGFLOW_CONTAINER:-docker-ragflow-cpu-1}"
-TARGET="/ragflow/common/token_utils.py"
 PDF_PARSER="/ragflow/deepdoc/parser/pdf_parser.py"
+COMPOSE="${RAGFLOW_COMPOSE:-$HOME/Projects/oracle/ragflow/docker/docker-compose.yml}"
+WORKERS="${RAGFLOW_WORKERS:-8}"
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
 say() { printf '%s\n' "$*"; }
+
+# Patch 3 first: it is a host-file check, so it is worth reporting even when the stack is down —
+# which is exactly when someone is recreating containers and about to lose it.
+if grep -qE '^\s*-\s*--workers=' "$COMPOSE" 2>/dev/null; then
+	say "patch 3 (task executor --workers): present — $(grep -oE '\--workers=[0-9]+' "$COMPOSE" | head -1)"
+elif [ ! -f "$COMPOSE" ]; then
+	say "patch 3 (task executor --workers): compose file not found at $COMPOSE"
+else
+	say "patch 3 (task executor --workers): MISSING — throughput will be ~1/4 of measured"
+	say "  add '- --workers=$WORKERS' to the ragflow-cpu command block in:"
+	say "  $COMPOSE"
+fi
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
 	say "container $CONTAINER is not running — start the stack first"
 	exit 1
 fi
 
-# Count call sites that still lack the flag. Both encode() calls in this file must carry it: the
-# counting one so token counts are right, the truncating one so it stops throwing.
-unpatched="$(docker exec "$CONTAINER" bash -c \
-	"grep -c 'encoder\.encode(string)' '$TARGET' || true" 2>/dev/null | tr -d '\r')"
-unpatched="${unpatched:-0}"
+# Patch 1 is now a HOST file plus a bind mount, not an in-container sed.
+#
+# It used to be a sed inside the container, and that quietly failed: adding `--workers=8` to the
+# compose file recreated the container, the image's pristine token_utils.py came back, and parsing
+# ran unpatched for hours with nothing in any log saying so. Patch 2 sat in the same container and
+# survived — because pdf_parser.py is bind-mounted from the repo and token_utils.py was not. That
+# is the whole difference, so the fix is to mount this file too rather than to remember to re-run
+# a script after every recreate.
+#
+# Both encode() calls must carry the flag: the counting one so token counts are right, the
+# truncating one so it stops throwing.
+HOST_TOKENS="$(dirname "$COMPOSE")/../common/token_utils.py"
+sites="$(grep -c 'disallowed_special=()' "$HOST_TOKENS" 2>/dev/null || true)"
+mounted=0
+grep -q 'common/token_utils.py:/ragflow/common/token_utils.py' "$COMPOSE" 2>/dev/null && mounted=1
 
-if [ "$unpatched" -eq 0 ]; then
-	say "patch 1 (tiktoken disallowed_special): already applied"
-	[ "$CHECK_ONLY" -eq 1 ] && exit 0
+if [ "${sites:-0}" -ge 2 ] && [ "$mounted" -eq 1 ]; then
+	say "patch 1 (tiktoken disallowed_special): applied on the host and mounted"
 else
-	say "patch 1 (tiktoken disallowed_special): $unpatched call site(s) to fix"
-	if [ "$CHECK_ONLY" -eq 1 ]; then exit 0; fi
-	# Back up once — the first run captures the pristine file, later runs must not overwrite that
-	# backup with an already-patched copy.
-	docker exec "$CONTAINER" bash -c \
-		"[ -f '$TARGET.orig' ] || cp '$TARGET' '$TARGET.orig'"
-	docker exec "$CONTAINER" bash -c \
-		"sed -i 's/encoder\.encode(string)/encoder.encode(string, disallowed_special=())/g' '$TARGET'"
+	say "patch 1 (tiktoken disallowed_special): NOT durable"
+	[ "${sites:-0}" -ge 2 ] || say "  $HOST_TOKENS has ${sites:-0}/2 patched call sites"
+	[ "$mounted" -eq 1 ] || say "  $COMPOSE does not mount common/token_utils.py — it will revert on recreate"
 fi
+[ "$CHECK_ONLY" -eq 1 ] && exit 0
 
-# Verify by RUNNING it, not by re-grepping what we just wrote. A sed that matched nothing and a sed
-# that worked look identical to grep; only the interpreter knows whether the file still parses and
-# whether the string that caused the outage now encodes.
+# Verify by RUNNING it, not by re-grepping the file. A grep confirms a string is present; only the
+# interpreter confirms the module still parses, that the mount actually reached the container, and
+# that the string which caused the outage now encodes. That distinction is the point here: the grep
+# above passed for weeks while the running process had the unpatched code loaded.
 say "verifying inside the container…"
 if docker exec "$CONTAINER" /ragflow/.venv/bin/python -c "
 import sys
@@ -104,8 +135,12 @@ print(f'  ok: counted {n} tokens and truncated to {t!r}')
 " 2>&1; then
 	say "patch 1 verified"
 else
-	say "PATCH 1 FAILED VERIFICATION — restoring the original"
-	docker exec "$CONTAINER" bash -c "[ -f '$TARGET.orig' ] && cp '$TARGET.orig' '$TARGET'"
+	# Deliberately no rollback. The file is now a bind mount of a version-controlled repo file, so
+	# "restoring the original" would write through to the host and destroy the fix rather than undo
+	# a bad edit. `git checkout` is the correct undo, and it belongs to a human.
+	say "PATCH 1 FAILED VERIFICATION"
+	say "  the running container does not have the fix loaded — check the mount, then restart:"
+	say "  docker restart $CONTAINER   (a running process keeps the module it imported at start)"
 	exit 1
 fi
 

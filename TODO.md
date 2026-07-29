@@ -957,10 +957,25 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       Start around 6-8 and watch: heat, GPU contention with chat/vision, and whether SereneDB write
       latency degrades with concurrent writers.
 
-      **It also invalidates a measurement.** Everything learned about SereneDB's write path in this
-      run was under a SINGLE writer. Insert throughput, index maintenance behaviour, compaction —
-      none of it says anything about concurrent writers, which is exactly what the second-instance
-      experiment below should vary deliberately.
+      **DONE 2026-07-29: `--workers=8` in the vendored docker-compose.yml.** Measured immediately:
+
+          25 docs/min  ->  95 docs/min   (3.8x, not 8x)
+
+      Sub-linear, so the ceiling moved rather than vanished. Where it went:
+
+          GPU              68-72% utilisation   <- bge-m3 embedding, now genuinely busy
+          oracle-serenedb  ~300% sustained, spiking to 506-548% periodically
+          ragflow-cpu      19-241%, spiky
+
+      **The SereneDB spikes are index maintenance** (his observation). Its own log names the
+      mechanism — `maintenance: per-index refresh/compaction loops` — so the combined inverted+IVF
+      index costs roughly 2 extra cores periodically on top of ~3 for the writes. That is real
+      operational data about the write path and exactly what this stress run was for: a document
+      store whose steady state is 3 cores and whose compaction bursts to 5.5 needs headroom
+      budgeted for the bursts, not the average.
+
+      NOTE the compose file is VENDORED — this edit is lost on a RAGFlow re-checkout, like the
+      `DOC_ENGINE` default was. Record it in `patch-ragflow.sh`.
 
       **Thermal note:** the duty cycle (500 docs, then 60s idle) was added because the laptop ran
       hot, but the box is 80% idle at 1 worker — the heat came from the earlier 5,000-document
