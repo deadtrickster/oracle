@@ -23,6 +23,22 @@ BASE = os.environ.get("ORACLE_RAGFLOW_URL", "http://localhost:9380")
 KEY = os.environ.get("ORACLE_RAGFLOW_KEY",
                      "ragflow-smywlJs3drgGxfKztifTmD3iNJ2lP6Uvq2-suiLQTGM")
 HDR = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
+
+# Asking for help must not be an action. Without this, any argument that is not exactly "--dry-run"
+# — including `--help` — falls through to the default and re-queues every RUNNING document. Caught
+# the obvious way: by typing `--help` and watching it re-queue 45 documents.
+if {"-h", "--help"} & set(sys.argv[1:]):
+    print(__doc__)
+    sys.exit(0)
+
+# And an unrecognised flag must not silently mean "go" either. A typo'd `--dry-runn` looked exactly
+# like a real run, which is the same bug wearing a different hat.
+_unknown = [a for a in sys.argv[1:] if a != "--dry-run"]
+if _unknown:
+    print(f"unknown argument(s): {' '.join(_unknown)}\n", file=sys.stderr)
+    print(__doc__, file=sys.stderr)
+    sys.exit(2)
+
 DRY = "--dry-run" in sys.argv
 
 
