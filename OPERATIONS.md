@@ -178,6 +178,24 @@ terminal that had not exported it silently moved the whole system onto Elasticse
 errored; ingest-status reported documents done while the chunks went elsewhere. `ingest-status.py`
 now prints the live engine, its on-disk size and row count on every run, for exactly this reason.
 
+## Changing a parser_config (learned the hard way, 2026-07-29)
+
+`parser_config` is copied forward **three times** and the parser reads the LAST copy:
+
+    knowledgebase.parser_config  --upload-->  document.parser_config  --queue-->  task payload
+
+So updating the knowledge base fixes nothing for documents that already exist. A full repair is:
+
+1. update `knowledgebase.parser_config` (new uploads),
+2. update `document.parser_config` for every affected document (re-parses),
+3. **cancel** in-flight tasks — they hold a snapshot and cannot be corrected in place:
+   `POST /api/v1/datasets/{id}/documents/stop` with `{"document_ids":[...]}`,
+4. re-parse. Re-queueing deletes each document's prior chunks, so old rows are replaced, not
+   accumulated.
+
+In MySQL, `JSON_SET(cfg,'$.x', CHAR(10))` stores a BINARY value (`base64:type15:Cg==`). Use
+`CONVERT(0x0A USING utf8mb4)`. Verify by decoding as the parser does, not by reading `JSON_EXTRACT`.
+
 ## Knowledge bases (all chunk method General/"naive", all bge-m3@Ollama)
 | KB | contents | source dir |
 |---|---|---|

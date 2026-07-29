@@ -110,16 +110,15 @@ def extract(name: str, paper_id: str, force: bool) -> str:
     # and the first one is amnesia. His call, and it is the right one — failures stay failed.
     #
     # So the file is KEPT and will be ingested and fail at insert, visibly, in RAGFlow's own
-    # document table. It is also noted here so the reason is recoverable without reading a log.
+    # document table.
+    #
+    # The needs-OCR list is NOT written here. It is derived — `./arxiv-scan-nul.py` rebuilds it by
+    # scanning the extracted text. An append-only log written during extraction can only drift from
+    # what is actually on disk (files get re-extracted, deleted, batches redone), and then nobody
+    # trusts it. Scanning is cheap and always true.
     if dst.exists():
         try:
             if b"\x00" in dst.read_bytes():
-                note = OUT.parent / "arxiv-needs-ocr.txt"
-                line = f"{paper_id}\t{name}\tpdftotext emitted NUL (broken CID font)\n"
-                prior = note.read_text() if note.exists() else ""
-                if paper_id not in prior:
-                    with open(note, "a") as fh:
-                        fh.write(line)
                 return "corrupt"
         except OSError:
             pass

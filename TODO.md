@@ -868,9 +868,30 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       the txt parser splits on each character of that set and consumes it. Parsing reported success
       throughout. Eight KBs were affected (arxiv, bio, books, collection, keep-books, ml, papers,
       tpc) — invisible on the PDF-parsed ones and on the Cyrillic one, which has no Latin `n` to
-      lose. Fixed by setting `delimiter` explicitly in ingest-corpus.py + repairing the KBs in
-      place. Upstream bug, reproduced on `main`, written up in
+      lose. Fixed by setting `delimiter` explicitly in ingest-corpus.py + repairing every KB AND
+      DOCUMENT row. Upstream bug, reproduced on `main`, written up in
       `~/Projects/ragflow/stories/delimiter-eats-the-letter-n.md`.
+
+      **`parser_config` is copied forward THREE times** — knowledgebase → document (at upload) →
+      task (at queue time). The parser reads the last copy. Fixing the KB row alone changed nothing
+      and the re-parse produced byte-identical garbage; 16,477 document rows needed correcting too.
+      Remember this for any parser_config change, not only this bug.
+
+      Two MySQL traps while repairing: `JSON_SET(..., CHAR(10))` stores a BINARY value that reads
+      back as `base64:type15:Cg==` — worse than the original; use `CONVERT(0x0A USING utf8mb4)`.
+      And storing the literal 2-char `\n` means fighting backslash escaping through MySQL + JSON +
+      whatever reads it back, where every layer adds or removes one. A real newline sidesteps the
+      argument: it is not an escape sequence, so `unicode_escape` passes it through unchanged.
+      Verify by decoding exactly as the parser does, never by reading `JSON_EXTRACT` output (it
+      re-escapes and misleads).
+
+      **There IS a cancel API** (his correction, and he was right):
+      `POST /api/v1/datasets/{id}/documents/stop` with `{"document_ids": [...]}`. A queued task
+      holds a config snapshot and cannot be corrected in place, so cancelling the 515 in-flight
+      tasks beat waiting an hour for them to finish writing chunks already known to be wrong.
+      Re-queueing then deletes each document's prior chunks (`filter_delete` +
+      `docStoreConn.delete(pre_chunk_ids)`) — verified: arXiv's chunk count in SereneDB dropped to
+      0 before rebuilding, so corrupt rows are replaced rather than accumulated.
 - [x] **NUL from pdftotext**, 3.5% of papers (51 of 1,446; median 724 NULs per affected file, none
       under 10 — systematically broken CID font maps, not stray glyphs). Extrapolates to ~38k over
       the mirror. Per G4.4 policy these are KEPT and allowed to fail visibly rather than dropped:
