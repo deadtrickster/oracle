@@ -897,6 +897,28 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       the mirror. Per G4.4 policy these are KEPT and allowed to fail visibly rather than dropped:
       a failure that vanishes is not a decision, it is amnesia. Ids accumulate in
       `corpus/arxiv-needs-ocr.txt` for a deliberate OCR pass.
+- [x] **arXiv is excluded from retrieval by default** (`KB_EXCLUDE` in the receiver;
+      `search_corpus(research=true)` opts it back in per call, and the step line says so). The
+      `oracle` assistant now attaches 22 KBs — everything except arxiv; it had been missing 12
+      others. Measured with `compare-retrieval.py`, which exists for exactly this question:
+      - *"how does WAL flushing work in postgres"* — arXiv **0/6** of the top slots, nothing
+        displaced. The postgres READMEs and Database Internals hold.
+      - *"GPU approximate nearest neighbour search with quantization"* — arXiv **6/6**, displacing
+        the entire FAISS documentation. Without the default exclusion that happens on every query.
+      The arithmetic predicted dilution; this measured it.
+
+- [ ] **arXiv bibliography → folded into G3.8** (see that item). A DOI-density rule writing
+      `pagerank_fea` was drafted and dropped: surface-form detection is the mistake §4.3 exists to
+      replace, and it bypasses the designed output contract, which puts demotion in the ask_corpus
+      rerank layer as per-class weights — reversible, config not code, invertible for navigational
+      queries.
+
+- [ ] **G3.8 sequencing needs revisiting now the arXiv tailer runs continuously.** The plan says
+      "train/score only after the collection ingest drains (CPU contention)". With
+      `oracle-arxiv-ingest.service` following a mirror heading for ~1.1M papers, that gate may never
+      open on its own. Either pause the tailer for the training window or accept the contention
+      deliberately — it is `Nice=15`, so it should yield.
+
 - [ ] Run DeepDoc OCR over the `arxiv-needs-ocr.txt` queue.
 - [ ] Decide how wide to go. cs.DB alone is ~72k chunks; the systems slice is ~430k, which would
       double the corpus. Measure retrieval before widening.
@@ -978,6 +1000,21 @@ redirecting doesn't just cost time; it produces a confident wrong answer.
       keep), then a loop that DELETEs the old chunk and ADDs the cleaned text as a NEW chunk so it
       re-embeds (PATCH updates text but not the vector → stale garbage embedding). See DESIGN §4.3.
 - [ ] **G3.8** — **train the CPU junk classifier** (he approved; *training time is not a constraint*).
+      **arXiv BIBLIOGRAPHY is now a first-class case for this (2026-07-29, his call).** Measured on
+      the live shelf: of 138,355 arXiv chunks, **4,278 carry ≥3 DOIs (3.1%) and 1,448 carry ≥6
+      (1.0%)** — the dense ones are pure reference lists. They are not theoretical: on
+      *"GPU approximate nearest neighbour search with quantization"*, **two of the top six hits were
+      bibliography** ("H. Larochelle, M. Ranzato… Eds. [37", "CIKM '24. ACM, 4906–4913. doi:…"),
+      ranking above chunks that explain the method.
+      Why it belongs here rather than in a rule of its own: a citation IS sometimes the answer
+      ("who wrote the RaBitQ paper"), so deletion is wrong and DEMOTE-BY-DEFAULT is exactly right —
+      and a DOI-density threshold is a surface-form rule, the mistake this item exists to replace.
+      It also changes the class balance: the labelled set has BIBLIOGRAPHY 374 from books, while
+      arXiv supplies thousands, in a different dialect (numbered `[37]` lists, DOI runs, conference
+      abbreviations) than a book's back matter. Worth sampling arXiv into the training set before
+      training, or the classifier learns book bibliographies and meets paper ones.
+      **Eval addition:** "who wrote X" must still find the citation, while "how does X work" must
+      not. That pair is the whole demote-vs-delete argument in one test.
       The deterministic detector proved SAFE (token-diff: removes only stray glyphs, never words) but
       flags 9–15% of chunks and can't tell a garbage `●` from a chart-legend `●` — precision ceiling.
       Demote it to candidate generator; verdict comes from a classifier on the CPU tier. Features:
