@@ -919,6 +919,55 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       open on its own. Either pause the tailer for the training window or accept the contention
       deliberately — it is `Nice=15`, so it should yield.
 
+- [ ] **RAGFlow runs ONE task executor on a 24-core box — raise `--workers`.** (2026-07-29)
+      Measured while the arXiv firehose was "running hot":
+
+          %Cpu(s): 13.2 us, 2.3 sy, 80.5 id      load 6.76 of 24 cores
+          docker-ragflow-cpu-1   37.24%          <- a THIRD of one core
+          oracle-serenedb       198.10%          <- 2 cores, doing 5x more than its feeder
+
+      `entrypoint.sh` line 45 is `WORKERS=1`, and nothing overrides it. Ingest throughput is
+      therefore ~25 docs/min, which is exactly what one worker at ~5s/task predicts. The other 23
+      cores are idle.
+
+      **Why it was invisible until now** (his question: "last night all cores were busy"):
+
+      | | DeepDoc (`book`/`paper`) | naive (`.txt`) |
+      |---|---|---|
+      | work in one task | OCR + layout + table-structure recognition | split, embed on GPU, insert |
+      | CPU per task | **all 24 cores** — ONNX/OpenCV thread internally | ~0.4 core |
+      | task duration | ~400s | ~5s |
+      | workers | 1 | 1 |
+
+      One worker was CORRECT while a single task saturated the machine by itself; adding workers
+      then would only have thrashed. Switching arXiv to the text layer made each task ~80x faster
+      AND single-threaded, so the same setting now buys one twenty-fourth of the box. The
+      concurrency was never removed — the thing that was silently providing it was.
+
+      bge-m3 is on the GPU and fine (0.66 GB VRAM); it is simply handed one document's ~40 chunks at
+      a time and then waits on indexing and bookkeeping.
+
+      **The general lesson:** a resource setting is only valid against the workload it was chosen
+      for. Nothing warned when the workload changed underneath it, because both configurations are
+      "correct" — just for different work.
+
+      **The change:** `--workers=N` on the container command. `WORKERS` is NOT wired through compose
+      env, so this means editing the vendored `docker-compose.yml` — the same class of edit that
+      `DOC_ENGINE` bit us with, so record it in `patch-ragflow.sh` or it vanishes on re-checkout.
+      Start around 6-8 and watch: heat, GPU contention with chat/vision, and whether SereneDB write
+      latency degrades with concurrent writers.
+
+      **It also invalidates a measurement.** Everything learned about SereneDB's write path in this
+      run was under a SINGLE writer. Insert throughput, index maintenance behaviour, compaction —
+      none of it says anything about concurrent writers, which is exactly what the second-instance
+      experiment below should vary deliberately.
+
+      **Thermal note:** the duty cycle (500 docs, then 60s idle) was added because the laptop ran
+      hot, but the box is 80% idle at 1 worker — the heat came from the earlier 5,000-document
+      bursts, not from steady state. Raising workers and keeping the duty cycle is probably the
+      right combination; raising workers *and* removing the pause is the thing to do only with the
+      cooling stand in place.
+
 - [ ] **[serene] Does arXiv form one tight kernel in the IVF index?** (his concern, 2026-07-29 —
       and the sharpest question asked about this stress test.)
       The index is real and combined: `CREATE INDEX ... USING inverted (id, {fts},
