@@ -159,7 +159,14 @@ def main():
                                (doc.get("progress_msg", "") or "").replace("\n", " ")[-90:]))
         done = states.get("DONE", 0)
         n = len(docs)
-        ch = d.get("chunk_count", 0)
+        # Sum the PER-DOCUMENT counts, not the dataset's `chunk_count`.
+        #
+        # `knowledgebase.chunk_num` is an accumulator that never decrements when chunks are deleted.
+        # After a mass re-parse it read 196,782 for a KB that actually held 3,805 rows — a 50x
+        # overstatement, and the number this tool had been printing all along. Per-document counts
+        # are reset by the parser, so they track reality; the document store's own row count (in the
+        # header) is the final arbiter, and the two should agree.
+        ch = sum(doc.get("chunk_count", doc.get("chunk_num", 0)) or 0 for doc in docs)
         tot_docs += n
         tot_done += done
         tot_chunks += ch
