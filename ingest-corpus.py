@@ -133,6 +133,20 @@ KBS = [
     # reference for a workload still being run daily. The other retired specs are deliberately not
     # here — see fetch-tpc-specs.sh.
     ("tpc", "book", ["tpc_raw/*.pdf", "tpc_raw/*.PDF"]),
+    # arXiv (the /mnt/data/arxiv mirror, 2026-07-29). Its own KB rather than a corner of `papers`:
+    # `papers` is a hand-picked shelf where every entry was chosen; arXiv is a firehose, and mixing
+    # them would let volume here drown deliberate selection there in every retrieval.
+    #
+    # `naive` over pdftotext OUTPUT, not `paper` over the PDFs, and the reason is arithmetic.
+    # DeepDoc costs ~415s per 13-page range on this box (measured: table analysis ~47s, OCR ~31s,
+    # plus inference between), so a 15-page paper is 7-14 minutes. The 8,273 systems-category papers
+    # already on disk would be six to eleven WEEKS of continuous CPU, and the mirror is heading for
+    # ~1.1M papers. Via pdftotext it is seconds each — hours, not weeks.
+    #
+    # Nothing is lost by it: arXiv PDFs are born-digital with real text layers, so OCR and table
+    # structure recognition are solving a problem these files do not have. This is the same reason
+    # the Russian PG books go through pdftotext above.
+    ("arxiv", "naive", ["arxiv/*.txt"]),
     # ML shelf, English born-digital half (~/Documents/Books/ml, symlinked into corpus/ml_raw with
     # clean names). Real text layers -> DeepDoc book parser (positions + figures).
     ("ml-books", "book", ["ml_raw/*.pdf"]),
