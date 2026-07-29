@@ -157,6 +157,23 @@ def boilerplate_lines(chunks) -> set[str]:
     return {ln for ln, n in seen.items() if n >= threshold}
 
 
+# NOT ADDED (2026-07-29): a rule for letter-spaced extraction — `P ro d u c tio n R e a d y`, where
+# a PDF positions every glyph individually and pdftotext cannot find the word breaks.
+#
+# It looks like obvious garbage and I nearly shipped a threshold on single-letter-token ratio. Two
+# reasons not to, and the second is this file's own lesson:
+#
+#   1. Volume. Across 5,373 arXiv chunks the ratio has a 0.022 median and only THREE chunks exceed
+#      0.35 — 0.06%, and all three are chart axis labels rather than prose.
+#   2. It is a SURFACE-FORM rule, which is the mistake this file was written to stop making ("`?` is
+#      not a question; it is a jsonb operator"). The 4th-highest chunk at 0.318 is real mathematics
+#      in Unicode symbols. A threshold low enough to catch the plots deletes the maths.
+#
+# If it ever becomes worth handling, it belongs in the CASCADE like everything else here: a cheap
+# recall-oriented rule proposing candidates, with the judge deciding whether the chunk carries
+# meaning. Not a threshold that deletes on its own.
+
+
 def is_all_exercise_by_rule(content: str) -> bool:
     blocks = [b for b in re.split(r"\n\s*\n", content) if b.strip()]
     if not blocks:
