@@ -36,6 +36,17 @@ ORACLE="${ORACLE_DIR:-$HOME/Projects/oracle}"
 BATCH="${ARXIV_BATCH:-2000}"
 INTERVAL="${ARXIV_INTERVAL:-900}"      # seconds between cycles
 MAX_PENDING="${ARXIV_MAX_PENDING:-50}" # skip a cycle if the parser is this busy already
+
+# THERMAL IDLE. The machine is a laptop and this workload pins every core for hours; it runs hot.
+#
+# A gap between refills is not by itself a rest: the heat comes from RAGFlow parsing the queue, not
+# from the tailer, so refilling on a timer while thousands of documents are still queued means the
+# CPU never actually stops. The rest has to come AFTER the queue drains.
+#
+# So each cycle is: refill -> wait for the parser to finish -> do nothing for COOLDOWN -> refill.
+# Set ARXIV_COOLDOWN=0 to disable.
+COOLDOWN="${ARXIV_COOLDOWN:-60}"
+DRAIN_POLL="${ARXIV_DRAIN_POLL:-30}"
 ONCE=0
 [ "${1:-}" = "--once" ] && ONCE=1
 
@@ -49,6 +60,16 @@ key() {
 }
 
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
+
+# Documents RAGFlow has not finished with: UNSTART(0) or RUNNING(1), across every dataset — a task
+# from another knowledge base heats the same CPU.
+pending_docs() {
+	local n
+	n="$(docker exec docker-mysql-1 mysql -uroot -pinfini_rag_flow -N \
+		-e "select count(*) from rag_flow.document where run in ('0','1');" 2>/dev/null |
+		tr -d '[:space:]')"
+	printf '%s' "${n:-0}"
+}
 
 cycle() {
 	local k
@@ -67,10 +88,7 @@ cycle() {
 	# first version compared against BATCH itself, which would have added 2,000 documents on top of
 	# a 1,288-document re-parse that was mid-verification.
 	local pending
-	pending="$(docker exec docker-mysql-1 mysql -uroot -pinfini_rag_flow -N \
-		-e "select count(*) from rag_flow.document where run in ('0','1');" 2>/dev/null |
-		tr -d '[:space:]')"
-	pending="${pending:-0}"
+	pending="$(pending_docs)"
 	if [ "$pending" -gt "$MAX_PENDING" ]; then
 		echo "$(stamp)  $pending documents still queued/parsing (limit $MAX_PENDING) — skipping"
 		return 0
@@ -81,6 +99,24 @@ cycle() {
 
 	echo "$(stamp)  ingesting"
 	python3 ingest-corpus.py --api-key "$k" --only arxiv 2>&1 | tail -2
+
+	# Wait for the parser to actually finish before resting. Without this the "rest" is spent with
+	# thousands of documents still queued and every core busy — a pause that pauses nothing.
+	if [ "$COOLDOWN" -gt 0 ]; then
+		local waited=0 d
+		while true; do
+			d="$(pending_docs)"
+			[ "${d:-0}" -le 0 ] && break
+			[ "$waited" -ge 3600 ] && {
+				echo "$(stamp)  still $d queued after 1h — resting anyway"
+				break
+			}
+			sleep "$DRAIN_POLL"
+			waited=$((waited + DRAIN_POLL))
+		done
+		echo "$(stamp)  queue drained after ${waited}s — idling ${COOLDOWN}s to cool off"
+		sleep "$COOLDOWN"
+	fi
 	echo "$(stamp)  cycle done"
 }
 
