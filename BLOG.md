@@ -1370,6 +1370,71 @@ legitimate but wrong for this question, and **demote a chunk** when it is real b
 answer. Deleting is for material that is actively poisonous, and that is a much smaller category
 than it feels like at 2am.
 
+## Act 30 — The fix that deleted itself, and the pause that rested nothing
+
+Two failures in one night, and both of them had the same shape: something I had verified was true,
+and had stopped being true without any event that looked like a change.
+
+**The fix that deleted itself.** RAGFlow is pinned, so our fixes are local patches applied inside the
+container. One of them stops tiktoken refusing to encode text that quotes `<|endoftext|>` — which
+sounds exotic until you remember the corpus contains books *about* language models, so the string is
+the subject matter.
+
+I bumped the task executor from 1 worker to 8. Throughput went 25 → 95 docs/min. Then, out of
+tidiness rather than suspicion, I ran the patch script's `--check`, and it said the tiktoken patch was
+missing. Adding one line to a compose file makes `docker compose up` **recreate** the container rather
+than restart it, and an in-container edit does not survive recreation. The image's pristine file came
+back and parsing ran unpatched for hours. Nothing logged it. Nothing could: from the outside, "the
+patch is applied" and "the patch was reverted eight hours ago" produce identical silence.
+
+What made it diagnosable was the control case sitting right next to it. A second patch — a NUL byte
+in a PDF's text layer must trigger OCR rather than kill the document — was in the *same container*,
+applied the *same way*, and had survived. The only difference: that file is bind-mounted from the
+repo, and `token_utils.py` was not. So the fix isn't vigilance, it's a mount. Mounted files survive
+recreation and live in version control; in-container edits are a bet that nobody will ever run
+`docker compose up` again.
+
+Then the same night, the same shape a second time. I checked what those unpatched hours had cost, by
+grouping failed documents by their error text. One tiktoken failure — visible, retryable, no harm
+done. And 38 of `A string literal cannot contain NUL (0x00) characters` — the exact failure the *other*
+patch prevents, the one I had just confirmed was applied and working.
+
+It was applied. It does work. It cannot fire for these documents. The patch lives in the PDF parser,
+and arXiv is not ingested as PDF: a host-side pdftotext writes `.txt` and we upload that, so the NUL
+arrives as ordinary text and dies at insert without the PDF parser ever being on the path. I had
+verified the mechanism — the probe encodes, the predicate matches, the module parses — and never asked
+the one question verification doesn't cover: *does this code run for this input?*
+
+**The pause that rested nothing.** Meanwhile the machine is a laptop doing a deliberate firehose
+ingest, so there is a pause between batches to let it cool. My user's instinct was that a minute
+wasn't enough, so I measured the tail instead of arguing about the number:
+
+    140s   67 pending   serene 378%   ragflow 141%    draining
+    150s   45 pending   serene  98%   ragflow   3%    RAGFlow idle
+    200s   45 pending   serene 100%   ragflow   1%    still 100%
+    210s   45 pending   serene   0%   ragflow   1%    finally quiet
+
+The parser goes idle and the *database* keeps working for another minute — per-index refresh and
+compaction, peaking at 876% (8.7 cores) during the drain. So a 60-second pause spent its entire
+window on compaction. It rested the feeder, which was already doing nothing, and never once rested
+the machine.
+
+His fix was better than a bigger number: don't start a batch until the CPU is below 75 °C. Time and
+CPU% were only ever proxies; temperature is the thing actually being protected. And he sharpened it
+again unprompted — *below 75 for at least a minute*, because this workload's signature is periodic
+bursts, so a single reading taken between two spikes reads cold and would launch a batch straight
+into the next one.
+
+Three details in that gate are the whole lesson. It resolves the sensor by *name*, because
+`/sys/class/hwmon` numbering is assigned in probe order and moves across reboots — a thermal gate
+reading the NVMe would still look like it works. An unreadable sensor *disables* the gate rather than
+being read as cold. And if the machine never cools, the cycle is *skipped* rather than started hot, so
+a hot afternoon throttles ingestion instead of either cooking the box or wedging the unit.
+
+The common thread across all three: every one of these was verified at some point, and verification
+of the mechanism is not verification of the effect. The patch was present and unreachable. The pause
+was running and resting nothing. The gate would have been reading a sensor — just not that one.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
@@ -1530,3 +1595,16 @@ things actually happened — most beats are a thing I set out to do, the wall I 
 - "A 'the chat feels stuck' complaint whose cause is a background job in a different subsystem, with both components behaving exactly as designed."
 - "The highest-scoring document in the corpus was a readable algebra paper — because mathematics is full of single-letter variables. Any threshold that catches the broken figures deletes the maths."
 - "I had a lever, so everything looked like something to delete. Deleting is for material that is actively poisonous, and that is a much smaller category than it feels like at 2am."
+- "From the outside, 'the patch is applied' and 'the patch was reverted eight hours ago' produce identical silence."
+- "Adding one line to a compose file recreated the container, and a fix I'd verified quietly stopped existing. Nothing logged it. Nothing could."
+- "The control case was sitting right next to it: same container, same patch, same night — and it survived, because that one was a mount."
+- "The fix isn't vigilance, it's a mount. An in-container edit is a bet that nobody will ever run `docker compose up` again."
+- "It was applied. It does work. It cannot fire for these documents."
+- "I verified the mechanism and never asked whether the mechanism runs for this input. A patch is only as good as its reachability."
+- "The parser went idle and the database kept working for another minute. The pause rested the feeder, which was already doing nothing."
+- "Time and CPU% were only ever proxies. Temperature is the thing actually being protected."
+- "Below 75 — for at least a minute. A single reading taken between two spikes reads cold, and would launch a batch straight into the next one."
+- "A thermal gate reading the NVMe instead of the CPU is worse than no gate, because it still looks like it works."
+- "An unreadable sensor disables the gate. 'I can't tell' must never resolve to 'cold'."
+- "If it never cools, skip the batch — don't start hot, and don't wedge. A hot afternoon should throttle ingestion, not end it."
+- "Verification of the mechanism is not verification of the effect. The patch was present and unreachable; the pause was running and resting nothing."

@@ -897,6 +897,26 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       the mirror. Per G4.4 policy these are KEPT and allowed to fail visibly rather than dropped:
       a failure that vanishes is not a decision, it is amnesia. Ids accumulate in
       `corpus/arxiv-needs-ocr.txt` for a deliberate OCR pass.
+- [ ] **The NUL→OCR patch cannot fire for arXiv, and it looked like it could.** Found 2026-07-29 by
+      grouping FAILED documents by error text: 38 of 39 failures were
+      `chunk error: ['A string literal cannot contain NUL (0x00) characters.']` — the exact symptom
+      the patch is supposed to prevent, still failing with the patch verifiably applied.
+
+      The patch lives in `deepdoc/parser/pdf_parser.py` and clears `self.page_chars[pi]` so OCR
+      re-reads the page. **arXiv is not ingested as PDF.** `arxiv-select.py` runs pdftotext on the
+      host and uploads `.txt`, so nothing in the PDF parser is on this path — the NUL arrives as
+      ordinary text and dies at insert. The patch is correct and does work for `books_raw`; it simply
+      protects a code path arXiv never enters.
+
+      Worth stating plainly because it is the shape of mistake this project keeps making: the fix was
+      verified *by execution* (probe encodes, predicate matches, module parses) and was still
+      inapplicable, because verification confirmed the mechanism and never asked whether the
+      mechanism runs for this corpus. A patch is only as good as its reachability from the input.
+
+      Fix belongs at extraction, not at parse: `arxiv-select.py` should detect NULs in pdftotext
+      output, refuse to write that `.txt`, and record the id in `corpus/arxiv-needs-ocr.txt` — which
+      is where `arxiv-scan-nul.py` already derives the list from, so the queue shape does not change.
+      That also removes the pointless round trip of uploading a document we know will fail.
 - [x] **arXiv is excluded from retrieval by default** (`KB_EXCLUDE` in the receiver;
       `search_corpus(research=true)` opts it back in per call, and the step line says so). The
       `oracle` assistant now attaches 22 KBs — everything except arxiv; it had been missing 12

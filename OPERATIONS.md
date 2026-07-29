@@ -227,6 +227,71 @@ In MySQL, `JSON_SET(cfg,'$.x', CHAR(10))` stores a BINARY value (`base64:type15:
 3. MUST happen while ONLINE only if new model weights are involved; normal re-ingest of text
    is fully offline-safe (Ollama + ES are local).
 
+## arXiv tailer: the thermal gate (2026-07-29)
+
+`arxiv-tail.sh` (systemd user unit `oracle-arxiv-ingest.service`) will not start a batch until the
+**CPU package has stayed below 75 °C for 60 seconds**. Journal lines to expect:
+
+    51°C — need < 75°C held 60s before a batch
+    51°C, held under 75°C for 60s — starting a batch
+    80°C — back over 75°C after 30s, clock reset
+    still 82°C after 900s — skipping this cycle rather than starting hot
+
+Knobs, all `Environment=` in the unit or env vars: `ARXIV_TEMP_MAX` (0 disables the gate),
+`ARXIV_TEMP_SUSTAIN`, `ARXIV_TEMP_POLL`, `ARXIV_TEMP_WAIT_MAX`, `ARXIV_BATCH`, `ARXIV_COOLDOWN`.
+
+**Why temperature and not a timer.** This was a fixed 60 s pause, and `cooldown-probe.sh` showed the
+pause was resting the wrong thing: after RAGFlow goes idle SereneDB keeps running for another ~60 s
+(`maintenance: per-index refresh/compaction loops`, peaking at 876 % — 8.7 cores — during the drain).
+So the whole rest window was spent on compaction. Temperature is the quantity actually being
+protected; time and CPU % were proxies for it.
+
+**Why sustained and not a single reading.** The load is periodic bursts, so one sample taken between
+two spikes reads cold and would launch a batch into the next one.
+
+**Two failure modes are deliberate.** An unreadable sensor *disables* the gate (never reads as
+"cold"), and a machine that never cools *skips the cycle* rather than starting hot — the loop stays
+alive and retries, so hot ambient throttles ingestion instead of cooking the box or wedging the unit.
+
+To lift the throttle when the cooling stand arrives: raise `ARXIV_BATCH` toward 5000 and set
+`ARXIV_TEMP_MAX=0`. The firehose is deliberate (stress SereneDB, measure dilution, harvest junk at
+volume); the gate is a concession to the hardware, not a change of intent.
+
+## Container patches must be MOUNTS, not in-place edits (2026-07-29)
+
+RAGFlow is pinned to v0.26.4, so our fixes are local patches. There are two ways to apply one and
+only one of them survives:
+
+* **bind-mounted from the repo** (`ragflow/docker/docker-compose.yml` → `- ../path/file.py:/ragflow/path/file.py`)
+  — survives recreation, and is under version control.
+* **edited inside the container** — survives `docker restart`, and is **silently destroyed** by
+  `docker compose up`, an image pull, or any compose-file change.
+
+This is not hypothetical. Adding `--workers=8` to the compose file recreated the container, the
+image's pristine `common/token_utils.py` came back, and arXiv parsed unpatched for hours with nothing
+in any log to say so. The NUL→OCR patch in the same container survived — the only difference was that
+`deepdoc/parser/pdf_parser.py` is mounted and `token_utils.py` was not. It is now mounted too.
+
+`./patch-ragflow.sh --check` reports **durability** (host file patched *and* mounted), not merely
+"is the string currently present" — the latter passed for weeks while the running process had the
+unpatched module loaded. Note a mounted file still needs `docker restart` to take effect: a live
+Python process keeps whatever module it imported at start.
+
+**Corollary: the vendored `ragflow/` checkout has no local commits.** Every Oracle patch there is an
+uncommitted working-tree modification, so `git checkout`/`git clean` in that directory discards all
+of them at once. Verify with `./patch-ragflow.sh --check` after touching it.
+
+## After recreating a container: re-queue the orphans
+
+`docker compose up` **recreates** rather than restarts, and documents in flight at that moment stay
+`RUNNING` forever — RAGFlow's executor skips anything already RUNNING, so it never retries them.
+Symptom: `pending` stuck at a fixed number with `docker-ragflow-cpu-1` near 0 % CPU.
+
+    ./requeue-orphans.py --dry-run    # show what would be re-queued
+    ./requeue-orphans.py              # re-trigger parsing (does NOT delete chunks)
+
+Only run it when nothing is genuinely parsing; mid-session a RUNNING doc probably has a live worker.
+
 ## Rules and gotchas (learned the hard way)
 - The "Book" and "Paper" chunk methods REJECT .md files (doc/docx/pdf/txt only). The ingest
   script renames .md → .md.txt for those KBs automatically. Everything else uses General.
