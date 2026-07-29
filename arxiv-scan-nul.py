@@ -33,6 +33,25 @@ LIST = TEXT.parent / "arxiv-needs-ocr.txt"
 REASON = "pdftotext emitted NUL (broken CID font)"
 
 
+# A NOTE ON LETTER-SPACED TEXT, and why it is NOT filtered here.
+#
+# Some pages extract as `P ro d u c tio n  R e a d y` — every glyph positioned individually, so
+# pdftotext cannot tell which gaps are word breaks. That text tokenises into nothing and matches no
+# query, so it is tempting to treat it like a NUL and reject the paper.
+#
+# Measured across 2,260 extractions before deciding: the damage is LOCALISED to figures, diagram
+# labels and tables, not the document. The two known-bad examples score 0.052 and 0.111 on
+# single-letter-token ratio — at or near the 0.029 median — because the surrounding prose is
+# perfectly fine. Rejecting them would discard a sound paper because one figure extracted badly.
+#
+# And the obvious metric cannot tell spacing from mathematics: the highest scorer in the corpus
+# (0.427) is a readable algebra paper whose ratio comes from single-letter variables and tables.
+# A filter on it would quietly delete the maths.
+#
+# So: no filter. NUL is whole-document damage (median 724 per affected file, none under 10) and is
+# worth rejecting; letter-spacing is a bad paragraph inside a good paper and is worth keeping.
+
+
 def scan() -> list:
     """[(paper_id, nul_count, size)] for every extracted file containing a NUL."""
     out = []

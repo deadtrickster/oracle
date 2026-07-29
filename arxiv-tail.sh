@@ -34,7 +34,8 @@ set -uo pipefail
 
 ORACLE="${ORACLE_DIR:-$HOME/Projects/oracle}"
 BATCH="${ARXIV_BATCH:-2000}"
-INTERVAL="${ARXIV_INTERVAL:-900}" # seconds between cycles
+INTERVAL="${ARXIV_INTERVAL:-900}"      # seconds between cycles
+MAX_PENDING="${ARXIV_MAX_PENDING:-50}" # skip a cycle if the parser is this busy already
 ONCE=0
 [ "${1:-}" = "--once" ] && ONCE=1
 
@@ -59,13 +60,19 @@ cycle() {
 
 	# Don't pile work onto a parser that is still chewing. Without this the queue only ever grows:
 	# each cycle adds BATCH more while the executor is still on the last lot.
+	#
+	# The threshold is deliberately well BELOW one batch. Waiting for a genuinely quiet queue means
+	# a re-parse or another KB's ingest finishes before this adds to it, and since nothing is
+	# waiting on arXiv, a skipped cycle costs nothing — the next one is fifteen minutes away. The
+	# first version compared against BATCH itself, which would have added 2,000 documents on top of
+	# a 1,288-document re-parse that was mid-verification.
 	local pending
-	pending="$(python3 ingest-status.py 2>/dev/null |
-		grep -oE 'UNSTART:[0-9]+|RUNNING:[0-9]+' | grep -oE '[0-9]+' |
-		paste -sd+ | bc 2>/dev/null || echo 0)"
+	pending="$(docker exec docker-mysql-1 mysql -uroot -pinfini_rag_flow -N \
+		-e "select count(*) from rag_flow.document where run in ('0','1');" 2>/dev/null |
+		tr -d '[:space:]')"
 	pending="${pending:-0}"
-	if [ "$pending" -gt "$BATCH" ]; then
-		echo "$(stamp)  $pending still queued/parsing — skipping this cycle"
+	if [ "$pending" -gt "$MAX_PENDING" ]; then
+		echo "$(stamp)  $pending documents still queued/parsing (limit $MAX_PENDING) — skipping"
 		return 0
 	fi
 
