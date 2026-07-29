@@ -38,7 +38,16 @@ for (const name of new Set(injectedNames)) {
     if (src[end] === "{") depth++;
     else if (src[end] === "}" && --depth === 0) break;
   }
-  const body = src.slice(i, end + 1);
+  // Strip comments and string literals before looking for identifiers. Without this the check reads
+  // prose: a comment containing the words "ground truth" was reported as referencing a module-scope
+  // `ground`. A checker that cries wolf about English is one people start ignoring, which costs
+  // more than the bug it was written to catch.
+  const body = src.slice(i, end + 1)
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/\/\/[^\n]*/g, " ")
+    .replace(/`(?:\\.|[^`\\])*`/g, '""')
+    .replace(/"(?:\\.|[^"\\])*"/g, '""')
+    .replace(/'(?:\\.|[^'\\])*'/g, '""');
 
   const leaks = [...moduleScope].filter((id) => {
     if (id === name) return false;

@@ -24,6 +24,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Agent mode must never be read from LIVE runtime state in a test: these hosts are real, and
+# one of them being in agent mode blocks the suite waiting for a human who was never asked.
+import os as _os
+_os.environ.setdefault("ORACLE_AGENT_STATE", f"/tmp/oracle-agent-test-{_os.getpid()}.json")
 HERE = Path(__file__).resolve().parent
 _tmp = Path(tempfile.mkdtemp(prefix="oracle-prefix-test-"))
 os.environ["ORACLE_SITE_CTX_CACHE"] = str(_tmp / "site.json")

@@ -379,11 +379,50 @@
   const isChrome = (el) =>
     el.closest("nav, header, aside, [role=navigation], [data-oracle-ui]") !== null;
 
+  // Which card is chosen — three ways, because this app uses none of the obvious one.
+  //
+  // The wizard renders its engine and preset cards as plain <button>s and expresses selection
+  // ENTIRELY in the class list:
+  //
+  //     sel ? "border-primary/50 bg-primary/[0.07]" : "border-zinc-800 bg-surface-tile …"
+  //
+  // No aria-pressed, no data-state, no aria-current. So the first version reported no `selected`
+  // on anything while the user was looking at a blue border and a checkmark — the state was on
+  // screen and invisible to the tool, which is the worst combination: it invites the model to
+  // re-click something already chosen.
+  //
+  // 1) ARIA / data attributes, when a component bothers to set them.
+  // 2) Tailwind-ish "this one is active" tokens.
+  // 3) ODD ONE OUT among siblings — framework-agnostic and the reason this generalises. Cards in a
+  //    picker are rendered from one list with one class string; the chosen one differs. If exactly
+  //    one sibling's classes differ from the shared majority, that is the selection, whatever the
+  //    design system happens to call it.
+  const ACTIVE_CLASS = /\b(border-primary|bg-primary|ring-2|ring-primary|bg-accent|is-active|selected|active)\b/;
+
   const selectedState = (el) => {
-    for (const a of ["aria-pressed", "aria-selected", "aria-checked", "data-state"]) {
+    for (const a of ["aria-pressed", "aria-selected", "aria-checked", "aria-current", "data-state",
+                     "data-selected", "data-active"]) {
       const v = el.getAttribute(a);
-      if (v === "true" || v === "on" || v === "checked" || v === "active") return true;
-      if (v === "false" || v === "off") return false;
+      if (v === "true" || v === "on" || v === "checked" || v === "active" || v === "selected") return true;
+      if (v === "false" || v === "off" || v === "inactive") return false;
+    }
+    const cls = el.className && el.className.baseVal !== undefined
+      ? el.className.baseVal : String(el.className || "");
+    if (ACTIVE_CLASS.test(cls)) return true;
+
+    // Odd one out.
+    const parent = el.parentElement;
+    if (!parent) return undefined;
+    const sibs = [...parent.children].filter(
+      (n) => n.tagName === el.tagName && n.getClientRects().length);
+    if (sibs.length < 3) return undefined;      // too few to establish a majority
+    const classOf = (n) => String(n.className || "").replace(/\s+/g, " ").trim();
+    const counts = {};
+    for (const n of sibs) counts[classOf(n)] = (counts[classOf(n)] || 0) + 1;
+    const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    // A clear majority plus exactly one dissenter.
+    if (entries.length === 2 && entries[1][1] === 1 && entries[0][1] >= sibs.length - 1) {
+      return classOf(el) === entries[1][0];
     }
     return undefined;
   };

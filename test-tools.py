@@ -41,6 +41,11 @@ def check(name, cond, detail=""):
         fails.append(name)
 
 
+# Point agent mode at a private file BEFORE anything reads it. Without this the test inherits the
+# live runtime state, and since HOST below is a real host that may be in agent mode on this machine,
+# the suite blocks waiting for a human to answer a question nobody asked.
+os.environ["ORACLE_AGENT_STATE"] = os.path.join(tempfile.mkdtemp(), "agent.json")
+
 HOST = "stage.cloud.stroppy.io"
 URL = f"https://{HOST}/t/default/runs/abc"
 

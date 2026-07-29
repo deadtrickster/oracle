@@ -582,7 +582,22 @@ function toolReadPage(selector) {
 function toolClick(arg) {
   const want = (arg.text || "").trim().toLowerCase();
   let el = null;
-  if (arg.selector) el = document.querySelector(arg.selector);
+  if (arg.selector) {
+    // querySelector THROWS on invalid CSS, which killed the whole injected step and returned
+    // nothing. `:contains()` is the usual culprit: it is jQuery, it looks like CSS, and models
+    // reach for it constantly because it expresses exactly what they want. Answer with the thing
+    // that does work here rather than with an exception.
+    try {
+      el = document.querySelector(arg.selector);
+    } catch (e) {
+      return `NOT CLICKED: ${JSON.stringify(arg.selector)} is not valid CSS (${e.message}). ` +
+             (/contains/i.test(arg.selector)
+               ? "`:contains(...)` is jQuery and does not exist in CSS. "
+               : "") +
+             "To click by visible text, pass `text` instead of `selector` — this tool matches " +
+             "visible labels itself and prefers the smallest matching element.";
+    }
+  }
   if (!el && want) {
     const cand = [...document.querySelectorAll(
       "button, a, [role=tab], [role=button], input[type=submit], summary, li, div, span")];
@@ -591,9 +606,47 @@ function toolClick(arg) {
     // wrapping <div> never wins over the actual control inside it
     const exact = cand.filter((n) => vis(n) && (n.innerText || n.value || "").trim().toLowerCase() === want);
     const part = cand.filter((n) => vis(n) && (n.innerText || "").trim().toLowerCase().includes(want));
-    const pick = (exact.length ? exact : part).sort(
-      (a, b) => (a.innerText || "").length - (b.innerText || "").length)[0];
-    el = pick || null;
+
+    // ASK THE FRAMEWORK which element owns the click.
+    //
+    // Diagnosed on the live wizard: clicking "Start" reported success and did nothing, every time.
+    // It was matching a <div> that merely contained the word. A wrapper and the button inside it
+    // have identical innerText, so "smallest text wins" is a tie and document order hands it to the
+    // wrapper — and `closest()` cannot rescue it, because the button is a DESCENDANT.
+    //
+    // Guessing from tag names only half-fixes that: this app renders controls through shadcn/Radix,
+    // where `asChild` can put the handler on an <a>, a <div>, or anything else. But React stores a
+    // node's props ON the node, under a `__reactProps$<hash>` key — so we can simply ask which
+    // element has an onClick. That is the ground truth the DOM shape only approximates, and it
+    // works for anything React renders rather than for a list of tags we happened to think of.
+    const reactProps = (n) => {
+      const k = Object.keys(n).find((x) => x.startsWith("__reactProps$"));
+      return k ? n[k] : null;
+    };
+    const hasHandler = (n) => {
+      const p = reactProps(n);
+      return Boolean(p && (p.onClick || p.onPointerDown || p.onMouseDown));
+    };
+    // Fallback for non-React pages: things that are clickable by their nature.
+    const nativelyClickable = (n) =>
+      /^(BUTTON|A|SUMMARY|LABEL|SELECT|INPUT|TEXTAREA)$/.test(n.tagName) ||
+      Boolean(n.getAttribute("role")) || typeof n.onclick === "function";
+
+    el = (exact.length ? exact : part).sort((a, b) => {
+      const byHandler = Number(hasHandler(b)) - Number(hasHandler(a));
+      if (byHandler) return byHandler;
+      const byNative = Number(nativelyClickable(b)) - Number(nativelyClickable(a));
+      if (byNative) return byNative;
+      return (a.innerText || "").length - (b.innerText || "").length;
+    })[0] || null;
+
+    // If the winner still owns no handler, look INSIDE it for the control it wraps.
+    if (el && !hasHandler(el) && !nativelyClickable(el)) {
+      const inner = [...el.querySelectorAll("*")].filter(
+        (n) => vis(n) && (hasHandler(n) || nativelyClickable(n)) &&
+               (n.innerText || "").trim().toLowerCase().includes(want));
+      if (inner.length) el = inner[0];
+    }
   }
   if (!el) {
     const labels = [...document.querySelectorAll("button, a, [role=tab]")]
@@ -614,11 +667,61 @@ function toolClick(arg) {
            `satisfied yet. Find what it is still missing (required fields, an unfinished step) ` +
            `rather than clicking again.`;
   }
+  // Click the thing that HANDLES the click, not the text node inside it. A label matched by text is
+  // often a <span> inside the real control, and shadcn's `asChild` puts the handler on whatever
+  // element it was given — so walk up to the nearest actionable ancestor when there is one.
+  const target = el.closest("button, [role=button], a[href], [role=tab], [role=menuitem], [role=option], label, summary") || el;
+
   const before = { url: location.href, title: document.title };
-  el.scrollIntoView({ block: "center" });
-  el.click();
-  return JSON.stringify({ clicked: (el.innerText || el.value || el.tagName).trim().slice(0, 80),
-                          before, note: "the page may still be updating; read it to see the result" });
+  target.scrollIntoView({ block: "center" });
+
+  // A REAL click, not just `.click()`.
+  //
+  // `.click()` dispatches a lone `click` event. This app is built on Radix (dialog, dropdown-menu,
+  // collapsible, select), and Radix triggers act on POINTERDOWN — so a bare click lands on nothing
+  // and the tool cheerfully reports success. That is exactly what was observed: every click
+  // reported `{"clicked":"Start"}` and the page never moved.
+  //
+  // So send the sequence a mouse actually produces. Plain React onClick handlers are unaffected;
+  // pointer-driven components finally respond.
+  const r = target.getBoundingClientRect();
+  const base = {
+    bubbles: true, cancelable: true, composed: true, view: window,
+    clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2),
+    button: 0, detail: 1,
+  };
+  const pointer = { ...base, pointerId: 1, pointerType: "mouse", isPrimary: true };
+  try {
+    target.dispatchEvent(new PointerEvent("pointerover", { ...pointer, buttons: 0 }));
+    target.dispatchEvent(new MouseEvent("mouseover", { ...base, buttons: 0 }));
+    target.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1 }));
+    target.dispatchEvent(new MouseEvent("mousedown", { ...base, buttons: 1 }));
+    if (typeof target.focus === "function") target.focus();
+    target.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 }));
+    target.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
+  } catch (_) {
+    /* PointerEvent is universally available in Chrome; never let the sequence block the click */
+  }
+  target.click();
+
+  // Report WHAT was hit, precisely. "clicked: Start" was true and useless — it did not say whether
+  // the thing clicked was a button or a div that merely contained the word.
+  const ident = {
+    tag: target.tagName.toLowerCase(),
+    role: target.getAttribute("role") || undefined,
+    type: target.getAttribute("type") || undefined,
+    actionable: target !== el || /^(BUTTON|A|SUMMARY|LABEL)$/.test(target.tagName) ||
+                Boolean(target.getAttribute("role")),
+  };
+  return JSON.stringify({
+    clicked: (target.innerText || target.value || target.tagName).trim().slice(0, 80),
+    element: ident, before,
+    ...(ident.actionable ? {} : {
+      warning: "the matched element is not a button, link or anything with a role — the text may " +
+               "have been found in a plain container that has no click handler at all",
+    }),
+    note: "a full pointer sequence was sent (Radix and similar act on pointerdown, not click)",
+  });
 }
 
 // injected: type into a field
@@ -643,7 +746,14 @@ function toolClick(arg) {
 // field is caught and reported — the tool tells you it failed instead of letting the model spend
 // three steps discovering it.
 async function toolType(arg) {
-  const el = document.querySelector(arg.selector);
+  let el = null;
+  try {
+    el = document.querySelector(arg.selector);
+  } catch (e) {
+    return `NOT TYPED: ${JSON.stringify(arg.selector)} is not valid CSS (${e.message}). ` +
+           "`:contains(...)` is jQuery, not CSS. Read the form's controls first — each one comes " +
+           "back with a selector that already resolved.";
+  }
   if (!el) {
     const fields = [...document.querySelectorAll("input, textarea, select")]
       .filter((n) => n.getClientRects().length)
@@ -697,15 +807,44 @@ const pendingConfirms = new Map();
 function toolPreview(arg) {
   const want = (arg.text || "").trim().toLowerCase();
   let el = null;
-  if (arg.selector) el = document.querySelector(arg.selector);
+  if (arg.selector) {
+    try {
+      el = document.querySelector(arg.selector);
+    } catch (_) {
+      return { found: false, invalidSelector: arg.selector };
+    }
+  }
   if (!el && want) {
     const cand = [...document.querySelectorAll(
       "button, a, [role=tab], [role=button], input[type=submit], summary, li, div, span")];
     const vis = (n) => n.getClientRects().length > 0;
     const exact = cand.filter((n) => vis(n) && (n.innerText || n.value || "").trim().toLowerCase() === want);
     const part = cand.filter((n) => vis(n) && (n.innerText || "").trim().toLowerCase().includes(want));
-    el = (exact.length ? exact : part).sort(
-      (a, b) => (a.innerText || "").length - (b.innerText || "").length)[0] || null;
+    // Prefer something CLICKABLE over the smallest match.
+    //
+    // Diagnosed on the live wizard: clicking "Start" reported success and did nothing, over and
+    // over. It was matching a <div> that merely contained the word. A wrapper div and the button
+    // inside it have identical innerText, so "smallest text wins" is a tie, and document order puts
+    // the wrapper first — the container always beat the control. `closest()` cannot fix it either,
+    // because the button is a DESCENDANT of the div, not an ancestor.
+    //
+    // So rank by whether the element can plausibly handle a click, and only then by how tight the
+    // match is. A container that wraps the real control is the one thing that must never win.
+    const actionable = (n) =>
+      /^(BUTTON|A|SUMMARY|LABEL|SELECT|TEXTAREA|INPUT)$/.test(n.tagName) ||
+      Boolean(n.getAttribute("role")) || typeof n.onclick === "function" ||
+      n.hasAttribute("data-testid");
+    el = (exact.length ? exact : part).sort((a, b) => {
+      const byAction = Number(actionable(b)) - Number(actionable(a));
+      if (byAction) return byAction;
+      return (a.innerText || "").length - (b.innerText || "").length;
+    })[0] || null;
+    // If the winner is still a plain container, look INSIDE it for the control it wraps.
+    if (el && !actionable(el)) {
+      const inner = [...el.querySelectorAll("button, a[href], [role=button], [role=tab], summary")]
+        .filter((n) => vis(n) && (n.innerText || "").trim().toLowerCase().includes(want));
+      if (inner.length) el = inner[0];
+    }
   }
   document.querySelectorAll("[data-oracle-target]").forEach((n) => {
     n.removeAttribute("data-oracle-target");
@@ -819,9 +958,30 @@ async function runSiteCall(call, tab) {
 
 async function runBrowserTool(call, tab, notify = () => {}) {
   const a = call.args || {};
-  const exec = (func, args) => chrome.scripting
-    .executeScript({ target: { tabId: tab.id }, func, args })
-    .then(([r]) => r?.result);
+  // An injected function that THROWS must not become a bare `null`.
+  //
+  // Observed: the model passed `button:contains("Resume"):first-of-type` — jQuery syntax, not CSS —
+  // querySelector threw a SyntaxError inside the page, and the tool result began with the word
+  // "null". The model was told nothing at all: not that the selector was invalid, not that its
+  // click never happened. It tried the same shape again two steps later. A silent null is the worst
+  // possible answer, strictly worse than "not found", which at least says something happened.
+  const exec = async (func, args) => {
+    let frames;
+    try {
+      frames = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args });
+    } catch (e) {
+      return `TOOL FAILED: the page rejected the injected step (${e && e.message}).`;
+    }
+    const r = frames && frames[0];
+    if (r && r.error) return `TOOL FAILED in the page: ${r.error.message || r.error}`;
+    if (!r || r.result === undefined || r.result === null) {
+      return "TOOL FAILED: the step threw inside the page and produced no result. If you passed a " +
+             "`selector`, it is most likely not valid CSS — `:contains(...)` is jQuery and does " +
+             "NOT exist in CSS. To click by visible text use the `text` argument instead of a " +
+             "selector; that is what it is for.";
+    }
+    return r.result;
+  };
   try {
     if (call.name === "read_page") return String(await exec(toolReadPage, [a.selector || ""]));
     if (call.name === "click") {
@@ -831,6 +991,12 @@ async function runBrowserTool(call, tab, notify = () => {}) {
       const opened = [];
       const onCreated = (t) => opened.push(t);
       chrome.tabs.onCreated.addListener(onCreated);
+      // Capture BEFORE, so the result can state whether anything actually changed. Handing back a
+      // fresh dump of similar-looking page text is not an answer to "did that work?".
+      const before = await exec(() => ({
+        url: location.href,
+        text: (document.body.innerText || "").replace(/\s+/g, " ").trim(),
+      }));
       const out = String(await exec(toolClick, [a]));
       // Report the OUTCOME: a click that navigates or swaps a tab changes the page, and the model
       // needs the after, not the before.
@@ -843,9 +1009,38 @@ async function runBrowserTool(call, tab, notify = () => {}) {
                `that tab. Do NOT conclude the link is broken — it worked. Say that it opened in a ` +
                `new tab and continue with what is visible here, or ask the user to switch to it.`;
       }
-      const after = await exec(() => ({ url: location.href, title: document.title,
-                                        text: (document.body.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1500) }));
-      return `${out}\nAFTER: ${after?.url} — ${after?.title}\n${after?.text || ""}`;
+      const after = await exec(() => ({
+        url: location.href, title: document.title,
+        text: (document.body.innerText || "").replace(/\s+/g, " ").trim(),
+      }));
+      // Say plainly WHETHER it changed, and if so WHAT APPEARED.
+      //
+      // This one cost real damage rather than just a wasted turn. Clicking "Start" on the wizard
+      // created a draft — it worked — but the AFTER dump looked like the same page, so the model
+      // concluded it had failed and clicked again. And again. Each attempt created another draft;
+      // the page ended up with three "Resume" buttons that had not existed before. A mutating
+      // action that reports ambiguously is an action that gets repeated.
+      const beforeText = (before && before.text) || "";
+      const afterText = (after && after.text) || "";
+      const navigated = before && after && before.url !== after.url;
+      const changed = navigated || beforeText !== afterText;
+      let delta = "";
+      if (!navigated && changed) {
+        // What is on the page now that was not before. Cheap word-level diff — enough to show a new
+        // row, a new button, an error message.
+        const was = new Set(beforeText.split(" "));
+        const fresh = afterText.split(" ").filter((w) => w && !was.has(w));
+        delta = fresh.length ? `\nNEW ON THE PAGE: ${fresh.slice(0, 60).join(" ")}` : "";
+      }
+      const verdict = navigated
+        ? `THE PAGE CHANGED: navigated to ${after.url}`
+        : changed
+          ? "THE PAGE CHANGED (same URL — content updated). The click DID take effect."
+          : "THE PAGE DID NOT CHANGE. The click landed but nothing visibly happened. Do NOT simply " +
+            "click it again — if it is a button that creates or starts something, repeating it may " +
+            "do the thing twice. Read the page or the form's state to find what it is waiting for.";
+      return `${out}\n${verdict}${delta}\nAFTER: ${after?.url} — ${after?.title}\n` +
+             `${afterText.slice(0, 1500)}`;
     }
     if (call.name === "type_text") return String(await exec(toolType, [a]));
     if (call.name === "site_call") return await runSiteCall(call, tab);

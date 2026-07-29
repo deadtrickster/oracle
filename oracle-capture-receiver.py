@@ -60,6 +60,7 @@ EMBED = os.environ.get("ORACLE_EMBED_URL", "http://localhost:11434").rstrip("/")
 # oracle_vram serialises across processes and keeps availability PROBED rather than configured — a
 # flag would have to be flipped in lockstep with every swap and would lie whenever the two drifted.
 import oracle_broker
+import oracle_agent
 import oracle_chat
 import oracle_kv
 import oracle_tools
@@ -1237,15 +1238,33 @@ def _chat_steps(host, session, system, page, tools, can_act, debug, helpers=None
                         cached_prefix_chars=len(system))
 
         out = {}
-        try:
-            for delta in _chat_stream_tools(msgs, tools, out):
-                yield ("delta", {"text": delta})
-        except (urllib.error.URLError, ConnectionError, TimeoutError):
-            yield ("error", {"error": "Synthesis model is unreachable."})
-            return
-        except Exception as e:
-            yield ("error", {"error": f"chat error: {e}"})
-            return
+        if oracle_agent.enabled(host, session):
+            # An external agent is driving this session. Everything downstream is unchanged — the
+            # browser hand-off, the confirm gate, the transcript — because this replaces exactly one
+            # thing: who writes the assistant turn.
+            rid = oracle_agent.publish(host, session, msgs, tools,
+                                       {"call_no": call_no, "step": step})
+            oracle_agent.trace(host, session, "request",
+                               {"id": rid, "messages": msgs, "tools":
+                                [t["function"]["name"] for t in tools]})
+            got = yield from oracle_agent.await_reply(host, session, rid)
+            if not got:
+                yield ("error", {"error": "the external agent did not answer in time"})
+                return
+            out = {"text": got.get("text", ""), "tool_calls": got.get("tool_calls") or []}
+            oracle_agent.trace(host, session, "reply", out)
+            if out["text"]:
+                yield ("delta", {"text": out["text"]})
+        else:
+            try:
+                for delta in _chat_stream_tools(msgs, tools, out):
+                    yield ("delta", {"text": delta})
+            except (urllib.error.URLError, ConnectionError, TimeoutError):
+                yield ("error", {"error": "Synthesis model is unreachable."})
+                return
+            except Exception as e:
+                yield ("error", {"error": f"chat error: {e}"})
+                return
 
         calls = out.get("tool_calls") or []
         text = out.get("text", "")
@@ -1398,6 +1417,9 @@ def chat_tool_results(host: str, results: list, url: str = "", title: str = "",
             continue                      # a stale reply from an abandoned loop
         # A tool that took a screenshot sends it back too, so the conversation can SHOW what it
         # looked at. The model still only ever sees the reading.
+        oracle_agent.trace(host, session, "tool_result",
+                           {"id": cid, "name": r.get("name", ""),
+                            "content": str(r.get("content", ""))[:20000]})
         oracle_chat.append(host, "tool", _clip_tool_result(str(r.get("content", "")),
                                                            r.get("name", "")),
                            tool_call_id=cid, name=r.get("name", ""), session=session,
@@ -1840,7 +1862,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         try:
-            for ev, data in events:
+            for item in events:
+                # A malformed event must not end the turn. Unpacking `for ev, data in events`
+                # directly meant one generator yielding a bare string — agent mode's wait notice —
+                # raised inside the writer, closed the socket, and the panel told the user "the
+                # answer was cut off; the connection ended early". The connection was fine. The
+                # producer was wrong, and the report blamed the network, which is the worst place
+                # to send someone looking.
+                if (not isinstance(item, tuple)) or len(item) != 2 \
+                        or not isinstance(item[0], str) or not isinstance(item[1], dict):
+                    print(f"[sse] dropping malformed event: {item!r:.200}", flush=True)
+                    self.wfile.write(b"event: debug\ndata: " + json.dumps(
+                        {"stage": "malformed event dropped", "repr": repr(item)[:400]}).encode()
+                        + b"\n\n")
+                    self.wfile.flush()
+                    continue
+                ev, data = item
                 self.wfile.write(f"event: {ev}\ndata: {json.dumps(data)}\n\n".encode())
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionError):
@@ -1890,6 +1927,11 @@ class Handler(BaseHTTPRequestHandler):
                                        _try_json(c["function"].get("arguments")))
                                        for c in (t.get("tool_calls") or [])]}
                                   for t in oracle_chat.history(h, s)]})
+        elif self.path.startswith("/agent/poll"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self._send(oracle_agent.poll((q.get("host", [""])[0] or "").strip(),
+                                         (q.get("session", [oracle_chat.MAIN])[0]).strip())
+                       or {"waiting": False, "sessions": oracle_agent.sessions()})
         elif self.path.startswith("/health"):
             self._send({"ok": True})
         elif self.path.startswith("/slots"):
@@ -1960,6 +2002,17 @@ class Handler(BaseHTTPRequestHandler):
                 s = (p.get("session") or oracle_chat.MAIN).strip()
                 self._send({"host": h, "session": s, "deleted": oracle_chat.delete(h, s),
                             "sessions": oracle_chat.sessions()})
+            elif self.path.startswith("/agent/mode"):
+                h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
+                s = (p.get("session") or oracle_chat.MAIN).strip()
+                on = bool(p.get("on"))
+                self._send({"host": h, "session": s,
+                            "agent": oracle_agent.set_mode(h, s, on),
+                            "sessions": oracle_agent.sessions()})
+            elif self.path.startswith("/agent/reply"):
+                self._send({"accepted": oracle_agent.reply(
+                    (p.get("host") or "").strip(), (p.get("session") or oracle_chat.MAIN).strip(),
+                    p.get("id", ""), p.get("text", ""), p.get("tool_calls") or [])})
             elif self.path.startswith("/chat/allow"):
                 h = (p.get("host") or oracle_sitectx.host_of(p.get("url", ""))).strip()
                 # `allow` is now a MODE ("off"/"confirm"/"allow"); bools still arrive from
