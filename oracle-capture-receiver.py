@@ -339,9 +339,25 @@ def _drainer_loop():
 
 # ------------------------------------------------------------------ explain (grounded, mirrors ask_corpus)
 
-def _kb_ids() -> list[str]:
+# Knowledge bases that are NOT searched by default — available, but only when asked for.
+#
+# `arxiv` is the reason this exists. It tails a mirror heading for ~1.1M papers at ~52 chunks each,
+# so left in the default set it would outnumber every curated shelf combined and win on volume
+# alone: a question about PostgreSQL internals would be answered from whatever preprint happened to
+# use the same words. That is dilution, and dilution is the failure this project is built against
+# (Axiom 1) — the corpus does not get better by getting bigger.
+#
+# It is excluded rather than deleted because the papers are genuinely wanted, just not for every
+# question. Override per call, or set ORACLE_KB_EXCLUDE="" to search everything.
+KB_EXCLUDE = {k.strip() for k in os.environ.get("ORACLE_KB_EXCLUDE", "arxiv").split(",") if k.strip()}
+
+
+def _kb_ids(include: set | None = None) -> list[str]:
+    """Datasets to retrieve from. `include` adds back excluded ones by name."""
     data = _ragflow("GET", "/datasets?page_size=100", timeout=30)["data"]
-    return [d["id"] for d in data if d.get("chunk_count", 0) > 0]
+    allow = KB_EXCLUDE - (include or set())
+    return [d["id"] for d in data
+            if d.get("chunk_count", 0) > 0 and d.get("name") not in allow]
 
 
 def _retrieve(query: str, kb_ids: list[str]):
@@ -1009,7 +1025,8 @@ def _run_local_tool(name: str, args: dict, debug: bool, helpers: dict | None = N
         out["text"] = "error: search_corpus needs a query"
         return out
     try:
-        kb_ids = _kb_ids()
+        # `research: true` opts arXiv back in for this call only.
+        kb_ids = _kb_ids(include=KB_EXCLUDE if args.get("research") else None)
         chunks, reranked = _retrieve(query, kb_ids) if kb_ids else ([], False)
         chunks = _diversify(query, chunks) if chunks else []
     except Exception as e:

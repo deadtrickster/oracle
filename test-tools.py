@@ -50,7 +50,7 @@ HOST = "stage.cloud.stroppy.io"
 URL = f"https://{HOST}/t/default/runs/abc"
 
 rcv.ensure_model = lambda kind, host="": iter(())
-rcv._kb_ids = lambda: ["kb"]
+rcv._kb_ids = lambda include=None: ["kb", "arxiv"] if include else ["kb"]
 rcv._retrieve = lambda q, kb, top_n=64: ([{"document_keyword": "pg.pdf",
                                            "content_with_weight": f"corpus text about {q}"}], True)
 rcv._diversify = lambda q, c, main=18, cross=4: c
@@ -117,6 +117,32 @@ check("transcript records user, assistant+call, tool, assistant",
       roles == ["user", "assistant", "tool", "assistant"], str(roles))
 check("the tool result is in the transcript",
       "corpus text about wal flush" in ch.history(HOST)[2]["content"])
+
+print("\n2b. arXiv is excluded by default and opted into per call")
+# arXiv tails a mirror heading for ~1.1M papers; left in the default set it wins on volume and a
+# question about software gets answered from whatever preprint reused the words. So it is excluded
+# by default, and `research: true` adds it back for one call.
+seen_kbs = []
+_real_retrieve = rcv._retrieve
+rcv._retrieve = lambda q, kb, top_n=64: (seen_kbs.append(list(kb)), _real_retrieve(q, kb))[1]
+
+ch.reset(HOST)
+SCRIPT[:] = [{"tool_calls": [call("search_corpus", {"query": "wal flush"})]}, {"text": "done"}]
+SEEN.clear()
+run(rcv.chat_stream("q", URL, "t", None, False, None, HOST))
+check("a plain search excludes arxiv", seen_kbs and "arxiv" not in seen_kbs[-1], str(seen_kbs[-1:]))
+
+ch.reset(HOST)
+SCRIPT[:] = [{"tool_calls": [call("search_corpus", {"query": "vector index", "research": True})]},
+             {"text": "done"}]
+SEEN.clear()
+run(rcv.chat_stream("q", URL, "t", None, False, None, HOST))
+check("research=true includes arxiv", seen_kbs and "arxiv" in seen_kbs[-1], str(seen_kbs[-1:]))
+check("the step line says so",
+      "including arXiv" in tl.describe("search_corpus", {"query": "x", "research": True}))
+check("and stays quiet when it is off",
+      "arXiv" not in tl.describe("search_corpus", {"query": "x"}))
+rcv._retrieve = _real_retrieve
 
 print("\n3. a browser tool ENDS the turn and asks the extension")
 ch.reset(HOST)

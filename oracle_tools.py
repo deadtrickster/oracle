@@ -50,7 +50,18 @@ READ_TOOLS = [
         "about how something works in general, not about what is on the screen. Returns numbered "
         "excerpts you must cite as [n].",
         {"query": {"type": "string", "description": "What to look for. A focused phrase beats a "
-                                                    "sentence."}},
+                                                    "sentence."},
+         # arXiv is excluded by default and opted into per call. It is enormous — a mirror heading
+         # for ~1.1M papers — so including it always would let it win on volume: a question about
+         # PostgreSQL internals answered from whatever preprint reused the words. But when someone
+         # asks what the RESEARCH says, excluding it is just as wrong, and the model is what knows
+         # which kind of question it is holding.
+         "research": {"type": "boolean", "description":
+                      "Set true to ALSO search the arXiv paper collection. Use it when the question "
+                      "is about research, recent work, a technique from a paper, or 'what does the "
+                      "literature say'. Leave it off for how-does-this-work questions about "
+                      "software, tools and languages — the curated shelves answer those better and "
+                      "arXiv would bury them."}},
         ["query"]),
     _fn("read_page",
         "Read the rendered text of the page the user is looking at. Use this before guessing what "
@@ -178,7 +189,10 @@ def describe(name: str, args: dict) -> str:
     should be able to see what was done without reading JSON."""
     a = args or {}
     if name == "search_corpus":
-        return f"searched the corpus for “{a.get('query', '')}”"
+        # Say when arXiv was included: the user is watching the step line, and "why is it citing a
+        # preprint" should be answerable from it without opening the debug tab.
+        return (f"searched the corpus for “{a.get('query', '')}”"
+                + (" (including arXiv papers)" if a.get("research") else ""))
     if name == "read_page":
         return "read the page" + (f" ({a['selector']})" if a.get("selector") else "")
     if name == "wait":

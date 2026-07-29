@@ -1431,6 +1431,39 @@ The electricity failed mid-ingest — an unplanned run of the "does the stack co
   (or a `<tool_call>{json}`) into a proper `tool_use` — net ~0% failures. Lesson: "no proxy" was an
   aesthetic, not a requirement; correctness beat it.
 
+### 8.0 Three ways to make a chunk matter less, and how to choose
+
+Deleting is the only lever this system had for a long time, and it is the bluntest of the three. All
+three are now available and they answer different questions.
+
+**Exclude a whole knowledge base** — `KB_EXCLUDE` in the receiver, `kb_ids` on a RAGFlow assistant.
+Right when the collection is legitimate but wrong for the question. arXiv is the case: a mirror
+heading for ~1.1M papers at ~52 chunks each would outnumber every curated shelf combined and win on
+volume alone, so a question about PostgreSQL internals gets answered from whatever preprint reused
+the words. It is excluded by default and opted back in per call — `search_corpus(research=true)` —
+because the model is what knows whether it is holding a research question. The step line says when
+arXiv was included, so "why is it citing a preprint" is answerable without opening the debug tab.
+
+**Demote a chunk** — `pagerank_fea`, an `integer` column on every chunk. RAGFlow adds it to the
+final score (`rank_fea * 10.0 + pageranks` in `rag/nlp/search.py`), so it is a straight additive
+nudge, not a filter. This is the missing tool for material that is *real but rarely the answer*: a
+table of contents, an index page, a bibliography. Deleting those loses genuinely retrievable
+content; demoting them means they surface only when nothing better matches. Two caveats before
+relying on it: the value is stamped from the knowledge base at INDEX time, so changing it later
+means writing the column directly (SereneDB allows this), and whether negative values are honoured
+end-to-end is unverified — boosting the trusted shelves may be the safer direction than penalising
+the doubtful ones.
+
+**Delete a chunk** — `clean-chunks.py`, and only through its cascade: a cheap recall-oriented rule
+proposes candidates, an LLM judge decides. Reserved for material that is actively *poisonous* rather
+than merely unhelpful — an exercise block beats the chapter that answers the query, because a
+question-shaped chunk matches a question-shaped query.
+
+The failure mode to avoid is reaching for deletion because it is the lever you already have. Two
+decisions on the same day went the other way for good reasons: arXiv is excluded rather than dropped
+because the papers are wanted, just not always; and letter-spaced figure text is left alone entirely
+because it is 0.06% of chunks and every threshold that catches it also catches mathematics.
+
 ### 8.1 Silent corruption: the failure mode that reports success
 
 Two bugs found on the same day, both in RAGFlow, both invisible to every signal the system emits.
