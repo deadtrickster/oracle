@@ -919,6 +919,42 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       open on its own. Either pause the tailer for the training window or accept the contention
       deliberately — it is `Nice=15`, so it should yield.
 
+- [ ] **[serene] Does arXiv form one tight kernel in the IVF index?** (his concern, 2026-07-29 —
+      and the sharpest question asked about this stress test.)
+      The index is real and combined: `CREATE INDEX ... USING inverted (id, {fts},
+      {vec_n} ivf (metric='ip', quant='sq8'))` — BM25 and an IVF vector index over the normalised
+      column, in one structure. IVF partitions vectors into cells around trained centroids and
+      probes only a few per query, so **the distribution of vectors across cells is the whole
+      performance and recall story**.
+      arXiv is ~140k chunks and climbing fast, and unlike every other shelf it is homogeneous:
+      academic-paper English, one register, one genre, heavy shared vocabulary. The worry is that it
+      occupies a dense region and:
+        - a handful of cells own a disproportionate share of all vectors, so probing either lands in
+          the arXiv cell (and returns mostly papers) or misses it (and returns none) — the bimodal
+          behaviour already visible in `compare-retrieval.py`, where a query gets 0/6 or 6/6 and
+          nothing in between;
+        - curated content gets scattered across cells whose centroids have drifted toward
+          paper-prose, quietly costing recall on the shelves that matter most;
+        - **retraining the centroids after the flood** repositions them around arXiv, which would
+          degrade everything else at once and without warning — the same silent-success shape as
+          everything else found today.
+      **AGREED PLAN (his, 2026-07-29) — build the pathological case on purpose:**
+        1. Let the firehose finish ingesting what is already downloaded (~310k papers and rising)
+           into the main store, through RAGFlow. That is the read-path stress and the junk harvest.
+        2. THEN stand up a SEPARATE SereneDB instance and load it **starting from a single topic**,
+           so it deliberately forms one tight kernel rather than waiting to see whether one emerges.
+      That is a controlled experiment where the observational version is ambiguous: a mixed corpus
+      leaves you guessing whether flat recall means the index coped or the data was never clustered
+      enough to test it. Single-topic first, then widen and watch what the centroids do when a second
+      distinct kernel arrives — which is the real question, since that is what happened to the main
+      store when arXiv landed on top of curated shelves.
+      **Measure:** cell occupancy histogram, recall@k for a fixed query set, insert throughput as
+      rows grow, and behaviour on centroid retrain. `serene-stress-watch.py` already records which
+      documents come back, so the before/after for the main store exists from today.
+      **The upside he noted:** a known dense homogeneous kernel is also a good regression fixture. If
+      curated recall holds up with hundreds of thousands of arXiv vectors in the index, that is a far
+      stronger statement than it holding up on a tidy corpus.
+
 - [ ] **[serene] Profile SereneDB INGESTION directly, without RAGFlow** (his plan, 2026-07-29).
       The arXiv firehose stresses the READ path honestly — real queries, real reranking, a growing
       index — but every write goes through RAGFlow, so what is being measured on the write side is

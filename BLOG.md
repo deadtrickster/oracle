@@ -1250,6 +1250,57 @@ signature failure, written by me, deliberately, in the name of elegance. It now 
 *and* reads the file, and there is a `cached_fraction()` built on `mincore` so the claim can be
 checked instead of believed.
 
+## Act 27 — Every chunk was missing the letter `n`, and every counter said 100%
+
+I sampled six random chunks from a freshly ingested shelf of arXiv papers, expecting to skim them.
+
+> "tatio **desig**, mixed-i itiative i teractio" · "**Co ectio s**" · "**Ma ageme t**" ·
+> "i troduce a **ovel** match-a d-filter framework"
+
+Every `n`, gone. Replaced by a newline. In every chunk, of every document, of that entire knowledge
+base. The source text on disk was perfect — 79,425 bytes, 4,899 `n` characters, clean prose.
+
+Nothing had errored. Parsing reported success. Chunk counts looked healthy. The progress bar said
+100%. The documents still embedded, still matched queries, and would still have been cited — which
+is the failure this whole project exists to prevent, arriving from a direction I had never checked.
+
+The cause is a chain of individually reasonable decisions. RAGFlow's text parser lets you configure
+a chunk delimiter, and supports writing it as `\n`, so it round-trips the value through
+`unicode_escape`. Then it splits the document on **each character** of the result. Creating a
+dataset through the API without naming a delimiter stores the default *double*-escaped, which
+`unicode_escape` renders as backslash-plus-a-literal-`n` — and so the parser split on every letter
+`n` in the English language and swallowed it.
+
+Three things kept it hidden. It only affects the plain-text parser, so the PDF-parsed shelves were
+fine. It is invisible in Cyrillic, which has no Latin `n` to lose — and one of the affected shelves
+is Russian, and looked perfect. And the knowledge bases created *earlier* hold the correct value, so
+the healthy majority argued that the code was fine and the new content was suspect.
+
+Then the fix did not work, which is the part I would tell someone else about. I corrected the
+knowledge base, re-parsed everything, and got byte-identical garbage. `parser_config` is copied
+forward three times — knowledge base to document at upload, document to task at queue time — and the
+parser reads the *last* copy. Fixing the first one changes nothing that already exists. It took
+16,477 document rows and cancelling every in-flight task before the letter `n` came back.
+
+And the verification is the lesson, not the fix. "The config now reads correctly" was true while the
+data was still garbage; I had already believed it once. What settled it was counting the damage
+signature in the rebuilt chunks: 1,190 of 1,201 contain the letter `n`, 1,109 contain `" the "`, and
+**zero** contain `" a d "`.
+
+The same day produced three more of the same species. A token-counting helper that wrapped its
+exception and returned **0 tokens** for a real chunk. A dataset counter reading **196,782** for a
+store holding 3,805 rows, because it accumulates and never decrements. And an unset environment
+variable that quietly moved the entire corpus onto a different database while every status line
+still said *done*.
+
+Four bugs, three systems, one shape: **the system reported success and produced wrong data.** Not
+one of them appeared in a log, a counter or a progress bar. Three were found by reading the stored
+rows, the fourth by reading a container log.
+
+I have a whole vocabulary for guarding against models that make things up. I had almost nothing for
+infrastructure that makes things up — and infrastructure is more convincing, because it comes with
+a progress bar.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
