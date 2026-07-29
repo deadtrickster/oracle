@@ -92,7 +92,17 @@
   const KEY = "__oracle_stroppy";
   if (window[KEY]) return; // idempotent: the harness may inject on every call
 
-  let token = null;
+  // The bearer lives on `window`, not in this closure, so it SURVIVES a re-install.
+  //
+  // Re-installing on a source change (see the hash guard in background.js) rebuilds the closure,
+  // which threw away the captured token — so the first call after any helper edit failed with "no
+  // token", and because run_report resolves the tenant first, it surfaced as "could not resolve the
+  // tenant from the URL". A fix to one thing quietly broke another and then lied about which.
+  //
+  // Re-capture would eventually happen anyway, but only after the app makes another request, which
+  // on an idle page can be never.
+  const TOKEN_KEY = "__oracle_stroppy_bearer";
+  let token = window[TOKEN_KEY] || null;
 
   const capture = (headers) => {
     try {
@@ -100,7 +110,10 @@
         headers instanceof Headers
           ? headers.get("authorization")
           : headers && (headers.Authorization || headers.authorization);
-      if (h && /^Bearer\s+\S+/i.test(h)) token = h;
+      if (h && /^Bearer\s+\S+/i.test(h)) {
+        token = h;
+        window[TOKEN_KEY] = h;      // survives a helper re-install
+      }
     } catch {
       /* never let observation break the page's own request */
     }
@@ -270,10 +283,26 @@
     return out;
   };
 
+  // Returns the id, or an {error} explaining WHY there isn't one.
+  //
+  // It used to return null for every cause, so "the API call failed" and "there is no tenant in the
+  // URL" arrived as the same sentence — and the one that actually happened (no bearer yet) was the
+  // one the message ruled out. An error that names the wrong cause is worse than a vague one.
   const tenantFromRoute = async () => {
     const r = route();
-    if (!r.tenant) return null;
-    return await tenantId(r.tenant);
+    if (!r.tenant) {
+      return { error: "no tenant in the URL — open a /t/{slug}/… page first" };
+    }
+    if (tenants.has(r.tenant)) return tenants.get(r.tenant);
+    const t = await fns.api({
+      procedure: "/cloud.v1.api.IamService/GetTenant",
+      message: { slug: r.tenant },
+    });
+    if (t && t.error) return { error: `tenant lookup failed: ${t.error}` };
+    const id = t && t.tenant && t.tenant.id;
+    if (!id) return { error: `tenant ${r.tenant} did not resolve to an id` };
+    tenants.set(r.tenant, id);
+    return id;
   };
 
   // Shape the report; do not dump it.
@@ -295,7 +324,7 @@
     const run = runId || route().runId;
     if (!run) return { error: "no run id — open a run page or pass runId" };
     const tid = await tenantFromRoute();
-    if (!tid) return { error: "could not resolve the tenant from the URL" };
+    if (!tid || tid.error) return tid && tid.error ? tid : { error: "no tenant" };
     const call = (procedure, message) => fns.api({ procedure, message });
     const got = await settle({
       overview: call("/cloud.v1.api.TestRunOverviewService/GetTestRunOverview",
@@ -310,7 +339,12 @@
     const metrics = got.metrics;
     const list = ((metrics || {}).metrics || {}).metrics || [];
     const snap = ((got.overview || {}).snapshot) || {};
-    const rec = ((got.run || {}).testRun || {}).entity || (got.run || {}).testRun || {};
+    // GetTestRun returns {run: {...}} and its `deploymentPlan` alone is ~60k characters — every
+    // provisioning step for every node. Reach past it deliberately: the identity is what a reader
+    // wants, and the plan is summarised to node + status below.
+    const rec = ((got.run || {}).run) || {};
+    const nodes = (((rec.deploymentPlan || {}).components) || [])
+      .map((c) => ({ node: c.nodeId, status: c.status, role: (c.labels || {}).role }));
 
     return {
       runId: run,
@@ -319,7 +353,10 @@
       // conflicting throughputs for the same run.
       metrics: err(metrics) || list.map((m) => pick(m,
         ["key", "name", "group", "unit", "avg", "min", "max", "last", "higherIsBetter"])),
-      run: err(got.run) || pick(rec, ["id", "name", "status", "createdAt", "timings"]),
+      run: err(got.run) || pick(rec, ["id", "name", "status", "createdAt", "startedAt",
+                                      "finishedAt", "duration", "trigger", "dbKind", "workload",
+                                      "stroppyVersion", "provider", "progress", "entity"]),
+      nodes,
       status: snap.run?.status || rec.status,
       stages: err(got.overview) ||
         (snap.stages || []).map((s) => pick(s, ["name", "status", "startedAt", "finishedAt"])),
@@ -334,7 +371,7 @@
 
   fns.design_context = async ({ version }) => {
     const tid = await tenantFromRoute();
-    if (!tid) return { error: "could not resolve the tenant from the URL" };
+    if (!tid || tid.error) return tid && tid.error ? tid : { error: "no tenant" };
     const call = (procedure, message) => fns.api({ procedure, message });
     return await settle({
       // The catalog comes from the stroppy BINARY (the server runs `stroppy probe -o json`), so it

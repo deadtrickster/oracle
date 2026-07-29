@@ -49,8 +49,26 @@ So: never state a throughput or latency without saying which statistic it is. "A
 peaking at 2.5K" is an answer; "did 2.36K txn/s" is a number that will not reproduce. `min 6.13` is
 also worth noticing — it is the ramp-up, not a stall.
 
-Groups you will see: `throughput` (`db_tps`, `db_qps`), `connections` (`db_connections`), plus
-latency and engine groups. Use the `key`, not the display name, when you go on to write PromQL.
+**The complete metric set** — 16 metrics in 5 groups, read off a real completed run. This is all
+there is; if a question needs something not on this list, say so rather than inventing a name.
+
+| group | keys | unit |
+|---|---|---|
+| `throughput` | `db_tps`, `db_qps` | txn/s, rows/s |
+| `connections` | `db_connections` | count |
+| `replication` | `db_repl_lag` | s |
+| `system` | `cpu_usage`, `memory_usage`, `disk_read`, `disk_write`, `net_rx`, `net_tx` | %, bytes/s |
+| `stroppy` | `stroppy_vus`, `stroppy_ops`, `stroppy_iter_p99`, `stroppy_query_rate`, `stroppy_latency_p99`, `stroppy_errors` | count, iter/s, ms, q/s |
+
+**There is no p95.** The only latency percentiles that exist are `stroppy_latency_p99` (query
+duration) and `stroppy_iter_p99` (iteration duration). A previous answer reported a "p95" read off a
+Grafana panel; it does not exist in this system and was invented. If you cannot name the metric key,
+you cannot quote the number.
+
+Note the two sides are both here, which is what makes the client-vs-server question answerable in
+one call: `db_tps`/`db_qps` are what the DATABASE did, `stroppy_ops`/`stroppy_query_rate` are what
+the CLIENT drove, and `cpu_usage`/`disk_*` are what the BOX had left. Throughput that is flat while
+CPU sits at 45% is not a saturated server.
 
 ### You can query the metrics directly — use it
 
