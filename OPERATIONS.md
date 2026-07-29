@@ -284,13 +284,32 @@ of them at once. Verify with `./patch-ragflow.sh --check` after touching it.
 ## After recreating a container: re-queue the orphans
 
 `docker compose up` **recreates** rather than restarts, and documents in flight at that moment stay
-`RUNNING` forever — RAGFlow's executor skips anything already RUNNING, so it never retries them.
-Symptom: `pending` stuck at a fixed number with `docker-ragflow-cpu-1` near 0 % CPU.
+`RUNNING` forever. SIGKILL cannot be caught, so the executor never writes a terminal status, and
+RAGFlow's re-parse endpoint refuses anything already RUNNING. Symptom: `pending` stuck at a fixed
+number with `docker-ragflow-cpu-1` near 0 % CPU.
 
-    ./requeue-orphans.py --dry-run    # show what would be re-queued
-    ./requeue-orphans.py              # re-trigger parsing (does NOT delete chunks)
+    ./requeue-orphans.py --dry-run              # report only
+    ./requeue-orphans.py                        # repair
+    ./requeue-orphans.py --stale-minutes 30     # be more conservative about "dead"
+
+It deletes the dead task rows, marks the documents FAIL with a reason, then re-queues — and verifies
+by re-reading, rather than trusting the POST.
+
+**Three things here are counter-intuitive and were each got wrong once:**
+
+* **`document.run` is a projection of the task rows, not a fact.** The API server rewrites each
+  document from its tasks every ~6 s, so marking a document FAIL while a stale task row exists is
+  undone within seconds (36 of 45 were back to RUNNING twelve seconds later). Delete the tasks first.
+* **`document.update_time` is not a liveness signal.** It advances every ~6 s from that same thread —
+  measured +50.8 s over a 50 s window on a document frozen at `progress 0.8`. Use `task.update_time`,
+  which only the owning executor writes (live 0–4 min stale, dead 43–161 min).
+* **Re-parse DELETES the document's chunks** (`docStoreConn.delete({"doc_id": id})`). Correct for a
+  document stuck mid-embed, since its chunks are a partial write — but it is not an incremental
+  top-up, so do not point this at a DONE document.
 
 Only run it when nothing is genuinely parsing; mid-session a RUNNING doc probably has a live worker.
+The 15-minute default is deliberately generous: a duplicated parse costs CPU, a wrongly-skipped
+document is lost forever.
 
 ## Rules and gotchas (learned the hard way)
 - The "Book" and "Paper" chunk methods REJECT .md files (doc/docx/pdf/txt only). The ingest

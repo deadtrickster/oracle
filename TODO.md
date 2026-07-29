@@ -897,7 +897,38 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       the mirror. Per G4.4 policy these are KEPT and allowed to fail visibly rather than dropped:
       a failure that vanishes is not a decision, it is amnesia. Ids accumulate in
       `corpus/arxiv-needs-ocr.txt` for a deliberate OCR pass.
-- [ ] **45 documents stall at `progress 0.8` and stay RUNNING forever — a failure that never fails.**
+- [x] **45 documents stalled at `progress 0.8` and stayed RUNNING forever — FIXED 2026-07-30.**
+      Root cause was two layers deep, and the first layer was a comment I had written and never
+      checked.
+
+      **Layer 1 — the repair tool reported success for 45 refusals.** `requeue-orphans.py` POSTed the
+      re-parse endpoint and printed "re-queued 45" while the API returned
+      `{"code":102,"message":"Can't parse document that is currently being processed"}` for every one.
+      A comment in the script asserted *"code 102 is a warning (already queued), the re-queue still
+      lands"* — an assumption, never verified, load-bearing for the tool's entire purpose. Proof it
+      never landed: the new container's executors ran 1,101 tasks and never once mention these ids,
+      and the Redis stream was empty. It now checks `code == 0` and re-reads the rows afterwards.
+
+      **Layer 2 — `document.run` is a projection of the task rows, not a fact.** The API server runs
+      a progress-sync thread that rewrites each document from its tasks every ~6s. So marking a
+      document FAIL to get it past the endpoint's RUNNING guard is undone almost immediately:
+      measured 36 of 45 back to RUNNING twelve seconds later. The dead **task** rows have to be
+      deleted first — which is exactly what RAGFlow's own endpoint does
+      (`TaskService.filter_delete([Task.doc_id == id])`) before enqueuing.
+
+      **The liveness signal also had to move.** `document.update_time` advances every ~6s whether or
+      not anything happens (that same sync thread) — measured +50.8s over a 50s window on a document
+      frozen at 0.8. Any staleness test against it calls every stuck document freshly alive, which is
+      what hid these for hours. `task.update_time` is written only by the owning executor, and the
+      separation is stark: live tasks 0–4 min stale, dead ones 43 and 161 min.
+
+      Outcome: all 45 resolved — some DONE with chunks, the rest FAILED with a *named* reason. RUNNING
+      went to 0 and no document with a stale task remains. All 296 FAILED are the NUL case; none carry
+      the "abandoned without a terminal status" marker, i.e. every failure has a real cause now.
+
+      Still open upstream: **no task should exit without writing DONE or FAILED.** SIGKILL cannot be
+      caught, so the durable fix is a reaper — RAGFlow should treat a task whose executor heartbeat
+      has expired as failed, rather than leaving a row that its own sync thread keeps calling alive.
       Found 2026-07-30. The queue drains steadily (635 → 517 → 429 → 351 → 243 → 160) and then stops
       dead at exactly 45, twice in one night, with `docker-ragflow-cpu-1` idle at ~1% CPU. Not a
       backlog: nothing is working them.
