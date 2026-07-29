@@ -897,6 +897,33 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       the mirror. Per G4.4 policy these are KEPT and allowed to fail visibly rather than dropped:
       a failure that vanishes is not a decision, it is amnesia. Ids accumulate in
       `corpus/arxiv-needs-ocr.txt` for a deliberate OCR pass.
+- [ ] **45 documents stall at `progress 0.8` and stay RUNNING forever — a failure that never fails.**
+      Found 2026-07-30. The queue drains steadily (635 → 517 → 429 → 351 → 243 → 160) and then stops
+      dead at exactly 45, twice in one night, with `docker-ragflow-cpu-1` idle at ~1% CPU. Not a
+      backlog: nothing is working them.
+
+      They are the *same 45 ids* each time (`2607.16692`, `2603.12451`, `2601.09128`, `2607.17300`…).
+      `requeue-orphans.py` re-triggers them, they climb back to 0.8, and stall in the same place:
+
+          0.8    32 docs   "Finish parsing. | Generate 110 chunks"
+          0.802   6 docs   "Generate 62 chunks | Embedding chunks (4…"
+          0.08    1 doc    "Task has been received."   <- never started at all
+
+      0.8 is the boundary between chunking and embed+insert, so the task dies in embed/insert and
+      never writes a terminal status. **This is the amnesia case in a new costume:** the standing
+      policy is that failures stay visible, and 241 NUL failures do land in FAILED correctly — but
+      these never reach FAILED at all. A document stuck RUNNING forever is worse than a failed one,
+      because `ingest-status.py` reads it as work in progress and it is not.
+
+      Harmless to throughput (45 < `ARXIV_MAX_PENDING=200`, so cycles proceed), which is precisely
+      why it could sit there indefinitely unnoticed.
+
+      To investigate: whether the exception escapes the task executor's `try` that calls
+      `set_progress(..., -1)`, and whether these 45 are the NUL set (likely — insert-time rejection
+      is the same failure mode, just on a path that does not mark the document). If so, fixing NUL at
+      extraction removes most of them, but the missing terminal status is a separate bug and needs its
+      own fix: **no task may exit without writing DONE or FAILED.**
+
 - [ ] **The NUL→OCR patch cannot fire for arXiv, and it looked like it could.** Found 2026-07-29 by
       grouping FAILED documents by error text: 38 of 39 failures were
       `chunk error: ['A string literal cannot contain NUL (0x00) characters.']` — the exact symptom
