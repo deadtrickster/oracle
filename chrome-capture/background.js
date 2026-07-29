@@ -922,6 +922,19 @@ async function runSiteCall(call, tab) {
     args: [call.code, ns, a.fn || "", a.args || {}],
     func: async (code, key, fn, args) => {
       try {
+        // Re-install when the SOURCE has changed, not merely when nothing is installed.
+        //
+        // The guard used to be `if (!window[key])`, which made the helper immortal: edit
+        // site-packs/<domain>.js, call it again, and the page keeps running the copy it installed
+        // the first time. The receiver dutifully ships the new source and nothing uses it. It cost
+        // a debugging round — a fix was verified as "shipped", the live behaviour was identical,
+        // and the obvious conclusion (the fix is wrong) was the wrong one.
+        //
+        // A cheap content hash makes the claim true: same source, keep it; different source,
+        // replace it.
+        let h = 0;
+        for (let i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) | 0;
+        if (window[key] && window[key].__srcHash !== h) delete window[key];
         if (!window[key]) {
           // Indirect eval so the helper evaluates at global scope. It is idempotent and guards on
           // its own namespace, so re-injection on every call is cheap and keeps a page that
@@ -929,6 +942,7 @@ async function runSiteCall(call, tab) {
           (0, eval)(code);
         }
         if (!window[key]) return { error: "helper did not install" };
+        window[key].__srcHash = h;
         return await window[key].call(fn, args);
       } catch (e) {
         const msg = String((e && e.message) || e);

@@ -276,25 +276,59 @@
     return await tenantId(r.tenant);
   };
 
+  // Shape the report; do not dump it.
+  //
+  // The first version returned four raw API responses and blew straight through the 60,000-char
+  // tool-result cap on a REAL run — the JSON came back truncated mid-object, which is the one
+  // failure mode this whole layer exists to avoid. The overview snapshot alone carries topology,
+  // every stage and every event; almost none of that answers "how did this run go".
+  //
+  // So pick. Metrics keep their full summary (that is the answer). Everything else is reduced to
+  // identity, status and counts, with a pointer to the call that returns the detail.
+  const pick = (o, keys) => {
+    const out = {};
+    for (const k of keys) if (o && o[k] !== undefined) out[k] = o[k];
+    return out;
+  };
+
   fns.run_report = async ({ runId }) => {
     const run = runId || route().runId;
     if (!run) return { error: "no run id — open a run page or pass runId" };
     const tid = await tenantFromRoute();
     if (!tid) return { error: "could not resolve the tenant from the URL" };
     const call = (procedure, message) => fns.api({ procedure, message });
+    const got = await settle({
+      overview: call("/cloud.v1.api.TestRunOverviewService/GetTestRunOverview",
+                     { tenantId: tid, runId: run }),
+      metrics: call("/cloud.v1.api.TestRunOverviewService/GetRunMetrics",
+                    { tenantId: tid, runId: run }),
+      run: call("/cloud.v1.api.TestRunService/GetTestRun", { tenantId: tid, id: run }),
+      quota: call("/cloud.v1.api.QuotaService/GetRunQuotaUsage", { tenantId: tid, runId: run }),
+    });
+
+    const err = (v) => v && v.error ? { error: v.error } : null;
+    const metrics = got.metrics;
+    const list = ((metrics || {}).metrics || {}).metrics || [];
+    const snap = ((got.overview || {}).snapshot) || {};
+    const rec = ((got.run || {}).testRun || {}).entity || (got.run || {}).testRun || {};
+
     return {
       runId: run,
-      ...(await settle({
-        overview: call("/cloud.v1.api.TestRunOverviewService/GetTestRunOverview",
-                       { tenantId: tid, runId: run }),
-        metrics: call("/cloud.v1.api.TestRunOverviewService/GetRunMetrics",
-                      { tenantId: tid, runId: run }),
-        run: call("/cloud.v1.api.TestRunService/GetTestRun", { tenantId: tid, id: run }),
-        quota: call("/cloud.v1.api.QuotaService/GetRunQuotaUsage",
-                    { tenantId: tid, runId: run }),
-      })),
-      note: "exact values from the panel's API. For a metric OVER TIME — when it changed, how it " +
-            "correlates with CPU — use promql; these are the computed summaries.",
+      // Every metric with all four statistics, because which one a chart shows is exactly what gets
+      // misread: avg 889, max 2524 and last 1845 of ONE series were once reported as three
+      // conflicting throughputs for the same run.
+      metrics: err(metrics) || list.map((m) => pick(m,
+        ["key", "name", "group", "unit", "avg", "min", "max", "last", "higherIsBetter"])),
+      run: err(got.run) || pick(rec, ["id", "name", "status", "createdAt", "timings"]),
+      status: snap.run?.status || rec.status,
+      stages: err(got.overview) ||
+        (snap.stages || []).map((s) => pick(s, ["name", "status", "startedAt", "finishedAt"])),
+      events: (snap.events || []).length,
+      degraded: snap.degradedReasons || [],
+      quota: err(got.quota) || got.quota,
+      note: "Summaries, not series. `avg`/`min`/`max`/`last` are of the WHOLE run — say which one " +
+            "you are quoting. For shape over time use promql; for stage detail or the event log " +
+            "call GetTestRunOverview or QueryLogs directly.",
     };
   };
 

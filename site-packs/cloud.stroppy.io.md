@@ -33,6 +33,25 @@ Only the panel's read-only operations are callable, and that list is generated f
 spec, so an operation that changes something is not merely discouraged, it is absent. If you need
 something the list does not have — starting a run, editing a preset — say so and let the user do it.
 
+### Every metric has four numbers — say which one you mean
+
+`run_report` returns each metric as `avg`, `min`, `max` and `last` over the whole run. A chart shows
+ONE of those, and which one is rarely labelled. Measured on a real completed run:
+
+    db_tps   avg 889.13   max 2523.93   min 6.13   last 1845.33   txn/s
+
+Those are the same series. This is the origin of a genuine failure: one run was reported as doing
+"2.36K tx/s", "841 tx/s" and "1.8K tx/s" from three different views, and it looked like the panel
+contradicting itself. It was max, avg and last — three correct answers to three different questions,
+read off charts and presented as rivals.
+
+So: never state a throughput or latency without saying which statistic it is. "Averaged 889 txn/s,
+peaking at 2.5K" is an answer; "did 2.36K txn/s" is a number that will not reproduce. `min 6.13` is
+also worth noticing — it is the ramp-up, not a stall.
+
+Groups you will see: `throughput` (`db_tps`, `db_qps`), `connections` (`db_connections`), plus
+latency and engine groups. Use the `key`, not the display name, when you go on to write PromQL.
+
 ### You can query the metrics directly — use it
 
 `metric_names` lists the series a run actually recorded; `promql` runs a query against them and
@@ -90,7 +109,7 @@ guessing labels. Use `navigate` when the grammar below answers the question.
 | dashboard | `/t/{slug}` |
 | all runs | `/t/{slug}/runs` |
 | one run | `/t/{slug}/runs/{id}` |
-| compare runs | `/t/{slug}/compare?runIds={id1},{id2}` — **two or more ids required** |
+| compare runs | `/t/{slug}/compare?runIds={id1},{id2}` — **two or more ids required**; `runs=` is accepted as an alias |
 | new run | `/t/{slug}/runs/new` |
 | suites | `/t/{slug}/suites`, `/suites/{id}` |
 | quotas | `/t/{slug}/quotas` |
@@ -101,6 +120,14 @@ guessing labels. Use `navigate` when the grammar below answers the question.
 **Run detail tabs** — `?view=` one of `overview`, `pipeline`, `topology`, `logs`, `metrics`,
 `quotas`, `grafana`, `agents`. Logs additionally take `&steps={id}&q={text}`, so
 `?view=logs&q=error` goes straight to the errors.
+
+**The runs list's filter UI is unreachable — use the URL.** Each filter lives inside a column-header
+popover and is not in the DOM until that header is opened, so `form_state` shows no controls and
+there is nothing to type into. That is not a bug and not worth investigating: the whole filter set is
+in the query string below, and building a URL is one step instead of open-popover-type-apply.
+
+**Run rows carry their ids.** In `form_state`, each row's text includes the run's UUID, and its link
+is `/t/{slug}/runs/{id}` — so you can pick a run without `read_page` and without clicking.
 
 **Runs list filters** — `?q=` free text, `status=`, `db=`, `sv=` (stroppy version), `proto=`,
 `trigger=`, `author=` (csv), `sa=`/`sb=` started after/before, `fa=`/`fb=` finished after/before,
@@ -190,9 +217,55 @@ realistic, ratings for what has worked. Then say what you would run AND WHY — 
 its effect, and what result would confirm or refute the hypothesis being tested. A benchmark
 configuration without a hypothesis is just numbers you will be unable to interpret afterwards.
 
+### Building a run in the wizard — the flow, verified end to end
+
+This was driven on the live panel and every step below is what actually worked, in order. Do not
+improvise around it; the wizard is progressive and each stage only reveals the next once the
+previous one is satisfied.
+
+1. `goto /t/{slug}/runs/new`. The bare page has ONE control — the run-name field — and a `Start`
+   button, plus a `Resume` per existing draft. There may be twenty of those; they are all labelled
+   `Resume` and are indistinguishable by text, so do not try to click one by name.
+2. `type_text` the run name, then `click "Start"`. This creates a draft and moves you to
+   `?draft={id}&step=database`.
+3. **Database step.** `click` the engine (`OrioleDB`, `PostgreSQL`, `MySQL`, `MariaDB`, `Picodata`,
+   `YDB`, `YDB Managed`, `CockroachDB`, `No-DB`, `pg-noop`, `External`) — this only reveals the
+   preset list. Then `click` a preset: `OrioleDB single` (one container) or `OrioleDB HA` (master +
+   streaming replica + HAProxy). `Next`.
+4. **Workload step.** Pick a stroppy VERSION FIRST — the preset list does not exist until you do.
+   Release tags are listed newest-first (`5.7.2`, `5.7.1`, …) under a `release`/`commit` toggle.
+   Then `click` a workload preset, e.g. `TPC-C split (bootstrap + workload)`. `Next`.
+5. **Infrastructure step.** `click` a provider: `Docker` (local containers, single host, smoke
+   tests) or `Yandex Cloud` (Terraform-provisioned VMs, real multi-node). Then `click`
+   `Validate topology` — the plan must be confirmed per node, and `Next` DOES NOT APPEAR until it
+   is. When it succeeds the page gains `READY` and `Next`.
+6. **Review step.** Stop. Launching provisions real machines and spends real time; hand the user the
+   configuration and let them press it.
+
+**`wizard_draft` is how you know whether a step worked.** The server returns an `errors` list naming
+exactly what is still missing — `database is required`, `workload is required`, `provider is
+required`, `confirm machine settings for every node: …` — and entries disappear as you satisfy them.
+That is a precise, machine-readable answer to "did my click take effect", and it beats screenshotting
+the page or trusting the click's own report. Call it after each choice.
+
+**Clicking `Next` when the step is unsatisfied does nothing at all**, silently. If a click reports
+that the page did not change, read `wizard_draft` rather than clicking again.
+
 **On the new-run page, the form is readable as data.** `form_state` gives every control: its label,
 type, current value, the options a dropdown offers, whether it is disabled, and the selector to use
-with `type_text`. `wizard_draft` gives the configuration as the SERVER holds it — the form is a
+with `type_text`.
+
+Three things about this panel specifically, learned by driving it:
+
+- **The engine and preset cards are `<button>`s, not a `<select>`** — they come back under
+  `choices`, not `controls`. `controls` on the database step is empty, and that is normal.
+- **`selected` is often absent.** The wizard marks the chosen card with a border colour and nothing
+  else — no `aria-pressed`, no `data-state` — so `form_state` infers it and can be wrong. When it
+  matters, `wizard_draft` is authoritative: it says what the SERVER has, which is what the run will
+  actually use.
+- **Click cards by their leading words.** A card's text includes its whole description (`OrioleDB
+  single BUILTIN Single OrioleDB container (docker).`), and `click` matches on a substring, so
+  `"OrioleDB single"` is enough and is far more robust than pasting the full label. `wizard_draft` gives the configuration as the SERVER holds it — the form is a
 rendering of that draft, and the draft is what a run is actually built from. Between them you can
 see what is set, what is missing and what is still greyed out, and you get selectors that resolved a
 moment ago rather than guesses.

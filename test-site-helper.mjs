@@ -124,8 +124,12 @@ check("the scope is reused, not re-minted per query",
 calls.length = 0;
 const report = await run("run_report", {});
 check("run_report gathers the whole run in one call",
-  report.overview && report.metrics && report.run && report.quota,
+  report.metrics && report.run && report.quota && report.stages !== undefined,
   JSON.stringify(Object.keys(report)));
+// It must SHAPE the response, not forward it. The raw four-call bundle was 60k+ chars on a real
+// run and came back truncated mid-JSON — the exact failure this layer exists to prevent.
+check("and returns a shaped summary, not raw API dumps",
+  JSON.stringify(report).length < 20000, `${JSON.stringify(report).length} chars`);
 const hit = calls.map((c) => c.url.split("/").pop());
 check("it asks for overview, metrics, run and quota",
   ["GetTestRunOverview", "GetRunMetrics", "GetTestRun", "GetRunQuotaUsage"]
@@ -144,7 +148,7 @@ globalThis.fetch = async (url, init) => {
 };
 const partial = await run("run_report", {});
 check("a failing part does not sink the others",
-  Boolean(partial.overview && partial.metrics), JSON.stringify(Object.keys(partial)));
+  Boolean(partial.metrics && partial.run), JSON.stringify(Object.keys(partial)));
 check("and the failing part says so", Boolean(partial.quota?.error),
   JSON.stringify(partial.quota));
 globalThis.fetch = realFetch;
