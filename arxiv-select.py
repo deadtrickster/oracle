@@ -46,6 +46,12 @@ OUT = Path(os.environ.get("ARXIV_TEXT_OUT",
 STATE_DONE = 1          # objects.state: 0 pending, 1 downloaded, 3 superseded (latest-only policy)
 
 
+def safe_stem(paper_id: str) -> str:
+    """The .txt filename stem for a paper id — one definition, used by both the selector and the
+    extractor so 'already extracted' cannot mean two different things."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", paper_id)
+
+
 def where_for(cats: list) -> tuple:
     """SQL + args matching any of `cats` at a token boundary."""
     clauses, args = [], []
@@ -56,23 +62,45 @@ def where_for(cats: list) -> tuple:
     return "(" + " OR ".join(clauses) + ")", args
 
 
-def select(cats: list, limit: int, newest_first: bool = True) -> list:
+def select(cats: list, limit: int, newest_first: bool = True, have: set | None = None) -> list:
+    """Up to `limit` papers NOT already extracted, newest first.
+
+    Pages through the catalogue rather than taking one `LIMIT` window, because the obvious version
+    silently starves. `ORDER BY update_date DESC LIMIT 2000` returns the newest 2,000 every time; on
+    the second run they are all extracted already, the filter removes them, and the result is ONE
+    new paper per cycle — while 305,000 downloaded papers sit outside the window, unreachable
+    forever. The tailer looked like it was drying up when it was looking at the same 2,000 rows.
+
+    So the LIMIT has to bound NEW work, not rows examined.
+    """
     if not STATE.exists():
         print(f"no catalogue at {STATE}", file=sys.stderr)
         return []
+    have = have or set()
     db = sqlite3.connect(f"file:{STATE}?mode=ro", uri=True)
     # No categories = the whole mirror. The mirror is already scoped (all categories, 2022-01 ->
     # 2026-07, latest version only), so "everything downloaded" is a meaningful selection rather
     # than an unbounded one.
     w, args = where_for(cats) if cats else ("1=1", [])
     order = "p.update_date DESC" if newest_first else "p.update_date ASC"
-    rows = db.execute(
-        f"""SELECT o.name, o.paper_id, p.categories, p.update_date
-            FROM objects o JOIN papers p ON p.id = o.paper_id
-            WHERE o.state = ? AND {w}
-            ORDER BY {order} LIMIT ?""",
-        [STATE_DONE] + args + [limit]).fetchall()
-    return rows
+
+    out, offset, page = [], 0, max(limit * 4, 2000)
+    while len(out) < limit:
+        rows = db.execute(
+            f"""SELECT o.name, o.paper_id, p.categories, p.update_date
+                FROM objects o JOIN papers p ON p.id = o.paper_id
+                WHERE o.state = ? AND {w}
+                ORDER BY {order} LIMIT ? OFFSET ?""",
+            [STATE_DONE] + args + [page, offset]).fetchall()
+        if not rows:
+            break                                   # catalogue exhausted
+        for r in rows:
+            if safe_stem(r[1]) not in have:
+                out.append(r)
+                if len(out) >= limit:
+                    break
+        offset += len(rows)
+    return out
 
 
 def extract(name: str, paper_id: str, force: bool) -> str:
@@ -86,7 +114,7 @@ def extract(name: str, paper_id: str, force: bool) -> str:
         # The catalogue is the mirror's record of intent; a file can be absent if the sync was
         # interrupted between download and rename.
         return "missing"
-    dst = OUT / f"{re.sub(r'[^A-Za-z0-9._-]', '_', paper_id)}.txt"
+    dst = OUT / f"{safe_stem(paper_id)}.txt"
     if dst.exists() and dst.stat().st_size > 0 and not force:
         return "skip"
     try:
@@ -147,10 +175,15 @@ def main() -> int:
     if not a.category and not a.all:
         print("give --category, or --all for everything downloaded", file=sys.stderr)
         return 2
-    rows = select(a.category, a.max, newest_first=not a.oldest)
+    # Exclude what is already extracted INSIDE the query paging, so --max bounds new work. Doing it
+    # afterwards means the newest window is re-examined every cycle and almost nothing comes back.
+    OUT.mkdir(parents=True, exist_ok=True)
+    have = set() if a.force else {f.stem for f in OUT.glob("*.txt")}
+    rows = select(a.category, a.max, newest_first=not a.oldest, have=have)
     if not rows:
-        print("nothing selected — is the mirror still downloading this slice?", file=sys.stderr)
-        return 1
+        print("nothing new to extract — the mirror has nothing downloaded that is not already done",
+              file=sys.stderr)
+        return 0
     print(f"{len(rows)} papers selected from {', '.join(a.category) if a.category else 'ALL categories'}")
 
     if a.list:
@@ -164,14 +197,6 @@ def main() -> int:
         print("pdftotext not found (apt install poppler-utils)", file=sys.stderr)
         return 1
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    # In a tailing loop the same head of the list is re-walked every cycle, and stat()ing thousands
-    # of already-extracted files each pass is most of the run time. Drop the ones already on disk
-    # before starting so `--max` bounds NEW work rather than total rows examined.
-    have = {f.stem for f in OUT.glob("*.txt")}
-    if not a.force:
-        rows = [r for r in rows if re.sub(r"[^A-Za-z0-9._-]", "_", r[1]) not in have]
-        print(f"{len(rows)} not yet extracted")
     tally = {"ok": 0, "skip": 0, "missing": 0, "empty": 0, "corrupt": 0, "error": 0}
     for i, (name, pid, _c, _u) in enumerate(rows, 1):
         tally[extract(name, pid, a.force)] += 1

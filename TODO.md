@@ -919,6 +919,23 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       open on its own. Either pause the tailer for the training window or accept the contention
       deliberately — it is `Nice=15`, so it should yield.
 
+- [ ] **[serene] Profile SereneDB INGESTION directly, without RAGFlow** (his plan, 2026-07-29).
+      The arXiv firehose stresses the READ path honestly — real queries, real reranking, a growing
+      index — but every write goes through RAGFlow, so what is being measured on the write side is
+      RAGFlow's parser, its batching and its adapter, not SereneDB. Any insert-rate number from this
+      run is really a number about `serenedb_conn.py`.
+      **Plan:** spin a SECOND SereneDB instance (separate data dir on /mnt/data, separate port) and
+      load it from this corpus directly — no RAGFlow in the path. Feed it with RANDOMISED order
+      rather than the natural one, because the natural order is sorted by paper id and month, which
+      is exactly the friendly case: sequential keys, temporally clustered vectors, and inserts that
+      land in a narrow part of the index. Randomising is what shows how the indexes actually behave.
+      **What to watch:** insert throughput as row count grows, index build/compaction behaviour
+      (`engine_search` maintenance loops appear in its log), on-disk growth vs row count, and
+      whether IVF recall/latency drifts as vectors accumulate out of order. Compare against the
+      RAGFlow-fed instance to separate "SereneDB is slow" from "the adapter is slow".
+      The corpus is already the right fixture: ~140k arXiv chunks with real bge-m3 vectors, growing
+      by thousands per hour, and free to re-read from the store.
+
 - [ ] Run DeepDoc OCR over the `arxiv-needs-ocr.txt` queue.
 - [ ] Decide how wide to go. cs.DB alone is ~72k chunks; the systems slice is ~430k, which would
       double the corpus. Measure retrieval before widening.
