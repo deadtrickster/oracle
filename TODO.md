@@ -1079,7 +1079,38 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       large model while bge-m3 uses 982 MB — and more slots divide `-c` per slot (fine here: chunks
       are far under 2048 tokens). Also `--log-verbosity 4` on that command line is pure overhead.
 
-      Not applied: it needs an `ollama` restart mid-ingest and a decision about the 20.7 GB model.
+      **APPLIED AND IT DID NOT WORK — the hypothesis was wrong.** `OLLAMA_NUM_PARALLEL=8` is in the
+      service environment (drop-in, verified with `systemctl show`), and Ollama 0.31.2 *still* spawns
+      the runner with `-np 1`:
+
+          -c 8192  -np 1  --embedding  -b 2048  -ub 2048  --log-verbosity 4
+
+      Ollama pins embedding models to a single slot regardless of the setting. So concurrency cannot
+      be raised at that layer, and the executors will keep queueing in `httpcore read()`. The drop-in
+      is harmless but does nothing here — bge-m3 is the only model Ollama serves on this box (qwen
+      runs on a separately tuned llama.cpp via `oracle-qwen-next.service`, which is why `ollama ps`
+      does not list it — it is NOT a leaked runner, as first assumed).
+
+      Second correction: raising `EMBEDDING_BATCH_SIZE` past its current 64 will not help much either.
+      `-b/-ub 2048` are TOKEN counts, and at ~250 tokens per chunk a 64-text request is already split
+      into ~8 sequential physical batches on the GPU.
+
+      Measured after the change: 51 docs/min at 61-68% GPU. NOT comparable to the earlier 95 docs/min
+      — the thermal gate was not active then and the paper mix differs — so it is not evidence of a
+      regression, just an uncontrolled window. The honest read is that ~65% GPU means real but modest
+      headroom: perfect batching would buy maybe 1.5x, nowhere near the 8x the worker bump implied.
+
+      **The remaining levers, in order of expected value:**
+      1. **TEI** (`text-embeddings-inference`) — RAGFlow already ships it (`TEI_IMAGE_GPU` is in
+         `.env`) behind a compose profile. Purpose-built for embeddings: real concurrency and dynamic
+         batching, which is exactly what Ollama refuses to do here.
+         **PRECONDITION, non-negotiable:** verify TEI's vectors match Ollama's for bge-m3 on identical
+         text (cosine ~1.0) BEFORE switching. Pooling or normalisation differences would silently mix
+         two embedding spaces into one 647k-chunk index — unretrievable, uncountable, and exactly the
+         class of silent corruption this corpus keeps producing.
+      2. **Two bge-m3 instances**, round-robined. The model is 982 MB and there is 23 GB free; this
+         sidesteps the `-np 1` pin entirely by having two runners.
+      3. Accept it. 51-95 docs/min finishes the shelf without anyone waiting on it.
 
 - [ ] **serened has no symbols under perf** — the binary is in a container, so the host cannot map it
       and every frame comes back as a bare address. That makes the compaction-burst question
