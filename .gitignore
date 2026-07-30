@@ -28,3 +28,6 @@ labels.db
 # feature snapshots are rebuildable from ES (build-junk-features.py) and ~500MB
 features.npz
 *.npz
+
+# perf.data and flamegraphs from profile-ingest.sh — large binaries, machine-specific
+profiles/
