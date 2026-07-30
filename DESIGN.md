@@ -496,6 +496,65 @@ the two heaviest jobs on the box don't contend.
 marker keeps its original role (English/Latin papers via `prep-collection.sh`); it is only the
 Cyrillic-scan lane it lost.
 
+**Challenger, 2026-07-31: baidu/Unlimited-OCR — rejected, on both corpora.** 3B, MIT, R-SWA keeps
+the KV cache constant so it parses dozens of pages per forward pass; claims 93% on OmniDocBench v1.5,
++6% over DeepSeek OCR. Tested with `ocr-compare.py` against the two places extraction actually breaks
+here. It failed differently in each, and neither failure is visible in a benchmark score.
+
+*Exactly what was tested.* Pinned, because "we tried the Baidu OCR model once" is worthless a month
+from now when the weights have moved and the verdict has not.
+
+| | pin |
+|---|---|
+| challenger | `baidu/Unlimited-OCR`, HF revision `07dea832e22aefee32ad281d4b80551282e1c168` (repo last modified 2026-07-29), 6.4 GB, MIT |
+| | paper: arXiv `2606.23050v1`, 22 Jun 2026 — in the mirror at `corpus/arxiv/2606.23050.txt` |
+| | code: `github.com/baidu/Unlimited-OCR`; weights fetched by `setup-unlimited-ocr.sh` |
+| runtime | own venv at `/mnt/data/models/unlimited-ocr/venv`: Python 3.12.13, torch 2.13.0+cu130, transformers 4.57.1 |
+| incumbent | qwen3-vl:30b — `Qwen3-VL-30B-A3B-Instruct-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf` (Unsloth), served by `oracle-qwen-vl.service` |
+| fixtures | 3 arXiv papers `2510.17326`, `2510.22734`, `2510.25401`; 8 pages of Кн.01 sampled at seed `20260721` from the 417 stored transcripts |
+
+Two notes on the runtime pin. The model card asks for torch 2.10 / CUDA 12.9 and `uv` resolved
+2.13.0+cu130; it ran, but the card's own list is also incomplete — it omits `matplotlib`, which
+`trust_remote_code` imports and which therefore blocks loading outright. Both are pinned in
+`setup-unlimited-ocr.sh` so this reproduces offline rather than depending on what PyPI serves today.
+
+*English arXiv papers with a broken CID font map* (`ocr-unlimited.py`, 3 papers). It does fix the
+stated problem — zero NULs, 2–3× more text recovered, real LaTeX — and then invents:
+
+| | chars | NUL | foreign-script |
+|---|---|---|---|
+| pdftotext (incumbent) | 71,559 | 1,568 | 0 |
+| Unlimited-OCR | 190,781 | 0 | **12,533** |
+
+All CJK, in two modes. It switches language mid-sentence and loops: `…more expensive than the
+\(\ell_0\)-space-based NMS,但该函数是 \(\ell_0\) 的连续形式,故该函数是 \(\ell_0\) 的连续形式,故…` (3,807
+runs in one paper). And it emits memorised boilerplate whole — `(1) 2017年1月1日，公司召开2017年第一次临时
+股东大会，并通知全体董事。`, a Chinese shareholders'-meeting sentence, inside a vector-search paper.
+
+*Scanned Cyrillic, 8 seeded pages of Кн.01 against qwen3-vl's stored transcripts.* The prediction was
+that a Baidu model would be worse on Russian than on English. **It was not: zero foreign-script
+characters.** The CJK above is specific to maths-dense English pages, not a general wrong-script
+tendency. Two other defects decide it:
+
+- **Grader text on 4 of 8 pages.** It emits OCR-*evaluation* reasoning as page content: *"The
+  provided OCR content is '____' … not permitted under the 'Stylistic/Background Lines (Ignore)'
+  rule … inconsistent with the Ground Truth."* One page asserts `[No text detected]` and then
+  transcribes §6.6 immediately below it. Training-data contamination from an eval set.
+- **Maths collapses**, which is where this bake-off has always been decided. LaTeX markers per page
+  against qwen3-vl: 46→14, 30→11, 51→18, 52→24, 16→5. Agreement follows exactly — 0.98 and 0.91 on
+  prose-only pages, 0.54–0.67 on maths-dense ones.
+
+So qwen3-vl keeps the lane. The 51 NUL papers stay FAILED rather than take this: broken pdftotext is
+worse *text* and a better *corpus citizen*, because it fails visibly and is marked FAILED, whereas
+this is fluent, confident, and wrong — the same reason marker lost.
+
+**The gate that nearly missed it.** `ocr-unlimited.py` originally accepted all three arXiv papers as
+`ok`: NUL-free, longer than the incumbent, letter ratio 0.54–0.66, no 40-char repetition. Every
+metric said pass. The foreign-script check by codepoint block exists *because of* that run, and only
+staging — writing to `corpus/arxiv-ocr-staging/` and never to `corpus/arxiv/` without `--promote` —
+kept 12,533 hallucinated characters out of the index. A quality gate assembled before seeing the
+failure will not contain it; the staging step is what actually held.
+
 **Where the chunks actually live, and the read/write asymmetry.** RAGFlow stores every chunk in
 **Elasticsearch** (`DOC_ENGINE=elasticsearch`, ES 8.11.3 in `docker-es01-1`, exposed on host
 **`localhost:1200`**, auth `elastic:infini_rag_flow`). All KBs share one tenant index
