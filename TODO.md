@@ -1055,6 +1055,37 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       NOTE the compose file is VENDORED — this edit is lost on a RAGFlow re-checkout, like the
       `DOC_ENGINE` default was. Record it in `patch-ragflow.sh`.
 
+      **PROFILED 2026-07-30 — the 3.8x is Ollama's single parallel slot, not the GPU.** Ran
+      `profile-ingest.sh`. Two independent signals agree:
+
+          read (httpcore/_backends/sync.py:128)   x9      <- executor threads, all blocked on HTTP
+          /usr/local/lib/ollama/llama-server ... -np 1    <- ONE parallel slot
+
+      Eight task executors POST embeddings to Ollama, which serves them from a single lane, so they
+      queue. More workers cannot help; they just wait in a longer line. The system-wide split makes
+      the same point — the embedding stack costs more than the parser and the database combined:
+
+          22.14%  ollama          <- supervisor
+          17.07%  llama-server    <- the bge-m3 runner Ollama spawns (NOT a separate service;
+                                     mistaken for one at first glance)
+          13.24%  python3         <- the 8 task executors
+          11.48%  serened
+           7.23%  swapper (idle)
+
+      39% of a 24-core box on embeddings, for a model `ollama ps` reports as *100% GPU*.
+
+      Fix is `OLLAMA_NUM_PARALLEL` (unset -> defaults to 1) in the ollama unit. Two constraints:
+      **VRAM is nearly full** — 21.7 of 24.4 GB, because a second llama-server holds 20.7 GB for a
+      large model while bge-m3 uses 982 MB — and more slots divide `-c` per slot (fine here: chunks
+      are far under 2048 tokens). Also `--log-verbosity 4` on that command line is pure overhead.
+
+      Not applied: it needs an `ollama` restart mid-ingest and a decision about the 20.7 GB model.
+
+- [ ] **serened has no symbols under perf** — the binary is in a container, so the host cannot map it
+      and every frame comes back as a bare address. That makes the compaction-burst question
+      (steady 100% vs 876% peaks: same work or different?) unanswerable as things stand. Fix by
+      copying the binary out and using `perf report --symfs`, or by profiling inside the container.
+
       **Thermal note:** the duty cycle (500 docs, then 60s idle) was added because the laptop ran
       hot, but the box is 80% idle at 1 worker — the heat came from the earlier 5,000-document
       bursts, not from steady state. Raising workers and keeping the duty cycle is probably the
