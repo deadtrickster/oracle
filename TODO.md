@@ -1100,6 +1100,35 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       regression, just an uncontrolled window. The honest read is that ~65% GPU means real but modest
       headroom: perfect batching would buy maybe 1.5x, nowhere near the 8x the worker bump implied.
 
+      **THIRD CORRECTION, and it inverts the whole thing (his: "we were fighting np 1 already").**
+      DESIGN.md §7 already recorded the measurement, months before tonight:
+
+          1 stream, batch 64   ~100 chunks/s
+          x4 concurrent          52 chunks/s
+          x8 concurrent          33 chunks/s
+
+      bge-m3@Ollama is **overhead**-bound, not GPU-bound — the card sits near 0% during embed. So
+      concurrency does not help, it actively hurts, and Ollama's hard-coded pin is correct behaviour
+      rather than a limitation. Confirmed in `server/sched.go`:
+
+          numParallel := max(int(envconfig.NumParallel()), 1)
+          // Embedding models should always be loaded with parallel=1
+          if !completion { numParallel = 1 }
+
+      **Which means `--workers=8` is probably past the optimum, and I recommended it.** Eight workers
+      = eight concurrent embedding requests = the x8 regime, 3x worse per-request than a single
+      stream. Tonight's 51 docs/min x 52 chunks/doc = ~44 chunks/s, right where the table predicts.
+      The 25 -> 95 docs/min gain was real but it was parse parallelism winning while embedding
+      throughput degraded underneath it.
+
+      NEXT EXPERIMENT (cheap, decisive): sweep `--workers` over 2 / 4 / 8 and measure docs/min. The
+      table predicts 4 beats 8. Parse wants many workers, embed wants exactly one — the optimum is
+      wherever those cross, and it is almost certainly not 8. Note each change recreates the
+      container, so run `requeue-orphans.py` after each step.
+
+      The durable fix is to stop coupling them: many parse workers feeding ONE embedding stream at
+      batch 64. That is an architecture change in RAGFlow, not a config knob.
+
       **The remaining levers, in order of expected value:**
       1. **TEI** (`text-embeddings-inference`) — RAGFlow already ships it (`TEI_IMAGE_GPU` is in
          `.env`) behind a compose profile. Purpose-built for embeddings: real concurrency and dynamic
