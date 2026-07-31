@@ -1121,10 +1121,37 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
       The 25 -> 95 docs/min gain was real but it was parse parallelism winning while embedding
       throughput degraded underneath it.
 
-      NEXT EXPERIMENT (cheap, decisive): sweep `--workers` over 2 / 4 / 8 and measure docs/min. The
-      table predicts 4 beats 8. Parse wants many workers, embed wants exactly one — the optimum is
-      wherever those cross, and it is almost certainly not 8. Note each change recreates the
-      container, so run `requeue-orphans.py` after each step.
+      **SWEPT 2026-07-31, and the answer is that it does not matter.** `workers-sweep.sh`, 8-minute
+      windows, queue drained between every change so nothing could be orphaned:
+
+          workers   docs/min   chunks/s
+          4         34         28
+          2         35         22
+          8         35         27
+
+      Flat. Worker count has no effect anywhere in 2..8. The control worked: the repeat of 8 at the
+      end read 35 against 38 measured hours earlier, so the three points are comparable and this is
+      not drift within the run.
+
+      That kills both hypotheses. Parse parallelism is not the lever (or 8 would beat 2) and embedding
+      contention is not either (or 2 would beat 8). Something serialised and common to every
+      configuration is setting the rate. `--workers=2` is now configured, on the grounds that if
+      throughput is identical then the setting that uses less CPU and makes less heat wins.
+
+      **The bigger number is the one across the night, and it is a hypothesis, not a result.**
+
+          ~23:52   95 docs/min    index ~24k docs
+          ~00:20   51 docs/min
+          ~01:15   38 docs/min
+          ~03:00   34-35 docs/min index ~67k docs
+
+      Monotonic decline as the index grew. But those points were NOT measured under equal conditions
+      (thermal gate off then on, qwen loaded then evicted, different paper mixes), so the only honest
+      statement is: within one controlled run throughput is flat across worker counts, and across the
+      night it fell by roughly 2.7x while the index grew 2.8x. Whether that is index-size decay in
+      SereneDB or an artefact of changing conditions needs a controlled test - the same batch size,
+      the same worker count, measured against index size as the only variable. That is the real
+      question now, and it is a storage-engine question rather than a RAGFlow one.
 
       The durable fix is to stop coupling them: many parse workers feeding ONE embedding stream at
       batch 64. That is an architecture change in RAGFlow, not a config knob.
@@ -1141,16 +1168,35 @@ would be 2.8M chunks against a corpus of 424k. Selection is mandatory and the sc
          sidesteps the `-np 1` pin entirely by having two runners.
       3. Accept it. 51-95 docs/min finishes the shelf without anyone waiting on it.
 
-- [ ] **serened has no symbols under perf** — the binary is in a container, so the host cannot map it
-      and every frame comes back as a bare address. That makes the compaction-burst question
-      (steady 100% vs 876% peaks: same work or different?) unanswerable as things stand. Fix by
-      copying the binary out and using `perf report --symfs`, or by profiling inside the container.
+- [x] **serened has no symbols under perf — RESOLVED 2026-07-31, and it answered three questions.**
+      Built `main` (3b8983e9) in a worktree with the project's own `cmake --preset perf`
+      (RelWithDebInfo, `USE_IPO=Off`, frame pointers incl. leaf), then loaded the live 2.79M-chunk
+      corpus into a second instance with a psql-to-psql COPY pipeline (`serene-loadtest.sh`) so no
+      interpreter sits in the measurement. Details in [[serenedb-perf-harness]].
 
-      **Thermal note:** the duty cycle (500 docs, then 60s idle) was added because the laptop ran
-      hot, but the box is 80% idle at 1 worker — the heat came from the earlier 5,000-document
-      bursts, not from steady state. Raising workers and keeping the duty cycle is probably the
-      right combination; raising workers *and* removing the pause is the thing to do only with the
-      cooling stand in place.
+      **Write throughput is FLAT with index size.** 32 batches, 87k -> 2.79M rows, 4,800-5,453
+      rows/s, mean 4,994, 563s, 55 GB. Only the cold first batch differs. So the overnight 95 -> 35
+      docs/min decay was never SereneDB - those points varied the thermal gate, paper mix and worker
+      count all at once.
+
+      **SereneDB is ~170x faster than the path we feed it through.** 5,186 rows/s direct against
+      ~30 chunks/s via RAGFlow. The ingest ceiling is the embedding hop, which is where the earlier
+      profiling already pointed.
+
+      **"Compaction" is at least two different phases**, which is why the bursts never looked
+      consistent: DuckDB columnar RLE/ALP re-encoding in one, IResearch postings + BM25 merge in the
+      other. We had been comparing samples of different work as if they were the same thing.
+
+      Three upstream findings fell out, each with a handoff in `~/Projects/serenedb/` - PID-1 zombie
+      reaping, the COPY feeder spin, the IVF centroid stall. See [[serenedb-open-bugs]].
+
+- [ ] **SereneDB parallelism ceiling: IVF centroid training is single-threaded.** An 8-writer load
+      collapses to ONE runnable thread at ~100% for up to 9s at a time, repeatedly, on a 24-core box.
+      Profile (triggered on the condition, since a fixed window cannot catch a 9s transient):
+      `sgemm_kernel` + `sgemm_oncopy` 22.7%, `faiss::detail::compute_centroids`, `Codec8bit` - k-means
+      over the 1024-dim vectors plus the sq8 quantiser. Not diagnosed: OpenBLAS pinned to one thread,
+      FAISS without a thread pool, or an index-level lock. Relevant to the arXiv-clustering worry -
+      this IS the clustering step.
 
 - [ ] **[serene] Does arXiv form one tight kernel in the IVF index?** (his concern, 2026-07-29 —
       and the sharpest question asked about this stress test.)

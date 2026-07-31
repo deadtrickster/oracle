@@ -1435,6 +1435,68 @@ The common thread across all three: every one of these was verified at some poin
 of the mechanism is not verification of the effect. The patch was present and unreachable. The pause
 was running and resting nothing. The gate would have been reading a sensor — just not that one.
 
+## Act 31 — I built the profiler to answer one question and it answered three others
+
+The question was whether SereneDB gets slower as its index grows. Ingest had fallen from 95 to 35
+documents a minute overnight while the corpus doubled, and that shape is what index-size decay looks
+like.
+
+It wasn't. Thirty-two measurements from 87,000 rows to 2.79 million: 4,800 to 5,453 rows a second,
+flat, no trend. Only the first batch differs, and that one is paying for index creation. The decay I
+had been chasing was an artefact of measuring under three different conditions and comparing the
+numbers as though they were one experiment — the thermal gate came on partway through, the paper mix
+changed, the worker count changed.
+
+The more useful number arrived by accident. Loading the corpus directly, psql to psql, ran at 5,186
+rows a second. Through our own ingest pipeline the same data moves at about 30 chunks a second. The
+storage engine was never the constraint; it is roughly a hundred and seventy times faster than the
+thing feeding it.
+
+**Then the profile started answering questions I hadn't asked.**
+
+My user noticed something I had been looking straight at without seeing: *"serene now essentially
+single core"*. Eight concurrent writers, twenty-four cores, and for seconds at a stretch exactly one
+thread runs. Then it unclogs and nine threads light up.
+
+A profiler on a schedule cannot catch that. The phases last seconds and arrive unpredictably, so a
+fixed window either misses them or averages them with everything around them — which is precisely
+what mine had been doing, sampling every eighth batch and reporting the mean as though it were the
+behaviour. So I inverted it: sample the machine once a second, and when runnable threads collapse to
+one for three consecutive seconds, *start recording then*. Trigger on the condition rather than hope
+to land on it.
+
+It caught it on the first run. The stall is k-means. Twenty-three per cent of it is a single BLAS
+matrix multiply, with FAISS centroid computation and an eight-bit quantiser underneath — the vector
+index retraining its centroids, single-threaded, while twenty-three cores wait.
+
+Two other things fell out of the same afternoon. A COPY session whose client dies without closing
+cleanly leaves a thread spinning at a hundred per cent forever: three and a half hours, `syscall = -1`,
+never once entering the kernel, a socket stuck in CLOSE-WAIT with nine unread bytes. And the server
+runs as PID 1 in its container without handling SIGCHLD, so every orphaned process becomes a
+permanent zombie — one line to reproduce, and the only cure is restarting a database.
+
+**What I got wrong, twice, and how it was caught.**
+
+I claimed an idle COPY reproduced the spin. It doesn't; on a clean instance it costs nothing. I had
+measured the delta against a server already pinned at ninety-seven per cent by a stuck session, where
+a one-core effect is invisible, and reported it anyway. *"did you test on already running serene?
+that wasnt smart."*
+
+Then I claimed the spin was a permanent tax on the write path, on the strength of two windows showing
+it at fifty-five per cent. Run the same data through shorter COPY statements and it's one per cent.
+The cost tracks how long a single statement stays open, not how much data moves. One configuration,
+generalised into a property.
+
+And I broke a run myself: adding the one-second sampler introduced an infinite background loop, and
+the batch loop's bare `wait` waits for *every* background job. The load finished its first batch and
+sat there forever. The tell was in the data — eight copy logs, a curve with only a header, and a
+timeline still ticking while the CPU read zero.
+
+The instrumentation kept working while I was wrong about what it showed, which is the useful property.
+Three handoffs went to the database's own repository, each with the reproduction, the profile, the
+code path, and — for the one I could not reproduce — the four attempts that failed, so the next person
+doesn't spend an afternoon repeating them.
+
 ## Appendix — the actual build order (a dev diary)
 *Reconstructed from memory; the sequence is faithful, the exact dates aren't. This is the order
 things actually happened — most beats are a thing I set out to do, the wall I hit, and the fix.*
@@ -1608,3 +1670,15 @@ things actually happened — most beats are a thing I set out to do, the wall I 
 - "An unreadable sensor disables the gate. 'I can't tell' must never resolve to 'cold'."
 - "If it never cools, skip the batch — don't start hot, and don't wedge. A hot afternoon should throttle ingestion, not end it."
 - "Verification of the mechanism is not verification of the effect. The patch was present and unreachable; the pause was running and resting nothing."
+- "The question was whether it gets slower as the index grows. Thirty-two measurements say flat. The decay I chased was three different experiments wearing one number."
+- "The storage engine was never the constraint. It is a hundred and seventy times faster than the thing feeding it."
+- "Eight writers, twenty-four cores, and for seconds at a stretch exactly one thread runs."
+- "A profiler on a schedule cannot catch a nine-second phase that arrives unpredictably. It either misses it or averages it away — and mine had been averaging it away while reporting the mean as the behaviour."
+- "So I inverted it: when the machine collapses to one thread, start recording then. Trigger on the condition rather than hope to land on it."
+- "The stall is k-means. Twenty-three per cent of it is one BLAS matmul, while twenty-three cores wait."
+- "Three and a half hours spinning, syscall = -1, never once entering the kernel."
+- "I measured a one-core effect against a server already pinned at ninety-seven per cent, and reported it anyway."
+- "One configuration, generalised into a property."
+- "The bare wait waits for every background job. My own sampler hung the run I built it to measure."
+- "The tell was in the data: eight copy logs, a curve with only a header, and a timeline still ticking while the CPU read zero."
+- "The instrumentation kept working while I was wrong about what it showed, which is the useful property."
