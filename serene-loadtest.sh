@@ -208,6 +208,34 @@ hand_back() {
 }
 hand_back
 
+# Symbols and flamegraphs for every capture. This used to be inline at the bottom of the sharded
+# path, which meant --single never reached it: that branch exits as soon as the COPY finishes. So a
+# fourteen-hour single-COPY run produced .data files and nothing readable beside them - and, since
+# the chown lived in the same block, left them root-owned as well. Both paths call this now.
+postprocess() {
+	[ "$PERF" -eq 1 ] || return 0
+	local COLLAPSE FLAME d b
+	COLLAPSE="$(command -v inferno-collapse-perf || echo "$_owner_home/.cargo/bin/inferno-collapse-perf")"
+	FLAME="$(command -v inferno-flamegraph || echo "$_owner_home/.cargo/bin/inferno-flamegraph")"
+	for d in "$OUT"/write-*.data "$OUT"/compact-*.data "$OUT"/stall*.data "$OUT"/single-fp.data; do
+		[ -s "$d" ] || continue
+		b="$(basename "$d" .data)"
+		# read-perf.sh aggregates across both PMUs. A plain `perf report | head` on this hybrid CPU
+		# reads the E-core table only, and understated one symbol as 35.60% when it was 93.39%.
+		if [ -x "$ORACLE/read-perf.sh" ]; then
+			"$ORACLE/read-perf.sh" "$d" 2>/dev/null | tail -n +3 >"$OUT/$b.symbols.txt"
+		else
+			perf report -i "$d" --stdio --sort symbol --no-children -g none 2>/dev/null |
+				grep -E "^ +[0-9]" | head -25 >"$OUT/$b.symbols.txt"
+		fi
+		if [ -x "$COLLAPSE" ] || command -v "$COLLAPSE" >/dev/null 2>&1; then
+			perf script -i "$d" 2>/dev/null | "$COLLAPSE" 2>/dev/null |
+				"$FLAME" --title "serened main@3b8983e9 $b" >"$OUT/$b.svg" 2>/dev/null
+		fi
+		hand_back
+	done
+}
+
 say "target pid $TARGET_PID, concurrency $CONCURRENCY, $NSHARDS shard(s) -> $OUT"
 
 # True CPU percentage over an interval, from /proc/<pid>/stat deltas. `ps -o pcpu` reports the
@@ -332,6 +360,9 @@ if [ "$SINGLE" -eq 1 ]; then
 	say "single COPY finished after $(($(date +%s) - t0))s"
 	tail -2 "$OUT/copy-single.log" 2>/dev/null
 	say "curve: $OUT/single.tsv"
+	postprocess
+	hand_back
+	say "output in $OUT"
 	exit 0
 fi
 
@@ -415,20 +446,7 @@ done
 kill "$SAMPLER_PID" 2>/dev/null
 say "load done"
 
-if [ "$PERF" -eq 1 ]; then
-	COLLAPSE="$(command -v inferno-collapse-perf || echo "$HOME/.cargo/bin/inferno-collapse-perf")"
-	FLAME="$(command -v inferno-flamegraph || echo "$HOME/.cargo/bin/inferno-flamegraph")"
-	for d in "$OUT"/write-*.data "$OUT"/compact-*.data "$OUT"/stall*.data "$OUT"/single-fp.data; do
-		[ -s "$d" ] || continue
-		b="$(basename "$d" .data)"
-		perf report -i "$d" --stdio --sort symbol --no-children -g none 2>/dev/null |
-			grep -E "^ +[0-9]" | head -25 >"$OUT/$b.symbols.txt"
-		if [ -x "$COLLAPSE" ] || command -v "$COLLAPSE" >/dev/null 2>&1; then
-			perf script -i "$d" 2>/dev/null | "$COLLAPSE" 2>/dev/null |
-				"$FLAME" --title "serened main@3b8983e9 $b" >"$OUT/$b.svg" 2>/dev/null
-		fi
-	done
-fi
+postprocess
 hand_back
 
 say "throughput curve:"
