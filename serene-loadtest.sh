@@ -5,6 +5,7 @@
 #   sudo CONCURRENCY=8 ./serene-loadtest.sh   8 writers at once
 #   sudo ./serene-loadtest.sh 4               only the first 4 shards
 #   ./serene-loadtest.sh --schema-only        create table/index, no load, no root needed
+#   ./serene-loadtest.sh --postprocess DIR    symbols + flamegraphs for an existing run, nothing else
 #
 # ## What this is for
 #
@@ -100,6 +101,11 @@ SCHEMA_ONLY=0
 # one - buffers, WAL, whatever the engine holds until it can flush.
 SINGLE=0
 [ "${1:-}" = "--single" ] && SINGLE=1
+# Post-process an EXISTING run directory and exit: symbols and flamegraphs for every capture in it,
+# nothing loaded, no server touched. Runs that predate postprocess() being reachable from both paths
+# have .data files and nothing readable beside them, and this is how they get caught up.
+POSTPROCESS_DIR=""
+[ "${1:-}" = "--postprocess" ] && POSTPROCESS_DIR="${2:-}"
 # Abort if the server's RSS passes this. The box also runs production RAGFlow and a production
 # SereneDB; letting the OOM killer choose a victim would take those down too. 0 disables.
 MAX_RSS_GB="${MAX_RSS_GB:-100}"
@@ -107,6 +113,59 @@ NSHARDS="${1:-${#SHARDS[@]}}"
 case "$NSHARDS" in '' | *[!0-9]*) NSHARDS=${#SHARDS[@]} ;; esac
 
 say() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*"; }
+
+hand_back() {
+	[ -n "${SUDO_USER:-}" ] && chown -R "$_owner" "$OUT" 2>/dev/null
+	return 0
+}
+
+# Symbols and flamegraphs for every capture. This used to be inline at the bottom of the sharded
+# path, which meant --single never reached it: that branch returns as soon as the COPY finishes. So a
+# fourteen-hour single-COPY run produced .data files and nothing readable beside them - and, since
+# the chown lived in the same block, left them root-owned as well. Both paths call this now, and
+# --postprocess DIR runs it over a directory from before that was true.
+postprocess() {
+	[ "${PERF:-1}" -eq 1 ] || return 0
+	local COLLAPSE FLAME d b
+	COLLAPSE="$(command -v inferno-collapse-perf || echo "$_owner_home/.cargo/bin/inferno-collapse-perf")"
+	FLAME="$(command -v inferno-flamegraph || echo "$_owner_home/.cargo/bin/inferno-flamegraph")"
+	for d in "$OUT"/*.data; do
+		[ -s "$d" ] || continue
+		b="$(basename "$d" .data)"
+		say "  $b ($(du -h "$d" | cut -f1))"
+		# read-perf.sh aggregates across both PMUs. A plain `perf report | head` on this hybrid CPU
+		# reads the E-core table only, and understated one symbol as 35.60% when it was 93.39%.
+		if [ -x "$ORACLE/read-perf.sh" ]; then
+			"$ORACLE/read-perf.sh" "$d" 2>/dev/null | tail -n +3 >"$OUT/$b.symbols.txt"
+		else
+			perf report -i "$d" --stdio --sort symbol --no-children -g none 2>/dev/null |
+				grep -E "^ +[0-9]" | head -25 >"$OUT/$b.symbols.txt"
+		fi
+		say "    $(head -1 "$OUT/$b.symbols.txt" 2>/dev/null | sed 's/^ *//' | cut -c1-64)"
+		if [ -x "$COLLAPSE" ] || command -v "$COLLAPSE" >/dev/null 2>&1; then
+			perf script -i "$d" 2>/dev/null | "$COLLAPSE" 2>/dev/null |
+				"$FLAME" --title "serened main@3b8983e9 $b" >"$OUT/$b.svg" 2>/dev/null
+			[ -s "$OUT/$b.svg" ] && say "    -> $b.svg ($(du -h "$OUT/$b.svg" | cut -f1))"
+		fi
+		hand_back
+	done
+}
+
+# Post-process only. Nothing below this needs a server, a container or a pid, so take it before any
+# of those are checked - the runs that need catching up were made on a target that is long gone.
+if [ -n "$POSTPROCESS_DIR" ]; then
+	OUT="$POSTPROCESS_DIR"
+	[ -d "$OUT" ] || {
+		say "no such directory: $OUT"
+		exit 1
+	}
+	say "post-processing $OUT"
+	postprocess
+	hand_back
+	say "done"
+	exit 0
+fi
+
 psql_src() { docker exec -e PGPASSWORD="$PGPASS" "$SRC_CONTAINER" psql -h "$SRC_HOST" -p "$SRC_PORT" -U postgres "$@"; }
 psql_dst() { docker exec -e PGPASSWORD="$PGPASS" "$SRC_CONTAINER" psql -h "$DST_HOST" -p "$DST_PORT" -U postgres "$@"; }
 
@@ -196,45 +255,14 @@ fi
 # within the same filesystem, and `mv` quietly degrades to a recursive copy that then fails on each
 # 0600 file. What lands is a half-copied directory with the TSVs and none of the perf data.
 #
-# There used to be a single `chown -R` at the very end of the script, inside the flamegraph block.
-# That is the one place it does no good: the 14-hour single-COPY run was interrupted, the EXIT trap
-# fired, the chown never ran, and 643 MB of captures stayed root:root.
+# There used to be a single `chown -R` at the very end of the script, inside the flamegraph block -
+# which is the one place it could never help. `--single` returns as soon as the COPY finishes, well
+# before that block, so a single-COPY run could not reach the chown however cleanly it exited. The
+# 14-hour run finished correctly, exited 0, and left 643 MB of captures root:root anyway.
 #
 # So chown on three occasions: now, so the directory is ours from the start; after every capture, so
 # it can be parsed while the run is still going; and from `cleanup`, which runs on EVERY exit path.
-hand_back() {
-	[ -n "${SUDO_USER:-}" ] && chown -R "$_owner" "$OUT" 2>/dev/null
-	return 0
-}
 hand_back
-
-# Symbols and flamegraphs for every capture. This used to be inline at the bottom of the sharded
-# path, which meant --single never reached it: that branch exits as soon as the COPY finishes. So a
-# fourteen-hour single-COPY run produced .data files and nothing readable beside them - and, since
-# the chown lived in the same block, left them root-owned as well. Both paths call this now.
-postprocess() {
-	[ "$PERF" -eq 1 ] || return 0
-	local COLLAPSE FLAME d b
-	COLLAPSE="$(command -v inferno-collapse-perf || echo "$_owner_home/.cargo/bin/inferno-collapse-perf")"
-	FLAME="$(command -v inferno-flamegraph || echo "$_owner_home/.cargo/bin/inferno-flamegraph")"
-	for d in "$OUT"/write-*.data "$OUT"/compact-*.data "$OUT"/stall*.data "$OUT"/single-fp.data; do
-		[ -s "$d" ] || continue
-		b="$(basename "$d" .data)"
-		# read-perf.sh aggregates across both PMUs. A plain `perf report | head` on this hybrid CPU
-		# reads the E-core table only, and understated one symbol as 35.60% when it was 93.39%.
-		if [ -x "$ORACLE/read-perf.sh" ]; then
-			"$ORACLE/read-perf.sh" "$d" 2>/dev/null | tail -n +3 >"$OUT/$b.symbols.txt"
-		else
-			perf report -i "$d" --stdio --sort symbol --no-children -g none 2>/dev/null |
-				grep -E "^ +[0-9]" | head -25 >"$OUT/$b.symbols.txt"
-		fi
-		if [ -x "$COLLAPSE" ] || command -v "$COLLAPSE" >/dev/null 2>&1; then
-			perf script -i "$d" 2>/dev/null | "$COLLAPSE" 2>/dev/null |
-				"$FLAME" --title "serened main@3b8983e9 $b" >"$OUT/$b.svg" 2>/dev/null
-		fi
-		hand_back
-	done
-}
 
 say "target pid $TARGET_PID, concurrency $CONCURRENCY, $NSHARDS shard(s) -> $OUT"
 
