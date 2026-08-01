@@ -69,6 +69,18 @@ fi
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$OUT_DIR/phase-change-$STAMP"
 mkdir -p "$OUT" || exit 1
+
+# perf needs root, so everything below lands root:root with the .data files at 0600 - unreadable to
+# whoever ran this. A single chown at the end is not enough: it does not run when the script is
+# interrupted, and a root-owned directory cannot even be MOVED by its owner afterwards, because
+# rename(2) needs write permission on the directory itself. So hand it back now, after each capture,
+# and on every exit path.
+hand_back() {
+	[ -n "${SUDO_USER:-}" ] && chown -R "$owner" "$OUT" 2>/dev/null
+	return 0
+}
+trap hand_back EXIT INT TERM
+hand_back
 say() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$OUT/watch.log"; }
 
 runnable() { grep -lc '^[0-9]* ([^)]*) R' /proc/"$TARGET_PID"/task/*/stat 2>/dev/null | wc -l; }
@@ -123,7 +135,7 @@ for i in $(seq 1 "$CAPTURES"); do
 		grep -E "^ +[0-9]+\.[0-9]+%" | head -12 >"${f%.data}.symbols.txt"
 	say "  top: $(head -1 "${f%.data}.symbols.txt" | sed 's/^ *//' | cut -c1-70)"
 	[ "$i" -lt "$CAPTURES" ] && sleep "$GAP"
+	hand_back
 done
 
-chown -R "$owner" "$OUT" 2>/dev/null
 say "done - $OUT"

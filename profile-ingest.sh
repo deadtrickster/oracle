@@ -55,6 +55,17 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$ORACLE/profiles/$STAMP"
 mkdir -p "$OUT"
 
+# The chown at the bottom only runs if the script gets there. perf runs are long and get interrupted,
+# and what is left behind is root:root with the captures at 0600 - unreadable, and unmovable by its
+# owner, since rename(2) on a directory needs write permission on the directory itself. Hand the
+# output back on every exit path instead, and again as each stage finishes.
+hand_back() {
+	[ -n "${SUDO_USER:-}" ] && chown -R "$OWNER" "$OUT" 2>/dev/null
+	return 0
+}
+trap hand_back EXIT INT TERM
+hand_back
+
 say() { printf '%s\n' "$*"; }
 
 have_flame=1
@@ -121,6 +132,7 @@ else
 	"$PY_SPY" record --pid "$target" --duration 15 --rate 99 --idle --format speedscope \
 		--output "$OUT/executor-$target.speedscope.json" >/dev/null 2>&1 || true
 	say "     -> executor-$target.svg"
+	hand_back
 fi
 say
 
@@ -136,6 +148,7 @@ else
 		head -60 >"$OUT/serened.txt"
 	flamegraph_from_perf "$OUT/serened.data" "$OUT/serened.svg" "serened — $STAMP"
 	say "     -> serened.svg, serened.txt"
+	hand_back
 fi
 say
 
@@ -149,8 +162,7 @@ perf report -i "$OUT/system.data" --stdio --sort comm 2>/dev/null | head -30 >"$
 perf report -i "$OUT/system.data" --stdio --sort symbol 2>/dev/null | head -60 >"$OUT/system-by-symbol.txt"
 flamegraph_from_perf "$OUT/system.data" "$OUT/system.svg" "whole machine — $STAMP"
 say "     -> system.svg, system-by-process.txt, system-by-symbol.txt"
-
-chown -R "$OWNER" "$OUT" 2>/dev/null
+hand_back
 
 say
 say "written to $OUT"

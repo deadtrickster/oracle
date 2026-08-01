@@ -130,6 +130,8 @@ say "source and target reachable"
 # container exists to run this load, so that is the right trade against leaking a writer.
 cleanup() {
 	docker exec "$SRC_CONTAINER" pkill -x psql 2>/dev/null
+	# Defined later, so guard: cleanup is trapped before OUT exists.
+	command -v hand_back >/dev/null 2>&1 && hand_back
 }
 trap 'cleanup; say "interrupted - container-side writers stopped"; exit 130' INT TERM
 trap cleanup EXIT
@@ -184,6 +186,28 @@ if ! mkdir -p "$OUT" 2>/dev/null || [ ! -w "$OUT" ]; then
 	say "either run with sudo, or set OUT_DIR=/some/writable/path"
 	exit 1
 fi
+
+# ## Hand the output back to the user who ran this
+#
+# perf needs root, so everything this script writes lands as root:root, and `perf record` creates its
+# .data at 0600. That output is unreadable to the person who invoked it - they cannot parse a capture
+# while the run is going, and cannot even MOVE the directory afterwards: rename(2) on a directory
+# needs write permission on the directory itself, so a root-owned run directory refuses to move even
+# within the same filesystem, and `mv` quietly degrades to a recursive copy that then fails on each
+# 0600 file. What lands is a half-copied directory with the TSVs and none of the perf data.
+#
+# There used to be a single `chown -R` at the very end of the script, inside the flamegraph block.
+# That is the one place it does no good: the 14-hour single-COPY run was interrupted, the EXIT trap
+# fired, the chown never ran, and 643 MB of captures stayed root:root.
+#
+# So chown on three occasions: now, so the directory is ours from the start; after every capture, so
+# it can be parsed while the run is still going; and from `cleanup`, which runs on EVERY exit path.
+hand_back() {
+	[ -n "${SUDO_USER:-}" ] && chown -R "$_owner" "$OUT" 2>/dev/null
+	return 0
+}
+hand_back
+
 say "target pid $TARGET_PID, concurrency $CONCURRENCY, $NSHARDS shard(s) -> $OUT"
 
 # True CPU percentage over an interval, from /proc/<pid>/stat deltas. `ps -o pcpu` reports the
@@ -304,6 +328,7 @@ if [ "$SINGLE" -eq 1 ]; then
 	done
 	wait "$COPY_PID" 2>/dev/null
 	[ "$PERF" -eq 1 ] && [ -n "${FP_PID:-}" ] && kill -INT "$FP_PID" 2>/dev/null && wait "$FP_PID" 2>/dev/null
+	hand_back
 	say "single COPY finished after $(($(date +%s) - t0))s"
 	tail -2 "$OUT/copy-single.log" 2>/dev/null
 	say "curve: $OUT/single.tsv"
@@ -369,6 +394,8 @@ while [ "$i" -lt "$NSHARDS" ]; do
 		cpu_after=$(top -bn1 -p "$TARGET_PID" 2>/dev/null | tail -1 | awk '{print $9}')
 		say "  compaction window captured (serened at ${cpu_after:-?}%)"
 	fi
+	# Per batch, so captures are parseable while the run is still going rather than only at the end.
+	hand_back
 	secs=$((t1 - t0))
 	[ "$secs" -lt 1 ] && secs=1
 	cpu=$(awk -v a="$c0" -v b="$c1" -v s="$secs" -v hz="$HZ" 'BEGIN{printf "%.0f", (b-a)/hz/s*100}')
@@ -401,8 +428,8 @@ if [ "$PERF" -eq 1 ]; then
 				"$FLAME" --title "serened main@3b8983e9 $b" >"$OUT/$b.svg" 2>/dev/null
 		fi
 	done
-	chown -R "${SUDO_USER:-$(id -un)}" "$OUT" 2>/dev/null
 fi
+hand_back
 
 say "throughput curve:"
 column -t "$OUT/curve.tsv" 2>/dev/null | sed 's/^/    /'
