@@ -68,16 +68,35 @@ esac
 #
 # So: aggregate across events, weighted by each event's cycle count, and say how many events there
 # were. `--percentage absolute` keeps percentages comparable across sections.
-events() { perf report -i "$1" --stdio --sort symbol --no-children -g none 2>/dev/null | awk '/^# Samples:/{n++} END{print n+0}'; }
+#
+# AND CONSTRAIN THE COLUMNS, or the symbol is not a usable key.
+#
+# `--sort symbol` still prints whatever other columns the event happens to have, padded to a width
+# computed PER SECTION, with `-` in the empty ones. So the same symbol arrives as a 919-character
+# line from one event and a 2238-character line from the other, and keying on the line splits it in
+# two: ReadableSize() came out as 95.80% and 0.33% instead of once at 96.13%. Stripping trailing
+# whitespace does not fix it - the padding has `-` placeholders embedded in it.
+#
+# `-F overhead,symbol` prints those two fields and nothing else, so the symbol IS the rest of the
+# line and can be used as a key directly.
+FIELDS="-F overhead,symbol"
+# shellcheck disable=SC2086  # FIELDS is two deliberate words, not a path
+events() { perf report -i "$1" --stdio $FIELDS --no-children -g none 2>/dev/null | awk '/^# Samples:/{n++} END{print n+0}'; }
 
 flat() {
-	perf report -i "$1" --stdio --sort symbol --no-children -g none --percentage absolute 2>/dev/null |
+	# shellcheck disable=SC2086  # FIELDS is two deliberate words, not a path
+	perf report -i "$1" --stdio $FIELDS --no-children -g none --percentage absolute 2>/dev/null |
 		awk '
       # One "Event count" line per event section. Accumulate the total ONCE per event, and weight
       # each symbol percentage by the cycles of the event it came from.
       /^# Event count \(approx\.\): /{ ec=$NF; total+=ec; next }
       /^ +[0-9]+\.[0-9]+%/{
         p=$1; sub(/%$/,"",p); sym=$0; sub(/^ +[0-9.]+% +/,"",sym)
+        # Strip trailing padding before using the symbol as a key. perf pads its symbol column to a
+        # width computed PER EVENT SECTION, so on a hybrid CPU the same symbol arrives with two
+        # different amounts of trailing space and lands in two buckets. That is how one capture
+        # reported ReadableSize() twice, at 95.80% and 0.33%, instead of once at 96.13%.
+        sub(/ +$/,"",sym)
         w[sym]+=p*ec              # percent x cycles
       }
       END{ if (total>0) for (s in w) printf "  %6.2f%%  %s\n", w[s]/total, s }
